@@ -12,14 +12,15 @@ try:
     app = create_app()
     
 except Exception as e:
-    print(f"Error creating Flask app: {e}")
+    startup_error = str(e)
+    print(f"Error creating Flask app: {startup_error}")
     # Fallback minimal app for debugging
     from flask import Flask
     app = Flask(__name__)
     
     @app.route('/')
     def debug_info():
-        return f"Deployment Debug - Error: {str(e)}"
+        return f"Deployment Debug - Error: {startup_error}"
 
 # This is the entry point for Vercel
 if __name__ == "__main__":

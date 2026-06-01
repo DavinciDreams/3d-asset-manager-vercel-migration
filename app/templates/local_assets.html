@@ -1,0 +1,446 @@
+{% extends "base_3d.html" %}
+
+{% block title %}Local Assets - 3D Asset Manager{% endblock %}
+
+{% block content %}
+<div class="container mx-auto px-4 py-8">
+    <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 mb-6">
+        <div>
+            <h1 class="text-3xl font-bold text-gray-900">Local Assets</h1>
+            <p class="text-gray-600 mt-1">Browser-persisted test library using IndexedDB.</p>
+        </div>
+        <div class="flex flex-wrap gap-2">
+            <button id="exportMetaBtn" class="bg-gray-700 text-white px-4 py-2 rounded-lg hover:bg-gray-800">
+                <i class="fas fa-file-export mr-2"></i>Export Index
+            </button>
+            <button id="clearAllBtn" class="bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-700">
+                <i class="fas fa-trash mr-2"></i>Clear All
+            </button>
+        </div>
+    </div>
+
+    <div class="grid lg:grid-cols-3 gap-6 mb-8">
+        <section class="lg:col-span-1 bg-white rounded-lg shadow p-6">
+            <h2 class="text-xl font-semibold mb-4">Add Asset</h2>
+            <form id="localUploadForm" class="space-y-4">
+                <div>
+                    <label for="assetName" class="block text-sm font-medium text-gray-700 mb-1">Name</label>
+                    <input id="assetName" type="text" required class="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500" placeholder="Keyboard switch, robot arm...">
+                </div>
+                <div>
+                    <label for="assetDescription" class="block text-sm font-medium text-gray-700 mb-1">Description</label>
+                    <textarea id="assetDescription" rows="3" class="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500" placeholder="Notes for testing and review"></textarea>
+                </div>
+                <div>
+                    <label for="assetTags" class="block text-sm font-medium text-gray-700 mb-1">Tags</label>
+                    <input id="assetTags" type="text" class="w-full border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500" placeholder="props, draft, glb">
+                </div>
+                <div>
+                    <label for="assetFile" class="block text-sm font-medium text-gray-700 mb-1">File</label>
+                    <input id="assetFile" type="file" required accept=".obj,.fbx,.gltf,.glb,.dae,.3ds,.ply,.stl" class="w-full border border-gray-300 rounded-lg px-3 py-2 bg-white">
+                    <p id="storageEstimate" class="text-xs text-gray-500 mt-2"></p>
+                </div>
+                <button type="submit" class="w-full bg-indigo-600 text-white px-4 py-3 rounded-lg font-semibold hover:bg-indigo-700">
+                    <i class="fas fa-plus mr-2"></i>Save Locally
+                </button>
+                <p id="saveStatus" class="text-sm text-gray-600"></p>
+            </form>
+        </section>
+
+        <section class="lg:col-span-2 bg-white rounded-lg shadow p-6">
+            <div class="grid sm:grid-cols-3 gap-4">
+                <div class="bg-indigo-50 border border-indigo-100 rounded-lg p-4">
+                    <p class="text-sm text-indigo-700">Assets</p>
+                    <p id="assetCount" class="text-2xl font-bold text-indigo-900">0</p>
+                </div>
+                <div class="bg-green-50 border border-green-100 rounded-lg p-4">
+                    <p class="text-sm text-green-700">Stored</p>
+                    <p id="storedSize" class="text-2xl font-bold text-green-900">0 B</p>
+                </div>
+                <div class="bg-amber-50 border border-amber-100 rounded-lg p-4">
+                    <p class="text-sm text-amber-700">Previewable</p>
+                    <p id="previewableCount" class="text-2xl font-bold text-amber-900">0</p>
+                </div>
+            </div>
+
+            <div class="flex flex-col sm:flex-row gap-3 mt-6">
+                <input id="searchInput" type="search" class="flex-1 border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500" placeholder="Search local assets">
+                <select id="formatFilter" class="border border-gray-300 rounded-lg px-3 py-2 bg-white">
+                    <option value="">All formats</option>
+                </select>
+            </div>
+        </section>
+    </div>
+
+    <section>
+        <div id="assetGrid" class="grid md:grid-cols-2 xl:grid-cols-3 gap-6"></div>
+        <div id="emptyState" class="bg-white rounded-lg shadow p-12 text-center">
+            <i class="fas fa-cubes text-6xl text-gray-300 mb-4"></i>
+            <h2 class="text-2xl font-bold text-gray-700 mb-2">No local assets yet</h2>
+            <p class="text-gray-500">Upload a model to create a persistent IndexedDB test library.</p>
+        </div>
+    </section>
+</div>
+
+<div id="detailModal" class="fixed inset-0 hidden bg-black bg-opacity-60 z-50 p-4">
+    <div class="bg-white max-w-6xl mx-auto rounded-lg shadow-xl overflow-hidden">
+        <div class="flex items-center justify-between px-6 py-4 border-b">
+            <div>
+                <h2 id="modalTitle" class="text-2xl font-bold text-gray-900"></h2>
+                <p id="modalMeta" class="text-sm text-gray-500"></p>
+            </div>
+            <button id="closeModalBtn" class="text-gray-500 hover:text-gray-900 text-2xl" aria-label="Close">&times;</button>
+        </div>
+        <div class="grid lg:grid-cols-2 gap-6 p-6">
+            <div>
+                <div id="modalViewer" class="model-viewer-large bg-gray-100 flex items-center justify-center"></div>
+            </div>
+            <div class="space-y-4">
+                <div>
+                    <h3 class="font-semibold text-gray-700">Description</h3>
+                    <p id="modalDescription" class="text-gray-600 mt-1"></p>
+                </div>
+                <div>
+                    <h3 class="font-semibold text-gray-700">Tags</h3>
+                    <div id="modalTags" class="flex flex-wrap gap-2 mt-2"></div>
+                </div>
+                <div class="flex flex-wrap gap-3 pt-4">
+                    <button id="downloadBtn" class="bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700">
+                        <i class="fas fa-download mr-2"></i>Download
+                    </button>
+                    <button id="deleteBtn" class="bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-700">
+                        <i class="fas fa-trash mr-2"></i>Delete
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+const DB_NAME = 'asset-manager-local';
+const DB_VERSION = 1;
+const STORE_NAME = 'assets';
+const previewableFormats = new Set(['glb', 'gltf']);
+let dbPromise;
+let assets = [];
+let activeAsset = null;
+let activeObjectUrl = null;
+
+const elements = {
+    form: document.getElementById('localUploadForm'),
+    file: document.getElementById('assetFile'),
+    name: document.getElementById('assetName'),
+    description: document.getElementById('assetDescription'),
+    tags: document.getElementById('assetTags'),
+    status: document.getElementById('saveStatus'),
+    grid: document.getElementById('assetGrid'),
+    empty: document.getElementById('emptyState'),
+    search: document.getElementById('searchInput'),
+    format: document.getElementById('formatFilter'),
+    count: document.getElementById('assetCount'),
+    size: document.getElementById('storedSize'),
+    previewable: document.getElementById('previewableCount'),
+    storage: document.getElementById('storageEstimate'),
+    modal: document.getElementById('detailModal'),
+    modalTitle: document.getElementById('modalTitle'),
+    modalMeta: document.getElementById('modalMeta'),
+    modalViewer: document.getElementById('modalViewer'),
+    modalDescription: document.getElementById('modalDescription'),
+    modalTags: document.getElementById('modalTags'),
+    download: document.getElementById('downloadBtn'),
+    delete: document.getElementById('deleteBtn')
+};
+
+function openDb() {
+    if (dbPromise) return dbPromise;
+    dbPromise = new Promise((resolve, reject) => {
+        const request = indexedDB.open(DB_NAME, DB_VERSION);
+        request.onupgradeneeded = () => {
+            const db = request.result;
+            const store = db.createObjectStore(STORE_NAME, { keyPath: 'id' });
+            store.createIndex('createdAt', 'createdAt');
+            store.createIndex('format', 'format');
+        };
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+    });
+    return dbPromise;
+}
+
+async function idbTx(mode, callback) {
+    const db = await openDb();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, mode);
+        const store = tx.objectStore(STORE_NAME);
+        let result;
+        tx.oncomplete = () => resolve(result);
+        tx.onerror = () => reject(tx.error);
+        result = callback(store);
+    });
+}
+
+function requestToPromise(request) {
+    return new Promise((resolve, reject) => {
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+    });
+}
+
+async function getAllAssets() {
+    const db = await openDb();
+    const tx = db.transaction(STORE_NAME, 'readonly');
+    const rows = await requestToPromise(tx.objectStore(STORE_NAME).getAll());
+    return rows.sort((a, b) => b.createdAt - a.createdAt);
+}
+
+async function putAsset(asset) {
+    await idbTx('readwrite', store => store.put(asset));
+}
+
+async function deleteAsset(id) {
+    await idbTx('readwrite', store => store.delete(id));
+}
+
+async function clearAssets() {
+    await idbTx('readwrite', store => store.clear());
+}
+
+function formatBytes(bytes) {
+    if (!bytes) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB'];
+    const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+    return `${(bytes / Math.pow(1024, index)).toFixed(index ? 1 : 0)} ${units[index]}`;
+}
+
+function extensionFor(fileName) {
+    return fileName.includes('.') ? fileName.split('.').pop().toLowerCase() : 'file';
+}
+
+function tagsFromInput(value) {
+    return value.split(',').map(tag => tag.trim()).filter(Boolean);
+}
+
+function filteredAssets() {
+    const query = elements.search.value.trim().toLowerCase();
+    const format = elements.format.value;
+    return assets.filter(asset => {
+        const text = `${asset.name} ${asset.description} ${asset.tags.join(' ')} ${asset.originalFilename}`.toLowerCase();
+        return (!query || text.includes(query)) && (!format || asset.format === format);
+    });
+}
+
+function renderFormatFilter() {
+    const current = elements.format.value;
+    const formats = Array.from(new Set(assets.map(asset => asset.format))).sort();
+    elements.format.innerHTML = '<option value="">All formats</option>' + formats.map(format => (
+        `<option value="${format}">${format.toUpperCase()}</option>`
+    )).join('');
+    elements.format.value = formats.includes(current) ? current : '';
+}
+
+function renderStats() {
+    const totalBytes = assets.reduce((sum, asset) => sum + asset.size, 0);
+    elements.count.textContent = assets.length;
+    elements.size.textContent = formatBytes(totalBytes);
+    elements.previewable.textContent = assets.filter(asset => previewableFormats.has(asset.format)).length;
+}
+
+function renderAssets() {
+    renderStats();
+    renderFormatFilter();
+    const rows = filteredAssets();
+    elements.empty.classList.toggle('hidden', rows.length > 0);
+    elements.grid.innerHTML = rows.map(asset => `
+        <article class="bg-white rounded-lg shadow overflow-hidden">
+            <button class="local-preview w-full h-48 bg-gray-100 flex items-center justify-center text-left" data-id="${asset.id}">
+                <div class="text-center px-4">
+                    <i class="fas fa-cube text-4xl text-indigo-500 mb-3"></i>
+                    <p class="font-semibold text-gray-800">${escapeHtml(asset.name)}</p>
+                    <p class="text-sm text-gray-500">${asset.format.toUpperCase()} · ${formatBytes(asset.size)}</p>
+                </div>
+            </button>
+            <div class="p-5">
+                <p class="text-sm text-gray-600 min-h-10">${escapeHtml(asset.description || 'No description provided.')}</p>
+                <div class="flex flex-wrap gap-2 mt-3">
+                    ${asset.tags.map(tag => `<span class="bg-indigo-50 text-indigo-700 text-xs px-2 py-1 rounded">${escapeHtml(tag)}</span>`).join('')}
+                </div>
+                <div class="flex gap-2 mt-5">
+                    <button class="local-open flex-1 bg-indigo-600 text-white px-3 py-2 rounded hover:bg-indigo-700" data-id="${asset.id}">Open</button>
+                    <button class="local-download bg-green-600 text-white px-3 py-2 rounded hover:bg-green-700" data-id="${asset.id}" aria-label="Download">
+                        <i class="fas fa-download"></i>
+                    </button>
+                    <button class="local-delete bg-red-600 text-white px-3 py-2 rounded hover:bg-red-700" data-id="${asset.id}" aria-label="Delete">
+                        <i class="fas fa-trash"></i>
+                    </button>
+                </div>
+            </div>
+        </article>
+    `).join('');
+}
+
+function escapeHtml(value) {
+    return String(value).replace(/[&<>"']/g, char => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;'
+    }[char]));
+}
+
+function downloadAsset(asset) {
+    const url = URL.createObjectURL(asset.file);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = asset.originalFilename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function openAsset(asset) {
+    activeAsset = asset;
+    if (activeObjectUrl) URL.revokeObjectURL(activeObjectUrl);
+    activeObjectUrl = URL.createObjectURL(asset.file);
+
+    elements.modalTitle.textContent = asset.name;
+    elements.modalMeta.textContent = `${asset.format.toUpperCase()} · ${formatBytes(asset.size)} · ${new Date(asset.createdAt).toLocaleString()}`;
+    elements.modalDescription.textContent = asset.description || 'No description provided.';
+    elements.modalTags.innerHTML = asset.tags.length
+        ? asset.tags.map(tag => `<span class="bg-indigo-50 text-indigo-700 text-sm px-2 py-1 rounded">${escapeHtml(tag)}</span>`).join('')
+        : '<span class="text-gray-500 text-sm">No tags</span>';
+
+    if (previewableFormats.has(asset.format)) {
+        elements.modalViewer.innerHTML = '';
+        const viewer = document.createElement('model-viewer');
+        viewer.src = activeObjectUrl;
+        viewer.alt = asset.name;
+        viewer.className = 'model-viewer-large';
+        viewer.setAttribute('camera-controls', '');
+        viewer.setAttribute('auto-rotate', '');
+        viewer.setAttribute('shadow-intensity', '1');
+        elements.modalViewer.appendChild(viewer);
+    } else {
+        elements.modalViewer.innerHTML = `
+            <div class="text-center p-8">
+                <i class="fas fa-file-archive text-6xl text-gray-300 mb-4"></i>
+                <p class="text-gray-700 font-semibold">${asset.format.toUpperCase()} preview is not available in-browser</p>
+                <p class="text-gray-500 text-sm mt-2">Download the file to inspect it in a desktop 3D tool.</p>
+            </div>
+        `;
+    }
+
+    elements.modal.classList.remove('hidden');
+}
+
+function closeModal() {
+    elements.modal.classList.add('hidden');
+    elements.modalViewer.innerHTML = '';
+    activeAsset = null;
+    if (activeObjectUrl) {
+        URL.revokeObjectURL(activeObjectUrl);
+        activeObjectUrl = null;
+    }
+}
+
+async function refresh() {
+    assets = await getAllAssets();
+    renderAssets();
+    updateStorageEstimate();
+}
+
+async function updateStorageEstimate() {
+    if (!navigator.storage?.estimate) return;
+    const estimate = await navigator.storage.estimate();
+    const used = formatBytes(estimate.usage || 0);
+    const quota = formatBytes(estimate.quota || 0);
+    elements.storage.textContent = `Browser storage used: ${used} of ${quota}`;
+}
+
+elements.form.addEventListener('submit', async event => {
+    event.preventDefault();
+    const file = elements.file.files[0];
+    if (!file) return;
+
+    const asset = {
+        id: crypto.randomUUID(),
+        name: elements.name.value.trim(),
+        description: elements.description.value.trim(),
+        tags: tagsFromInput(elements.tags.value),
+        originalFilename: file.name,
+        format: extensionFor(file.name),
+        size: file.size,
+        type: file.type || 'application/octet-stream',
+        createdAt: Date.now(),
+        file
+    };
+
+    elements.status.textContent = 'Saving asset locally...';
+    await putAsset(asset);
+    elements.form.reset();
+    elements.status.textContent = 'Saved to IndexedDB.';
+    setTimeout(() => { elements.status.textContent = ''; }, 2500);
+    await refresh();
+});
+
+elements.grid.addEventListener('click', async event => {
+    const button = event.target.closest('button[data-id]');
+    if (!button) return;
+    const asset = assets.find(item => item.id === button.dataset.id);
+    if (!asset) return;
+
+    if (button.classList.contains('local-delete')) {
+        if (confirm(`Delete "${asset.name}" from local storage?`)) {
+            await deleteAsset(asset.id);
+            await refresh();
+        }
+        return;
+    }
+
+    if (button.classList.contains('local-download')) {
+        downloadAsset(asset);
+        return;
+    }
+
+    openAsset(asset);
+});
+
+elements.search.addEventListener('input', renderAssets);
+elements.format.addEventListener('change', renderAssets);
+document.getElementById('closeModalBtn').addEventListener('click', closeModal);
+elements.modal.addEventListener('click', event => {
+    if (event.target === elements.modal) closeModal();
+});
+elements.download.addEventListener('click', () => {
+    if (activeAsset) downloadAsset(activeAsset);
+});
+elements.delete.addEventListener('click', async () => {
+    if (!activeAsset || !confirm(`Delete "${activeAsset.name}" from local storage?`)) return;
+    const id = activeAsset.id;
+    closeModal();
+    await deleteAsset(id);
+    await refresh();
+});
+document.getElementById('clearAllBtn').addEventListener('click', async () => {
+    if (!assets.length || !confirm('Delete all local assets from this browser?')) return;
+    await clearAssets();
+    await refresh();
+});
+document.getElementById('exportMetaBtn').addEventListener('click', () => {
+    const metadata = assets.map(({ file, ...asset }) => asset);
+    const blob = new Blob([JSON.stringify(metadata, null, 2)], { type: 'application/json' });
+    downloadAsset({ file: blob, originalFilename: 'local-asset-index.json' });
+});
+
+refresh().catch(error => {
+    console.error(error);
+    elements.empty.innerHTML = `
+        <i class="fas fa-exclamation-triangle text-5xl text-red-400 mb-4"></i>
+        <h2 class="text-2xl font-bold text-gray-700 mb-2">IndexedDB is unavailable</h2>
+        <p class="text-gray-500">${escapeHtml(error.message || error)}</p>
+    `;
+});
+</script>
+{% endblock %}

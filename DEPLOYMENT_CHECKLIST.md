@@ -34,11 +34,11 @@ In Vercel Dashboard → Project Settings → Environment Variables:
 
 **Variable 1:**
 - Name: `MONGODB_URI`
-- Value: `mongodb+srv://admin:Deep%400210@cluster0.hbtw6u0.mongodb.net/3d_asset_manager?retryWrites=true&w=majority&appName=Cluster0`
+- Value: `mongodb+srv://<username>:<url-encoded-password>@<cluster-host>/<database>?retryWrites=true&w=majority&appName=<app-name>`
 
 **Variable 2:**
 - Name: `SECRET_KEY`
-- Value: `3d-asset-manager-vercel-super-secret-key-2025`
+- Value: generate a new random value with `python -c "import secrets; print(secrets.token_hex(32))"`
 
 **Variable 3:**
 - Name: `FLASK_ENV`
@@ -101,10 +101,8 @@ curl https://your-project-name.vercel.app/api/models
 ---
 
 ## 🛠️ **Your MongoDB Atlas Details:**
-- **Cluster**: `cluster0.hbtw6u0.mongodb.net`
-- **Database**: `3d_asset_manager`
-- **Username**: `admin`
-- **Password**: `Deep@0210`
+- Store connection details only in local `.env` files or Vercel environment variables.
+- Never commit database usernames, passwords, or production Flask secrets.
 - **Storage**: GridFS (for 3D model files)
 
 ---

@@ -139,6 +139,13 @@ def browse():
         
         return render_template('browse.html', models=EmptyPagination(), search='')
 
+
+@main_bp.route('/local-assets')
+def local_assets():
+    """Browser-local asset manager backed by IndexedDB."""
+    return render_template('local_assets.html')
+
+
 @main_bp.route('/model/<model_id>')
 def model_detail(model_id):
     """View model details"""

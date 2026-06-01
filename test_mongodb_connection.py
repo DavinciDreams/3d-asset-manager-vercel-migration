@@ -3,29 +3,21 @@
 Minimal MongoDB connection test for Vercel deployment debugging
 """
 import os
-from urllib.parse import quote_plus
 from pymongo import MongoClient
 
-# Test different connection string formats
 def test_mongodb_connection():
     print("🔌 Testing MongoDB Connection...")
-    
-    # Original connection string from user
-    original_uri = "mongodb+srv://admin:Deep@0210@cluster0.hbtw6u0.mongodb.net/3d_asset_manager?retryWrites=true&w=majority&appName=Cluster0"
-    
-    # Properly URL encoded version
-    password = "Deep@0210"
-    encoded_password = quote_plus(password)
-    encoded_uri = f"mongodb+srv://admin:{encoded_password}@cluster0.hbtw6u0.mongodb.net/3d_asset_manager?retryWrites=true&w=majority&appName=Cluster0"
-    
-    print(f"Original password: {password}")
-    print(f"Encoded password: {encoded_password}")
-    print(f"Connection URI: mongodb+srv://admin:{encoded_password}@cluster0.hbtw6u0.mongodb.net/...")
+
+    mongodb_uri = os.environ.get('MONGODB_URI')
+    if not mongodb_uri:
+        print("❌ MONGODB_URI is not set")
+        print("Set MONGODB_URI to your MongoDB Atlas connection string before running this test.")
+        return False
     
     # Test the connection
     try:
         print("\n🧪 Testing MongoDB connection...")
-        client = MongoClient(encoded_uri, serverSelectionTimeoutMS=10000)
+        client = MongoClient(mongodb_uri, serverSelectionTimeoutMS=10000)
         
         # Test connection
         client.admin.command('ping')
@@ -51,8 +43,7 @@ if __name__ == "__main__":
     
     if success:
         print("\n🎉 SUCCESS: MongoDB connection works!")
-        print("📋 Use this connection string in Vercel:")
-        print("MONGODB_URI=mongodb+srv://admin:Deep%400210@cluster0.hbtw6u0.mongodb.net/3d_asset_manager?retryWrites=true&w=majority&appName=Cluster0")
+        print("📋 Use this same MONGODB_URI value in Vercel environment variables.")
     else:
         print("\n❌ FAILED: Check your MongoDB Atlas configuration")
         print("📋 Troubleshooting steps:")

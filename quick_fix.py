@@ -8,10 +8,7 @@ import sys
 # Add project root to path  
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-# Set environment variables
-os.environ['MONGODB_URI'] = 'mongodb+srv://admin:Deep%400210@cluster0.hbtw6u0.mongodb.net/3d_asset_manager?retryWrites=true&w=majority&appName=Cluster0'
-os.environ['SECRET_KEY'] = '3d-asset-manager-vercel-production-secret-key-2025'
-os.environ['FLASK_ENV'] = 'production'
+os.environ.setdefault('FLASK_ENV', 'production')
 
 def quick_fix_test():
     print("🚀 Quick Fix Test for Model Display...")

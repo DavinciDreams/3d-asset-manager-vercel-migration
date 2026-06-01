@@ -5,17 +5,14 @@ Final Flask app test with correct MongoDB URI
 import os
 import sys
 
-# Set environment variables directly in Python
-os.environ['MONGODB_URI'] = 'mongodb+srv://admin:Deep%400210@cluster0.hbtw6u0.mongodb.net/3d_asset_manager?retryWrites=true&w=majority&appName=Cluster0'
-os.environ['SECRET_KEY'] = '3d-asset-manager-vercel-production-secret-key-2025'
-os.environ['FLASK_ENV'] = 'production'
+os.environ.setdefault('FLASK_ENV', 'production')
 
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 print("🧪 Final Flask App Test for Vercel...")
-print(f"📋 MONGODB_URI: {os.environ['MONGODB_URI'][:50]}...")
-print(f"📋 SECRET_KEY: {os.environ['SECRET_KEY'][:20]}...")
+print(f"📋 MONGODB_URI configured: {'yes' if os.environ.get('MONGODB_URI') else 'no'}")
+print(f"📋 SECRET_KEY configured: {'yes' if os.environ.get('SECRET_KEY') else 'no'}")
 
 try:
     # Test 1: Import the create_app function
@@ -46,11 +43,11 @@ try:
     print(f"   ✓ Found {len(routes)} routes")
     
     print("\n🎉 SUCCESS: Flask app is 100% ready for Vercel deployment!")
-    print("\n📋 Vercel Environment Variables (copy these exactly):")
+    print("\n📋 Vercel Environment Variables:")
     print("MONGODB_URI")
-    print("mongodb+srv://admin:Deep%400210@cluster0.hbtw6u0.mongodb.net/3d_asset_manager?retryWrites=true&w=majority&appName=Cluster0")
+    print("mongodb+srv://<username>:<url-encoded-password>@<cluster-host>/<database>?retryWrites=true&w=majority&appName=<app-name>")
     print("\nSECRET_KEY")
-    print("3d-asset-manager-vercel-production-secret-key-2025")
+    print("<generate-with-python-secrets-token-hex-32>")
     print("\nFLASK_ENV")
     print("production")
     

@@ -49,11 +49,11 @@ Add these **EXACTLY** (copy-paste):
 
 **Variable 1:**
 - **Name**: `MONGODB_URI`
-- **Value**: `mongodb+srv://admin:Deep%400210@cluster0.hbtw6u0.mongodb.net/3d_asset_manager?retryWrites=true&w=majority&appName=Cluster0`
+- **Value**: `mongodb+srv://<username>:<url-encoded-password>@<cluster-host>/<database>?retryWrites=true&w=majority&appName=<app-name>`
 
 **Variable 2:**
 - **Name**: `SECRET_KEY`  
-- **Value**: `3d-asset-manager-vercel-production-secret-key-2025`
+- **Value**: generate a new random value with `python -c "import secrets; print(secrets.token_hex(32))"`
 
 **Variable 3:**
 - **Name**: `FLASK_ENV`

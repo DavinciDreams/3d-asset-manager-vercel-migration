@@ -189,6 +189,7 @@
                 <!-- Desktop Navigation -->
                 <div class="hidden md:flex items-center space-x-6">
                     <a href="{{ url_for('main.browse') }}" class="text-gray-700 hover:text-indigo-600 transition duration-200">Browse</a>
+                    <a href="{{ url_for('main.local_assets') }}" class="text-gray-700 hover:text-indigo-600 transition duration-200">Local Assets</a>
                     {% if current_user.is_authenticated %}
                         <a href="{{ url_for('main.dashboard') }}" class="text-gray-700 hover:text-indigo-600 transition duration-200">Dashboard</a>
                         <a href="{{ url_for('main.upload') }}" class="text-gray-700 hover:text-indigo-600 transition duration-200">Upload</a>
@@ -218,6 +219,9 @@
                         <a href="{{ url_for('main.browse') }}" class="flex-shrink-0 bg-white px-4 py-2 rounded-lg text-sm text-gray-700 hover:text-indigo-600 transition duration-200 shadow-sm">
                             <i class="fas fa-search mr-1"></i>Browse
                         </a>
+                        <a href="{{ url_for('main.local_assets') }}" class="flex-shrink-0 bg-white px-4 py-2 rounded-lg text-sm text-gray-700 hover:text-indigo-600 transition duration-200 shadow-sm">
+                            <i class="fas fa-database mr-1"></i>Local
+                        </a>
                         {% if current_user.is_authenticated %}
                             <a href="{{ url_for('main.dashboard') }}" class="flex-shrink-0 bg-white px-4 py-2 rounded-lg text-sm text-gray-700 hover:text-indigo-600 transition duration-200 shadow-sm">
                                 <i class="fas fa-tachometer-alt mr-1"></i>Dashboard
@@ -234,6 +238,9 @@
                     <!-- Traditional vertical menu -->
                     <a href="{{ url_for('main.browse') }}" class="block px-3 py-2 text-gray-700 hover:text-indigo-600 hover:bg-gray-100 rounded-md transition duration-200">
                         <i class="fas fa-search mr-2"></i>Browse Models
+                    </a>
+                    <a href="{{ url_for('main.local_assets') }}" class="block px-3 py-2 text-gray-700 hover:text-indigo-600 hover:bg-gray-100 rounded-md transition duration-200">
+                        <i class="fas fa-database mr-2"></i>Local Assets
                     </a>
                     {% if current_user.is_authenticated %}
                         <a href="{{ url_for('main.dashboard') }}" class="block px-3 py-2 text-gray-700 hover:text-indigo-600 hover:bg-gray-100 rounded-md transition duration-200">
