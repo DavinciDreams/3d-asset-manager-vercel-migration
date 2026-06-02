@@ -24,7 +24,10 @@ def create_app():
 
     # Configuration
     app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')
-    app.config['MAX_CONTENT_LENGTH'] = 4 * 1024 * 1024  # 4MB (Vercel limit)
+    # Max upload size in MB. Defaults to 100MB (no Vercel 4MB cap on Coolify).
+    # Override with MAX_UPLOAD_MB env var.
+    max_upload_mb = int(os.environ.get('MAX_UPLOAD_MB', '100'))
+    app.config['MAX_CONTENT_LENGTH'] = max_upload_mb * 1024 * 1024
     app.config['ALLOWED_EXTENSIONS'] = {'obj', 'fbx', 'gltf', 'glb', 'dae', '3ds', 'ply', 'stl'}
 
     mongo_uri = os.environ.get('MONGODB_URI')
