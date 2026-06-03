@@ -274,6 +274,14 @@ function getDetailViewer() {
     return container?.querySelector('model-viewer') || null;
 }
 
+// Pick the preferred default clip: prefer one whose name looks like a
+// walk loop, otherwise fall back to the model's first clip.
+function pickDefaultClip(clips) {
+    if (!clips || !clips.length) return null;
+    const walk = clips.find(name => /walk/i.test(name));
+    return walk || clips[0];
+}
+
 // Reveal animation controls if the loaded model has animation clips.
 function setupAnimationControls() {
     const modelViewer = getDetailViewer();
@@ -288,6 +296,13 @@ function setupAnimationControls() {
 
     if (controls) controls.classList.remove('hidden');
 
+    // Default to a walk loop when available (model-viewer loops by default).
+    const defaultClip = pickDefaultClip(clips);
+    if (defaultClip && modelViewer.animationName !== defaultClip) {
+        modelViewer.animationName = defaultClip;
+        modelViewer.play();
+    }
+
     // Populate the clip selector only when there's more than one animation.
     const selectWrap = document.getElementById('animation-select-wrap');
     const select = document.getElementById('animation-select');
@@ -296,7 +311,7 @@ function setupAnimationControls() {
             .map(name => `<option value="${name}">${name}</option>`)
             .join('');
         // Reflect the currently playing clip.
-        if (modelViewer.animationName) select.value = modelViewer.animationName;
+        select.value = modelViewer.animationName || defaultClip;
         if (selectWrap) selectWrap.classList.remove('hidden');
     } else if (selectWrap) {
         selectWrap.classList.add('hidden');
