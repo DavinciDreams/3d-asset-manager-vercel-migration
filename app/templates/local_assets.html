@@ -321,6 +321,8 @@ function openAsset(asset) {
         viewer.setAttribute('camera-controls', '');
         viewer.setAttribute('auto-rotate', '');
         viewer.setAttribute('shadow-intensity', '1');
+        // Autoplay embedded animations (no-op for models without any).
+        viewer.setAttribute('autoplay', '');
         elements.modalViewer.appendChild(viewer);
     } else {
         elements.modalViewer.innerHTML = `

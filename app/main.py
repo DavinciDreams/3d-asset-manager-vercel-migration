@@ -7,6 +7,33 @@ from bson.objectid import ObjectId
 
 main_bp = Blueprint('main', __name__)
 
+
+class Pagination:
+    """Minimal Flask-SQLAlchemy-style pagination object for templates."""
+
+    def __init__(self, items, total, page, per_page):
+        self.items = items
+        self.total = total
+        self.page = page
+        self.per_page = per_page
+        self.pages = (total + per_page - 1) // per_page if per_page else 0
+        self.has_prev = page > 1
+        self.has_next = page < self.pages
+        self.prev_num = page - 1 if self.has_prev else None
+        self.next_num = page + 1 if self.has_next else None
+
+    def iter_pages(self, left_edge=2, left_current=2, right_current=3, right_edge=2):
+        """Yield page numbers for pagination controls, with None for gaps."""
+        last = 0
+        for num in range(1, self.pages + 1):
+            if (num <= left_edge
+                    or (self.page - left_current - 1 < num < self.page + right_current)
+                    or num > self.pages - right_edge):
+                if last + 1 != num:
+                    yield None
+                yield num
+                last = num
+
 @main_bp.route('/')
 def index():
     try:
@@ -85,44 +112,18 @@ def browse():
             user = User.get_by_id(model.user_id)
             model.owner_username = user.username if user else 'Unknown'
 
-        # Calculate pagination info
-        total_pages = (total + 11) // 12  # Ceiling division
-        has_prev = page > 1
-        has_next = page < total_pages
-        
-        # Create pagination object-like structure
-        class Pagination:
-            def __init__(self, items, total, page, per_page):
-                self.items = items
-                self.total = total
-                self.page = page
-                self.per_page = per_page
-                self.pages = (total + per_page - 1) // per_page
-                self.has_prev = page > 1
-                self.has_next = page < self.pages
-                self.prev_num = page - 1 if self.has_prev else None
-                self.next_num = page + 1 if self.has_next else None
-        
         pagination = Pagination(models, total, page, 12)
-        
-        return render_template('browse.html', models=pagination, search=search)
-        
+
     except Exception as e:
         print(f"Browse error: {e}")
         import traceback
         traceback.print_exc()
-        # Return empty pagination on error
-        class EmptyPagination:
-            items = []
-            total = 0
-            pages = 0
-            page = 1
-            has_prev = False
-            has_next = False
-            prev_num = None
-            next_num = None
-        
-        return render_template('browse.html', models=EmptyPagination(), search='')
+        pagination = Pagination([], 0, 1, 12)
+        search = ''
+
+    # Render outside the try so a template error surfaces instead of being
+    # silently swallowed into a misleading "No Models Found" page.
+    return render_template('browse.html', models=pagination, search=search)
 
 
 @main_bp.route('/local-assets')
