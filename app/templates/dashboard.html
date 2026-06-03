@@ -3,8 +3,6 @@
 {% block title %}Dashboard - 3D Asset Manager{% endblock %}
 
 {% block content %}
-<!-- model-viewer web component for dashboard thumbnails -->
-<script type="module" src="https://ajax.googleapis.com/ajax/libs/model-viewer/4.0.0/model-viewer.min.js"></script>
 <style>
     .dashboard-thumb {
         width: 96px;
@@ -12,7 +10,17 @@
         border-radius: 8px;
         background: linear-gradient(135deg, #f3f4f6 0%, #e5e7eb 100%);
         border: 1px solid #e5e7eb;
-        --poster-color: #f3f4f6;
+        overflow: hidden;
+    }
+    .dashboard-thumb-fallback {
+        width: 96px;
+        height: 96px;
+        border-radius: 8px;
+        background: linear-gradient(135deg, #f3f4f6 0%, #e5e7eb 100%);
+        border: 1px solid #e5e7eb;
+        display: flex;
+        align-items: center;
+        justify-content: center;
     }
 </style>
 <div class="max-w-7xl mx-auto px-4 py-8">
@@ -90,20 +98,21 @@
                     {% for model in user_models %}
                     <tr class="hover:bg-gray-50">
                         <td class="px-6 py-4">
-                            <model-viewer
-                                class="dashboard-thumb"
-                                src="{{ url_for('api.view_model', model_id=model.id) }}"
-                                alt="{{ model.name }}"
-                                camera-controls
-                                disable-zoom
-                                {% if model.camera_orbit %}camera-orbit="{{ model.camera_orbit }}"{% else %}auto-rotate{% endif %}
-                                shadow-intensity="0.5"
-                                loading="lazy"
-                                reveal="interaction">
-                                <div slot="poster" class="flex items-center justify-center h-full">
+                            <a href="{{ url_for('main.model_detail', model_id=model.id) }}" class="block dashboard-thumb">
+                                {% if model.thumbnail_file_id %}
+                                <img src="{{ url_for('api.get_thumbnail', model_id=model.id) }}"
+                                     alt="{{ model.name }}"
+                                     class="dashboard-thumb object-contain"
+                                     onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
+                                <div class="dashboard-thumb-fallback" style="display:none;">
                                     <i class="fas fa-cube text-2xl text-indigo-300"></i>
                                 </div>
-                            </model-viewer>
+                                {% else %}
+                                <div class="dashboard-thumb-fallback" title="Open the model and save a default view to generate a thumbnail">
+                                    <i class="fas fa-cube text-2xl text-indigo-300"></i>
+                                </div>
+                                {% endif %}
+                            </a>
                         </td>
                         <td class="px-6 py-4 whitespace-nowrap">
                             <div class="flex items-center">

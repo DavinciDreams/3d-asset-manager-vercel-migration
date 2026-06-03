@@ -100,7 +100,7 @@ class Model3D:
     def __init__(self, name=None, description=None, file_format=None, file_size=None,
                  original_filename=None, user_id=None, is_public=True, _id=None,
                  upload_date=None, download_count=0, gridfs_file_id=None,
-                 camera_orbit=None):
+                 camera_orbit=None, thumbnail_file_id=None):
         self.name = name
         self.description = description
         self.file_format = file_format
@@ -115,6 +115,8 @@ class Model3D:
         # Default <model-viewer> camera-orbit string, e.g. "180deg 75deg 105%".
         # None means "use the viewer's automatic framing".
         self.camera_orbit = camera_orbit
+        # GridFS id of a captured PNG thumbnail. None until first generated.
+        self.thumbnail_file_id = thumbnail_file_id
     
     def save(self):
         """Save model to MongoDB"""
@@ -131,7 +133,8 @@ class Model3D:
             'upload_date': self.upload_date,
             'download_count': self.download_count,
             'gridfs_file_id': self.gridfs_file_id,
-            'camera_orbit': self.camera_orbit
+            'camera_orbit': self.camera_orbit,
+            'thumbnail_file_id': self.thumbnail_file_id
         }
         
         if self.id:
@@ -158,7 +161,14 @@ class Model3D:
                 fs.delete(ObjectId(self.gridfs_file_id))
             except Exception as e:
                 print(f"Error deleting file from GridFS: {e}")
-        
+
+        # Delete thumbnail from GridFS
+        if self.thumbnail_file_id:
+            try:
+                fs.delete(ObjectId(self.thumbnail_file_id))
+            except Exception as e:
+                print(f"Error deleting thumbnail from GridFS: {e}")
+
         # Delete model document
         db.models.delete_one({'_id': ObjectId(self.id)})
     
@@ -219,7 +229,8 @@ class Model3D:
                     upload_date=model_data.get('upload_date'),
                     download_count=model_data.get('download_count', 0),
                     gridfs_file_id=model_data.get('gridfs_file_id'),
-                    camera_orbit=model_data.get('camera_orbit')
+                    camera_orbit=model_data.get('camera_orbit'),
+                    thumbnail_file_id=model_data.get('thumbnail_file_id')
                 )
         except Exception as e:
             print(f"Error getting model by ID: {e}")
@@ -255,7 +266,8 @@ class Model3D:
                 upload_date=model_data.get('upload_date'),
                 download_count=model_data.get('download_count', 0),
                 gridfs_file_id=model_data.get('gridfs_file_id'),
-                camera_orbit=model_data.get('camera_orbit')
+                camera_orbit=model_data.get('camera_orbit'),
+                thumbnail_file_id=model_data.get('thumbnail_file_id')
             ))
         
         return model_objects, total
@@ -287,7 +299,8 @@ class Model3D:
                 upload_date=model_data.get('upload_date'),
                 download_count=model_data.get('download_count', 0),
                 gridfs_file_id=model_data.get('gridfs_file_id'),
-                camera_orbit=model_data.get('camera_orbit')
+                camera_orbit=model_data.get('camera_orbit'),
+                thumbnail_file_id=model_data.get('thumbnail_file_id')
             ))
         
         return model_objects, total

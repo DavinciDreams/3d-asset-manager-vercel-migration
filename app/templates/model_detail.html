@@ -45,6 +45,10 @@
                             class="text-green-600 hover:text-green-800 text-sm font-medium">
                         <i class="fas fa-save mr-1"></i>Save as default view
                     </button>
+                    <button id="reset-default-btn" onclick="resetDefaultView()"
+                            class="text-gray-500 hover:text-gray-700 text-sm">
+                        <i class="fas fa-undo mr-1"></i>Reset to auto
+                    </button>
                     {% endif %}
                 </div>
             </div>
@@ -188,6 +192,10 @@ let detailViewer = null;
 
 // Saved default view angle for this model (empty string if none set yet).
 const SAVED_CAMERA_ORBIT = {{ model.camera_orbit | tojson }};
+// Whether this model already has a stored thumbnail.
+const HAS_THUMBNAIL = {{ (model.thumbnail_file_id is not none) | tojson }};
+// Is the current user the owner? Only owners capture/upload thumbnails.
+const IS_OWNER = {{ (current_user.is_authenticated and current_user.id == model.user_id) | tojson }};
 
 function loadDetailModel(modelId) {
     const container = document.getElementById(`viewer-detail-${modelId}`);
@@ -206,6 +214,15 @@ function loadDetailModel(modelId) {
         if (detailViewer && SAVED_CAMERA_ORBIT) {
             detailViewer.removeAttribute('auto-rotate');
             detailViewer.setAttribute('camera-orbit', SAVED_CAMERA_ORBIT);
+        }
+
+        // Auto-capture a thumbnail on first successful load (owner only,
+        // and only if one doesn't already exist).
+        if (detailViewer && IS_OWNER && !HAS_THUMBNAIL) {
+            detailViewer.addEventListener('load', () => {
+                // Give the renderer a moment to settle at the saved angle.
+                setTimeout(() => captureThumbnail(false), 800);
+            }, { once: true });
         }
 
         console.log('Detail model viewer created successfully');
@@ -230,6 +247,47 @@ function resetDetailCamera() {
     if (modelViewer) {
         modelViewer.resetTurntableRotation();
         modelViewer.jumpCameraToGoal();
+    }
+}
+
+// Capture the current viewer frame as a PNG and upload it as the thumbnail.
+// `notify` controls whether we surface success/failure to the user.
+async function captureThumbnail(notify) {
+    const container = document.getElementById('viewer-detail-{{ model.id }}');
+    const modelViewer = container?.querySelector('model-viewer');
+    if (!modelViewer || typeof modelViewer.toBlob !== 'function') {
+        if (notify) alert('Viewer not ready to capture a thumbnail yet.');
+        return;
+    }
+
+    try {
+        // Render a reasonably small PNG of the current view.
+        const blob = await modelViewer.toBlob({ idealAspect: true, mimeType: 'image/png' });
+        const dataUrl = await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onloadend = () => resolve(reader.result);
+            reader.onerror = reject;
+            reader.readAsDataURL(blob);
+        });
+
+        const resp = await fetch('/api/model/{{ model.id }}/thumbnail', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ image: dataUrl })
+        });
+        const data = await resp.json();
+        if (notify) {
+            if (data.success) {
+                console.log('Thumbnail saved');
+            } else {
+                alert('Thumbnail save failed: ' + (data.error || 'unknown error'));
+            }
+        } else {
+            console.log('Thumbnail auto-captured:', data.success === true);
+        }
+    } catch (err) {
+        console.error('Thumbnail capture error:', err);
+        if (notify) alert('Could not capture thumbnail.');
     }
 }
 
@@ -281,6 +339,8 @@ function saveDefaultView() {
             // Lock the viewer to the just-saved angle.
             modelViewer.removeAttribute('auto-rotate');
             modelViewer.setAttribute('camera-orbit', orbitStr);
+            // Refresh the dashboard thumbnail to match the new default angle.
+            captureThumbnail(true);
             setTimeout(() => { if (btn) { btn.disabled = false; btn.innerHTML = original; } }, 1500);
         } else {
             alert('Error saving view: ' + (data.error || 'Unknown error'));
@@ -289,6 +349,41 @@ function saveDefaultView() {
     })
     .catch(error => {
         alert('Error saving view');
+        console.error('Error:', error);
+        if (btn) { btn.disabled = false; btn.innerHTML = original; }
+    });
+}
+
+// Clear the saved default view so the model reverts to automatic framing.
+function resetDefaultView() {
+    const btn = document.getElementById('reset-default-btn');
+    const original = btn ? btn.innerHTML : '';
+    if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>Resetting...'; }
+
+    fetch('/api/model/{{ model.id }}', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ camera_orbit: '' })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            // Re-enable auto-rotate and let the viewer frame automatically.
+            const container = document.getElementById('viewer-detail-{{ model.id }}');
+            const modelViewer = container?.querySelector('model-viewer');
+            if (modelViewer) {
+                modelViewer.removeAttribute('camera-orbit');
+                modelViewer.setAttribute('auto-rotate', '');
+            }
+            if (btn) { btn.innerHTML = '<i class="fas fa-check mr-1"></i>Reset!'; }
+            setTimeout(() => { if (btn) { btn.disabled = false; btn.innerHTML = original; } }, 1500);
+        } else {
+            alert('Error resetting view: ' + (data.error || 'Unknown error'));
+            if (btn) { btn.disabled = false; btn.innerHTML = original; }
+        }
+    })
+    .catch(error => {
+        alert('Error resetting view');
         console.error('Error:', error);
         if (btn) { btn.disabled = false; btn.innerHTML = original; }
     });

@@ -225,6 +225,95 @@ def update_model(model_id):
         return jsonify({'error': 'Update failed. Please try again.'}), 500
 
 
+@api_bp.route('/model/<model_id>/thumbnail', methods=['POST'])
+@login_required
+def upload_thumbnail(model_id):
+    """Store a client-captured PNG thumbnail for a model (owner only).
+
+    Accepts JSON {"image": "data:image/png;base64,...."} or a raw base64
+    string. Replaces any existing thumbnail.
+    """
+    import base64
+
+    try:
+        model = Model3D.get_by_id(model_id)
+        if not model:
+            return jsonify({'error': 'Model not found'}), 404
+        if model.user_id != current_user.id:
+            return jsonify({'error': 'Access denied'}), 403
+
+        data = request.get_json(silent=True) or {}
+        image = data.get('image', '')
+        if not image:
+            return jsonify({'error': 'No image provided'}), 400
+
+        # Strip a data-URL prefix if present
+        if ',' in image and image.strip().lower().startswith('data:'):
+            image = image.split(',', 1)[1]
+
+        try:
+            png_bytes = base64.b64decode(image)
+        except Exception:
+            return jsonify({'error': 'Invalid image data'}), 400
+
+        # Sanity cap: thumbnails should be small (< 2MB)
+        if not png_bytes or len(png_bytes) > 2 * 1024 * 1024:
+            return jsonify({'error': 'Thumbnail missing or too large'}), 400
+
+        fs = current_app.config['GRIDFS']
+
+        # Remove the previous thumbnail, if any
+        if model.thumbnail_file_id:
+            try:
+                fs.delete(ObjectId(model.thumbnail_file_id))
+            except Exception as e:
+                print(f"Thumbnail cleanup warning: {e}")
+
+        new_id = fs.put(
+            png_bytes,
+            filename=f"thumb_{model_id}.png",
+            content_type='image/png',
+            metadata={'model_id': model_id, 'kind': 'thumbnail'}
+        )
+        model.thumbnail_file_id = str(new_id)
+        model.save()
+
+        return jsonify({'success': True, 'thumbnail_file_id': model.thumbnail_file_id})
+
+    except Exception as e:
+        print(f"API thumbnail upload error: {e}")
+        return jsonify({'error': 'Thumbnail upload failed'}), 500
+
+
+@api_bp.route('/model/<model_id>/thumbnail', methods=['GET'])
+def get_thumbnail(model_id):
+    """Serve a model's PNG thumbnail. 404 if none (frontend shows a fallback)."""
+    try:
+        model = Model3D.get_by_id(model_id)
+        if not model or not model.thumbnail_file_id:
+            return jsonify({'error': 'No thumbnail'}), 404
+
+        # Respect privacy: private models' thumbnails are owner-only
+        if not model.is_public:
+            if not current_user.is_authenticated or model.user_id != current_user.id:
+                return jsonify({'error': 'Access denied'}), 403
+
+        fs = current_app.config['GRIDFS']
+        grid_out = fs.get(ObjectId(model.thumbnail_file_id))
+        png_bytes = grid_out.read()
+
+        response = make_response(png_bytes)
+        response.headers['Content-Type'] = 'image/png'
+        response.headers['Content-Length'] = str(len(png_bytes))
+        # Short cache; thumbnail can change when the default view is re-saved
+        response.headers['Cache-Control'] = 'public, max-age=300'
+        return response
+
+    except Exception as e:
+        print(f"API thumbnail fetch error: {e}")
+        return jsonify({'error': 'Thumbnail fetch failed'}), 404
+
+
 @api_bp.route('/model/<model_id>', methods=['DELETE'])
 @login_required
 def delete_model(model_id):
