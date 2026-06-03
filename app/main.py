@@ -191,7 +191,7 @@ def model_detail(model_id):
 def upload():
     """Upload 3D model"""
     # Per-file size limit (MB) shown in the UI and enforced by the API.
-    max_upload_mb = current_app.config['MAX_CONTENT_LENGTH'] // (1024 * 1024)
+    max_upload_mb = current_app.config['MAX_FILE_BYTES'] // (1024 * 1024)
     if request.method == 'POST':
         try:
             # Get form data
@@ -225,7 +225,7 @@ def upload():
             file_size = len(file_content)
             
             # Check file size (100MB limit)
-            if file_size > current_app.config['MAX_CONTENT_LENGTH']:
+            if file_size > current_app.config['MAX_FILE_BYTES']:
                 flash(f'File too large. Maximum size is {max_upload_mb}MB.', 'error')
                 return render_template('upload.html', all_tags=Model3D.get_user_tags(current_user.id), max_upload_mb=max_upload_mb)
             

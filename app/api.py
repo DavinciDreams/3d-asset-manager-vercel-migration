@@ -1,11 +1,33 @@
 from flask import Blueprint, jsonify, request, current_app, make_response, url_for
 from flask_login import current_user, login_required
+from werkzeug.exceptions import HTTPException
 from app.models import Model3D, User
 from app.openapi import get_openapi_spec
 from bson.objectid import ObjectId
 import io
 
 api_bp = Blueprint('api', __name__)
+
+
+@api_bp.app_errorhandler(413)
+def _request_too_large(error):
+    """Return clean JSON for oversized requests on API routes.
+
+    Flask aborts with 413 (RequestEntityTooLarge) before the view runs when a
+    request body exceeds MAX_CONTENT_LENGTH. Without this, API clients would get
+    an HTML error page and response.json() would throw. Only API routes get the
+    JSON body; other routes keep Flask's default handling.
+    """
+    if request.path.startswith('/api/'):
+        try:
+            limit_mb = current_app.config['MAX_FILE_BYTES'] // (1024 * 1024)
+        except Exception:
+            limit_mb = None
+        msg = 'File too large.'
+        if limit_mb:
+            msg = f'File too large. Maximum size is {limit_mb}MB per file.'
+        return jsonify({'error': msg}), 413
+    return error
 
 
 @api_bp.route('/openapi.json')
@@ -144,7 +166,9 @@ def download_model(model_id):
             'dae': 'application/xml',
             '3ds': 'application/octet-stream',
             'ply': 'application/octet-stream',
-            'stl': 'application/octet-stream'
+            'stl': 'application/octet-stream',
+            'vrm': 'model/gltf-binary',
+            'vrma': 'application/octet-stream'
         }
         
         mimetype = mime_types.get(model.file_format.lower(), 'application/octet-stream')
@@ -190,7 +214,9 @@ def view_model(model_id):
             'dae': 'application/xml',
             '3ds': 'application/octet-stream',
             'ply': 'application/octet-stream',
-            'stl': 'application/octet-stream'
+            'stl': 'application/octet-stream',
+            'vrm': 'model/gltf-binary',
+            'vrma': 'application/octet-stream'
         }
         
         mimetype = mime_types.get(model.file_format.lower(), 'application/octet-stream')
@@ -358,6 +384,31 @@ def get_thumbnail(model_id):
     except Exception as e:
         print(f"API thumbnail fetch error: {e}")
         return jsonify({'error': 'Thumbnail fetch failed'}), 404
+
+
+@api_bp.route('/vrma')
+def list_vrma():
+    """List VRMA animation assets available to apply on a VRM avatar:
+    the current user's own VRMA assets plus all public ones."""
+    try:
+        db = current_app.config['MONGODB_DB']
+        query = {'file_format': 'vrma'}
+        if current_user.is_authenticated:
+            query = {'file_format': 'vrma',
+                     '$or': [{'is_public': True}, {'user_id': current_user.id}]}
+        else:
+            query['is_public'] = True
+
+        docs = list(db.models.find(query).sort('name', 1))
+        items = [{
+            'id': str(d['_id']),
+            'name': d.get('name', 'Untitled'),
+            'view_url': url_for('api.view_model', model_id=str(d['_id'])),
+        } for d in docs]
+        return jsonify({'animations': items})
+    except Exception as e:
+        print(f"API list vrma error: {e}")
+        return jsonify({'animations': []})
 
 
 @api_bp.route('/model/<model_id>', methods=['DELETE'])
@@ -551,7 +602,9 @@ def upload_model():
         base_name = typed_name if single else ''
 
         allowed_extensions = current_app.config['ALLOWED_EXTENSIONS']
-        max_bytes = current_app.config['MAX_CONTENT_LENGTH']
+        # Per-file limit (not the request-body cap), so each file is judged on
+        # its own size regardless of how many are sent.
+        max_bytes = current_app.config['MAX_FILE_BYTES']
         fs = current_app.config['GRIDFS']
 
         uploaded, errors = [], []
@@ -585,6 +638,11 @@ def upload_model():
             'errors': errors,
         }), status
 
+    except HTTPException:
+        # Let Flask's error handlers run (e.g. the 413 handler returns clean
+        # JSON when the request body exceeds MAX_CONTENT_LENGTH). Reading
+        # request.form/files above can raise RequestEntityTooLarge.
+        raise
     except Exception as e:
         print(f"API upload error: {e}")
         import traceback

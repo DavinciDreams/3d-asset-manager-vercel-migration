@@ -62,11 +62,18 @@ def create_app():
 
     # Configuration
     app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')
-    # Max upload size in MB. Defaults to 100MB (no Vercel 4MB cap on Coolify).
-    # Override with MAX_UPLOAD_MB env var.
+
+    # Per-file upload limit in MB. The client uploads one file per HTTP request,
+    # so this is enforced per file (a folder of many files is not summed).
+    # Defaults to 100MB (no Vercel 4MB cap on Coolify). Override with MAX_UPLOAD_MB.
     max_upload_mb = int(os.environ.get('MAX_UPLOAD_MB', '100'))
-    app.config['MAX_CONTENT_LENGTH'] = max_upload_mb * 1024 * 1024
-    app.config['ALLOWED_EXTENSIONS'] = {'obj', 'fbx', 'gltf', 'glb', 'dae', '3ds', 'ply', 'stl'}
+    app.config['MAX_FILE_BYTES'] = max_upload_mb * 1024 * 1024
+
+    # Flask's request-body cap. Because each request carries a single file, this
+    # only needs to exceed one file plus multipart/form-field overhead. Keep it a
+    # bit above the per-file limit so a max-size file is never rejected with 413.
+    app.config['MAX_CONTENT_LENGTH'] = app.config['MAX_FILE_BYTES'] + (5 * 1024 * 1024)
+    app.config['ALLOWED_EXTENSIONS'] = {'obj', 'fbx', 'gltf', 'glb', 'dae', '3ds', 'ply', 'stl', 'vrm', 'vrma'}
 
     mongo_uri, configured_db_name = _build_mongo_uri()
     is_production = os.environ.get('FLASK_ENV') == 'production'

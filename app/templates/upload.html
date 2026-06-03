@@ -63,7 +63,7 @@
                            id="file"
                            name="file"
                            multiple
-                           accept=".obj,.fbx,.gltf,.glb,.dae,.3ds,.ply,.stl"
+                           accept=".obj,.fbx,.gltf,.glb,.dae,.3ds,.ply,.stl,.vrm,.vrma"
                            class="hidden">
                     <!-- Whole folder (webkitdirectory). Same handler, separate input. -->
                     <input type="file"
@@ -86,7 +86,7 @@
                         </button>
                     </div>
                     <p class="text-sm text-gray-500 mt-2">
-                        Supported: OBJ, FBX, GLTF, GLB, DAE, 3DS, PLY, STL
+                        Supported: OBJ, FBX, GLTF, GLB, DAE, 3DS, PLY, STL, VRM, VRMA
                         (Max {{ max_upload_mb }}MB per file)
                     </p>
                     <p class="text-xs text-gray-400 mt-1">
@@ -136,7 +136,7 @@
 </div>
 
 <script>
-const ALLOWED_EXTENSIONS = ['obj', 'fbx', 'gltf', 'glb', 'dae', '3ds', 'ply', 'stl'];
+const ALLOWED_EXTENSIONS = ['obj', 'fbx', 'gltf', 'glb', 'dae', '3ds', 'ply', 'stl', 'vrm', 'vrma'];
 const MAX_UPLOAD_MB = {{ max_upload_mb }};
 const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024;
 
@@ -342,6 +342,42 @@ function showResults(uploaded, errors) {
     });
 }
 
+// Upload a single file in its own request. Returns {model} on success or
+// throws with the server's error message. Using one request per file keeps the
+// size limit per-file (the server's MAX_CONTENT_LENGTH only ever sees one file).
+function uploadSingleFile(file, opts) {
+    return new Promise((resolve, reject) => {
+        const formData = new FormData();
+        formData.append('file', file, file.name);
+        if (opts.name) formData.append('name', opts.name);
+        formData.append('description', opts.description);
+        formData.append('tags', opts.tags);
+        formData.append('is_public', opts.is_public ? 'true' : 'false');
+
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', '/api/upload');
+
+        // Per-file progress: blend the current file's bytes into the overall bar.
+        xhr.upload.addEventListener('progress', (ev) => {
+            if (ev.lengthComputable && typeof opts.onProgress === 'function') {
+                opts.onProgress(ev.loaded / ev.total);
+            }
+        });
+
+        xhr.onload = () => {
+            let result = {};
+            try { result = JSON.parse(xhr.responseText); } catch (_) {}
+            if (xhr.status >= 200 && xhr.status < 300 && result.model) {
+                resolve(result.model);
+            } else {
+                reject(new Error(result.error || `Upload failed (HTTP ${xhr.status})`));
+            }
+        };
+        xhr.onerror = () => reject(new Error('Network error'));
+        xhr.send(formData);
+    });
+}
+
 uploadForm.addEventListener('submit', async (e) => {
     e.preventDefault();
 
@@ -354,54 +390,67 @@ uploadForm.addEventListener('submit', async (e) => {
         nameInput.focus();
         return;
     }
-    if (selectedFiles.some(f => f.size > MAX_UPLOAD_BYTES)) {
-        alert(`One or more files exceed the ${MAX_UPLOAD_MB}MB per-file limit. Remove them and try again.`);
+    // Per-file check up front so oversized files never start uploading.
+    const oversize = selectedFiles.filter(f => f.size > MAX_UPLOAD_BYTES);
+    if (oversize.length) {
+        alert(`${oversize.length} file(s) exceed the ${MAX_UPLOAD_MB}MB per-file limit. Remove them and try again.`);
         return;
     }
 
-    const formData = new FormData();
-    selectedFiles.forEach(f => formData.append('file', f, f.name));
-    if (selectedFiles.length === 1) {
-        formData.append('name', nameInput.value.trim());
-    }
-    formData.append('description', document.getElementById('description').value);
-    formData.append('tags', document.getElementById('tags').value);
-    formData.append('is_public', document.getElementById('is_public').checked ? 'true' : 'false');
+    const single = selectedFiles.length === 1;
+    const opts = {
+        // Only a single-file upload carries a typed name; multi is auto-named.
+        name: single ? nameInput.value.trim() : '',
+        description: document.getElementById('description').value,
+        tags: document.getElementById('tags').value,
+        is_public: document.getElementById('is_public').checked,
+    };
 
     uploadBtn.disabled = true;
     uploadProgress.classList.remove('hidden');
     resultList.classList.add('hidden');
-    progressBar.style.width = '40%';
-    uploadStatus.textContent = `Uploading ${selectedFiles.length} file(s)...`;
+    progressBar.style.width = '0%';
 
-    try {
-        const response = await fetch('/api/upload', { method: 'POST', body: formData });
-        const result = await response.json();
-        progressBar.style.width = '100%';
+    const total = selectedFiles.length;
+    const uploaded = [];
+    const errors = [];
 
-        if (response.ok) {
-            // Single-file shape: {model}. Multi-file shape: {uploaded, errors}.
-            if (result.model) {
-                uploadStatus.textContent = 'Upload successful!';
-                setTimeout(() => { window.location.href = '/dashboard'; }, 1200);
-            } else {
-                const uploaded = result.uploaded || [];
-                const errors = result.errors || [];
-                uploadStatus.textContent = result.message ||
-                    `${uploaded.length} uploaded, ${errors.length} failed.`;
-                showResults(uploaded, errors);
-                if (errors.length === 0) {
-                    setTimeout(() => { window.location.href = '/dashboard'; }, 1800);
-                } else {
-                    uploadBtn.disabled = false;
-                }
-            }
-        } else {
-            throw new Error(result.error || 'Upload failed');
+    // Upload sequentially so a large folder doesn't open hundreds of parallel
+    // connections, and so progress reads naturally as "file N of M".
+    for (let i = 0; i < total; i++) {
+        const file = selectedFiles[i];
+        const label = file.webkitRelativePath || file.name;
+        uploadStatus.textContent = `Uploading ${i + 1} of ${total}: ${label}`;
+
+        try {
+            const model = await uploadSingleFile(file, {
+                ...opts,
+                onProgress: (frac) => {
+                    const overall = ((i + frac) / total) * 100;
+                    progressBar.style.width = overall.toFixed(1) + '%';
+                },
+            });
+            uploaded.push(model);
+        } catch (err) {
+            errors.push({ filename: label, error: err.message });
         }
-    } catch (error) {
-        uploadStatus.textContent = 'Upload failed: ' + error.message;
-        uploadBtn.disabled = false;
+        progressBar.style.width = (((i + 1) / total) * 100).toFixed(1) + '%';
+    }
+
+    progressBar.style.width = '100%';
+    uploadStatus.textContent = `${uploaded.length} of ${total} file(s) uploaded successfully.`;
+
+    if (single && uploaded.length === 1) {
+        // Preserve the original single-file UX: straight to dashboard.
+        setTimeout(() => { window.location.href = '/dashboard'; }, 1000);
+        return;
+    }
+
+    showResults(uploaded, errors);
+    if (errors.length === 0) {
+        setTimeout(() => { window.location.href = '/dashboard'; }, 1800);
+    } else {
+        uploadBtn.disabled = false; // let the user retry the failures
     }
 });
 

@@ -15,6 +15,41 @@
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
         <!-- Enhanced 3D Model Preview -->
         <div class="bg-white rounded-lg shadow-lg p-6">
+        {% if model.file_format == 'vrma' %}
+            <!-- VRMA is an animation clip, not a renderable model. -->
+            <div class="model-viewer-large flex items-center justify-center bg-gray-50">
+                <div class="text-center p-6">
+                    <div class="text-6xl text-indigo-300 mb-4"><i class="fas fa-person-running"></i></div>
+                    <p class="text-gray-700 font-semibold mb-1">VRMA Animation</p>
+                    <p class="text-gray-500 text-sm">This is a VRM animation clip. Open a VRM avatar and choose this
+                       animation from its "Apply animation" menu to preview it.</p>
+                </div>
+            </div>
+        {% elif model.file_format == 'vrm' %}
+            <!-- VRM avatar rendered with the dedicated three-vrm viewer. -->
+            <div id="vrm-viewer-{{ model.id }}" class="model-viewer-large"
+                 style="position:relative;background:linear-gradient(135deg,#f3f4f6 0%,#e5e7eb 100%);">
+                <div id="vrm-loading-{{ model.id }}" class="flex items-center justify-center h-full">
+                    <div class="text-center">
+                        <i class="fas fa-spinner fa-spin text-3xl text-indigo-400 mb-2"></i>
+                        <p class="text-gray-500 text-sm">Loading VRM avatar…</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- VRMA apply controls -->
+            <div class="mt-4 flex flex-wrap items-center gap-3 bg-gray-50 rounded-lg p-3">
+                <label for="vrma-select" class="text-sm text-gray-600">Apply animation:</label>
+                <select id="vrma-select"
+                        class="border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                    <option value="">— None (T-pose) —</option>
+                </select>
+                <button type="button" onclick="stopVrmAnimation()"
+                        class="text-gray-500 hover:text-gray-700 text-sm">
+                    <i class="fas fa-stop mr-1"></i>Stop
+                </button>
+            </div>
+        {% else %}
             <div id="viewer-detail-{{ model.id }}" class="model-viewer-large">
                 <div class="flex items-center justify-center h-full bg-gray-50">
                     <div class="text-center">
@@ -66,9 +101,10 @@
                     {% endif %}
                 </div>
             </div>
-            
+        {% endif %}
+
             <!-- Download Button -->
-            <a href="{{ url_for('api.download_model', model_id=model.id) }}" 
+            <a href="{{ url_for('api.download_model', model_id=model.id) }}"
                class="w-full bg-green-600 text-white py-3 px-6 rounded-lg hover:bg-green-700 transition flex items-center justify-center mt-4">
                 <i class="fas fa-download mr-2"></i>
                 Download Model ({{ "%.2f"|format(model.file_size / 1024 / 1024) }} MB)
@@ -403,6 +439,8 @@ async function captureThumbnail(notify) {
 
 // Auto-load the model on page load
 document.addEventListener('DOMContentLoaded', function() {
+    const fmt = '{{ model.file_format }}';
+    if (fmt === 'vrm' || fmt === 'vrma') return;  // handled by VRM-specific script
     // Small delay to ensure model-viewer is ready
     setTimeout(() => {
         loadDetailModel('{{ model.id }}');
@@ -410,6 +448,80 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 
 </script>
+
+{% if model.file_format == 'vrm' %}
+{% include "_vrm_viewer.html" %}
+<script>
+// Initialize the VRM avatar viewer and wire up the VRMA picker.
+(function () {
+    const MODEL_ID = '{{ model.id }}';
+    const VRM_URL = '{{ url_for("api.view_model", model_id=model.id) }}';
+    let controller = null;
+
+    async function start() {
+        if (!window.VRMViewer) { return false; }
+        controller = await window.VRMViewer.init('vrm-viewer-' + MODEL_ID, VRM_URL, {
+            onLoad: () => {
+                const loading = document.getElementById('vrm-loading-' + MODEL_ID);
+                if (loading) loading.remove();
+                {% if current_user.is_authenticated and current_user.id == model.user_id %}
+                {% if not model.thumbnail_file_id %}
+                // Auto-capture a thumbnail on first load (owner, none yet).
+                setTimeout(captureVrmThumbnail, 1000);
+                {% endif %}
+                {% endif %}
+            },
+            onError: () => {
+                const loading = document.getElementById('vrm-loading-' + MODEL_ID);
+                if (loading) loading.remove();
+            }
+        });
+        window._vrmController = controller;
+        return true;
+    }
+
+    // VRMViewer may still be loading its module when DOMContentLoaded fires.
+    if (window.VRMViewer) start();
+    else window.addEventListener('vrmviewer-ready', start, { once: true });
+
+    // Populate the VRMA dropdown from the user's + public VRMA assets.
+    fetch('/api/vrma')
+        .then(r => r.json())
+        .then(data => {
+            const sel = document.getElementById('vrma-select');
+            if (!sel || !data.animations) return;
+            data.animations.forEach(a => {
+                const opt = document.createElement('option');
+                opt.value = a.view_url;
+                opt.textContent = a.name;
+                sel.appendChild(opt);
+            });
+            sel.addEventListener('change', async () => {
+                if (!controller) return;
+                if (!sel.value) { controller.stopAnimation(); return; }
+                const ok = await controller.applyAnimation(sel.value);
+                if (!ok) alert('Could not apply that animation to this avatar.');
+            });
+        })
+        .catch(() => {});
+
+    window.stopVrmAnimation = function () { if (controller) controller.stopAnimation(); };
+
+    {% if current_user.is_authenticated and current_user.id == model.user_id %}
+    window.captureVrmThumbnail = function () {
+        if (!controller) return;
+        const dataUrl = controller.capturePng();
+        if (!dataUrl) return;
+        fetch('/api/model/' + MODEL_ID + '/thumbnail', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ image: dataUrl })
+        }).then(r => r.json()).then(d => console.log('VRM thumbnail saved:', d.success === true)).catch(() => {});
+    };
+    {% endif %}
+})();
+</script>
+{% endif %}
 
 {% if current_user.is_authenticated and current_user.id == model.user_id %}
 <script>

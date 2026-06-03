@@ -9,7 +9,7 @@ Keep this in sync with ``app/api.py`` when routes change.
 
 # Allowed upload extensions are duplicated from create_app() config so the spec
 # stays self-contained; update both if the list changes.
-ALLOWED_EXTENSIONS = ['obj', 'fbx', 'gltf', 'glb', 'dae', '3ds', 'ply', 'stl']
+ALLOWED_EXTENSIONS = ['obj', 'fbx', 'gltf', 'glb', 'dae', '3ds', 'ply', 'stl', 'vrm', 'vrma']
 
 
 def _model_summary_schema():
@@ -491,16 +491,23 @@ def get_openapi_spec(base_url=''):
                     'tags': ['Upload'],
                     'summary': 'Upload one or more 3D models',
                     'description': (
-                        'Multipart form upload. Repeat the `file` field to upload '
-                        'multiple files in one request (e.g. an entire folder) — '
-                        'each file becomes its own model. Allowed formats: '
+                        'Multipart form upload. Allowed formats: '
                         + ', '.join(ALLOWED_EXTENSIONS)
-                        + '. Size limited per file by server config (MAX_UPLOAD_MB).\n\n'
+                        + '. The size limit (MAX_UPLOAD_MB) is enforced **per '
+                        'file**.\n\n'
+                        '**Recommended:** send one file per request. To upload a '
+                        'folder or many files, issue one request per file — this '
+                        'keeps each upload under the per-file limit and gives '
+                        'per-file progress and error reporting. (The endpoint also '
+                        'accepts several repeated `file` fields in a single '
+                        'request, but then the whole request must fit under the '
+                        'server body cap.)\n\n'
                         '**Naming:** with a single file, `name` is required and '
-                        'used as the model name. With multiple files, `name` is '
-                        'ignored and each model is named from its own filename.\n\n'
-                        '**Response shape:** a single-file upload returns '
-                        '`{success, message, model}`; a multi-file upload returns '
+                        'used as the model name. With multiple files in one '
+                        'request, `name` is ignored and each model is named from '
+                        'its own filename.\n\n'
+                        '**Response shape:** a single-file request returns '
+                        '`{success, message, model}`; a multi-file request returns '
                         '`{success, message, uploaded[], errors[]}`.'
                     ),
                     'security': [{'sessionCookie': []}],
