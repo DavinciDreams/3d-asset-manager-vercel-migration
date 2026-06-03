@@ -35,10 +35,18 @@
                     <i class="fas fa-scroll text-green-500 mr-1"></i>Scroll to zoom • 
                     <i class="fas fa-hand-paper text-purple-500 mr-1"></i>Touch controls
                 </div>
-                <button onclick="resetDetailCamera()" 
-                        class="text-blue-600 hover:text-blue-800 text-sm">
-                    <i class="fas fa-home mr-1"></i>Reset View
-                </button>
+                <div class="flex items-center space-x-3">
+                    <button onclick="resetDetailCamera()"
+                            class="text-blue-600 hover:text-blue-800 text-sm">
+                        <i class="fas fa-home mr-1"></i>Reset View
+                    </button>
+                    {% if current_user.is_authenticated and current_user.id == model.user_id %}
+                    <button id="save-view-btn" onclick="saveDefaultView()"
+                            class="text-green-600 hover:text-green-800 text-sm font-medium">
+                        <i class="fas fa-save mr-1"></i>Save as default view
+                    </button>
+                    {% endif %}
+                </div>
             </div>
             
             <!-- Download Button -->
@@ -178,10 +186,13 @@
 <script>
 let detailViewer = null;
 
+// Saved default view angle for this model (empty string if none set yet).
+const SAVED_CAMERA_ORBIT = {{ model.camera_orbit | tojson }};
+
 function loadDetailModel(modelId) {
     const container = document.getElementById(`viewer-detail-${modelId}`);
     if (!container) return;
-    
+
     try {
         // Use the new model-viewer web component for detail view
         detailViewer = createDetailedModelViewer(`viewer-detail-${modelId}`, modelId, {
@@ -189,7 +200,14 @@ function loadDetailModel(modelId) {
             description: '{{ model.description }}',
             format: '{{ model.file_format }}'
         });
-        
+
+        // Apply the owner's saved default view, if any. Turn off auto-rotate
+        // so the model opens at the saved angle instead of spinning past it.
+        if (detailViewer && SAVED_CAMERA_ORBIT) {
+            detailViewer.removeAttribute('auto-rotate');
+            detailViewer.setAttribute('camera-orbit', SAVED_CAMERA_ORBIT);
+        }
+
         console.log('Detail model viewer created successfully');
     } catch (error) {
         console.error('Failed to load 3D model:', error);
@@ -231,6 +249,49 @@ document.addEventListener('DOMContentLoaded', function() {
 function toggleEditForm() {
     const form = document.getElementById('edit-form');
     if (form) form.classList.toggle('hidden');
+}
+
+// Capture the current camera angle and save it as this model's default view.
+function saveDefaultView() {
+    const container = document.getElementById('viewer-detail-{{ model.id }}');
+    const modelViewer = container?.querySelector('model-viewer');
+    if (!modelViewer || typeof modelViewer.getCameraOrbit !== 'function') {
+        alert('3D viewer is not ready yet. Please wait for the model to load.');
+        return;
+    }
+
+    // getCameraOrbit() returns {theta, phi, radius} in radians/meters.
+    // model-viewer accepts a "Xrad Yrad Zm" string for camera-orbit.
+    const orbit = modelViewer.getCameraOrbit();
+    const orbitStr = `${orbit.theta}rad ${orbit.phi}rad ${orbit.radius}m`;
+
+    const btn = document.getElementById('save-view-btn');
+    const original = btn ? btn.innerHTML : '';
+    if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>Saving...'; }
+
+    fetch('/api/model/{{ model.id }}', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ camera_orbit: orbitStr })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            if (btn) { btn.innerHTML = '<i class="fas fa-check mr-1"></i>Saved!'; }
+            // Lock the viewer to the just-saved angle.
+            modelViewer.removeAttribute('auto-rotate');
+            modelViewer.setAttribute('camera-orbit', orbitStr);
+            setTimeout(() => { if (btn) { btn.disabled = false; btn.innerHTML = original; } }, 1500);
+        } else {
+            alert('Error saving view: ' + (data.error || 'Unknown error'));
+            if (btn) { btn.disabled = false; btn.innerHTML = original; }
+        }
+    })
+    .catch(error => {
+        alert('Error saving view');
+        console.error('Error:', error);
+        if (btn) { btn.disabled = false; btn.innerHTML = original; }
+    });
 }
 
 // Submit metadata edits (only available to model owner)

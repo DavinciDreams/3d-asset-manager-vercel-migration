@@ -10,22 +10,18 @@ main_bp = Blueprint('main', __name__)
 @main_bp.route('/')
 def index():
     try:
-        print("🔄 Loading homepage...")
         
         # Get recent public models
         recent_models, total_public = Model3D.get_public_models(page=1, per_page=6)
         
-        print(f"📋 Found {total_public} public models for homepage")
         
         # Add owner username to each model
         for model in recent_models:
             user = User.get_by_id(model.user_id)
             model.owner_username = user.username if user else 'Unknown'
-            print(f"   Model: {model.name} by {model.owner_username}")
-        
+
         # Get statistics
         stats = Model3D.get_stats()
-        print(f"📊 Stats: {stats}")
         
         return render_template('index.html', 
                              recent_models=recent_models,
@@ -48,14 +44,9 @@ def index():
 def dashboard():
     """User dashboard"""
     try:
-        print(f"🔄 Dashboard for user: {current_user.id} ({current_user.username})")
         
         user_models, total_user_models = Model3D.get_user_models(current_user.id, page=1, per_page=10)
-        
-        print(f"📋 Found {total_user_models} models for user {current_user.id}")
-        for i, model in enumerate(user_models[:3]):
-            print(f"   Model {i+1}: {model.name} (Public: {model.is_public})")
-        
+
         # Calculate user stats
         total_downloads = sum(model.download_count for model in user_models)
         public_models = sum(1 for model in user_models if model.is_public)
@@ -80,26 +71,20 @@ def dashboard():
 def browse():
     """Browse public models"""
     try:
-        print("🔄 Loading browse page...")
         
         search = request.args.get('search', '').strip()
         page = request.args.get('page', 1, type=int)
         
-        print(f"📋 Browse params - Page: {page}, Search: '{search}'")
         
         # Get public models with pagination
         models, total = Model3D.get_public_models(page=page, per_page=12, search=search if search else None)
         
-        print(f"📋 Found {total} public models")
         
         # Add owner username to each model
         for model in models:
             user = User.get_by_id(model.user_id)
             model.owner_username = user.username if user else 'Unknown'
-        
-        for i, model in enumerate(models[:3]):
-            print(f"   Public Model {i+1}: {model.name} by {model.owner_username} (ID: {model.id})")
-        
+
         # Calculate pagination info
         total_pages = (total + 11) // 12  # Ceiling division
         has_prev = page > 1
@@ -123,7 +108,7 @@ def browse():
         return render_template('browse.html', models=pagination, search=search)
         
     except Exception as e:
-        print(f"❌ Browse error: {e}")
+        print(f"Browse error: {e}")
         import traceback
         traceback.print_exc()
         # Return empty pagination on error
@@ -150,31 +135,26 @@ def local_assets():
 def model_detail(model_id):
     """View model details"""
     try:
-        print(f"🔄 Loading model detail for ID: {model_id}")
         
         model = Model3D.get_by_id(model_id)
         if not model:
-            print(f"❌ Model not found: {model_id}")
             flash('Model not found.', 'error')
             return redirect(url_for('main.browse'))
         
-        print(f"✅ Model found: {model.name} (Public: {model.is_public})")
         
         # Check access permissions
         if not model.is_public:
             if not current_user.is_authenticated or model.user_id != current_user.id:
-                print(f"❌ Access denied for model: {model_id}")
                 flash('You do not have permission to view this model.', 'error')
                 return redirect(url_for('main.browse'))
         
         # Get model owner info
         owner = User.get_by_id(model.user_id)
-        print(f"✅ Owner found: {owner.username if owner else 'Unknown'}")
         
         return render_template('model_detail.html', model=model, owner=owner)
         
     except Exception as e:
-        print(f"❌ Model detail error: {e}")
+        print(f"Model detail error: {e}")
         import traceback
         traceback.print_exc()
         flash('Error loading model details.', 'error')

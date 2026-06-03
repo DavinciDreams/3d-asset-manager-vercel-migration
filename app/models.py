@@ -99,7 +99,8 @@ class User(UserMixin):
 class Model3D:
     def __init__(self, name=None, description=None, file_format=None, file_size=None,
                  original_filename=None, user_id=None, is_public=True, _id=None,
-                 upload_date=None, download_count=0, gridfs_file_id=None):
+                 upload_date=None, download_count=0, gridfs_file_id=None,
+                 camera_orbit=None):
         self.name = name
         self.description = description
         self.file_format = file_format
@@ -111,6 +112,9 @@ class Model3D:
         self.upload_date = upload_date or datetime.utcnow()
         self.download_count = download_count
         self.gridfs_file_id = gridfs_file_id
+        # Default <model-viewer> camera-orbit string, e.g. "180deg 75deg 105%".
+        # None means "use the viewer's automatic framing".
+        self.camera_orbit = camera_orbit
     
     def save(self):
         """Save model to MongoDB"""
@@ -126,7 +130,8 @@ class Model3D:
             'is_public': self.is_public,
             'upload_date': self.upload_date,
             'download_count': self.download_count,
-            'gridfs_file_id': self.gridfs_file_id
+            'gridfs_file_id': self.gridfs_file_id,
+            'camera_orbit': self.camera_orbit
         }
         
         if self.id:
@@ -213,7 +218,8 @@ class Model3D:
                     _id=model_data['_id'],
                     upload_date=model_data.get('upload_date'),
                     download_count=model_data.get('download_count', 0),
-                    gridfs_file_id=model_data.get('gridfs_file_id')
+                    gridfs_file_id=model_data.get('gridfs_file_id'),
+                    camera_orbit=model_data.get('camera_orbit')
                 )
         except Exception as e:
             print(f"Error getting model by ID: {e}")
@@ -248,7 +254,8 @@ class Model3D:
                 _id=model_data['_id'],
                 upload_date=model_data.get('upload_date'),
                 download_count=model_data.get('download_count', 0),
-                gridfs_file_id=model_data.get('gridfs_file_id')
+                gridfs_file_id=model_data.get('gridfs_file_id'),
+                camera_orbit=model_data.get('camera_orbit')
             ))
         
         return model_objects, total
@@ -279,7 +286,8 @@ class Model3D:
                 _id=model_data['_id'],
                 upload_date=model_data.get('upload_date'),
                 download_count=model_data.get('download_count', 0),
-                gridfs_file_id=model_data.get('gridfs_file_id')
+                gridfs_file_id=model_data.get('gridfs_file_id'),
+                camera_orbit=model_data.get('camera_orbit')
             ))
         
         return model_objects, total
