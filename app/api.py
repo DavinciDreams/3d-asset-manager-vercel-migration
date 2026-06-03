@@ -165,6 +165,59 @@ def view_model(model_id):
         print(f"API view error: {e}")
         return jsonify({'error': 'View failed'}), 500
 
+@api_bp.route('/model/<model_id>', methods=['PUT', 'PATCH'])
+@login_required
+def update_model(model_id):
+    """Update a model's metadata (name, description, visibility)."""
+    try:
+        model = Model3D.get_by_id(model_id)
+
+        if not model:
+            return jsonify({'error': 'Model not found'}), 404
+
+        # Check ownership
+        if model.user_id != current_user.id:
+            return jsonify({'error': 'Access denied'}), 403
+
+        # Accept either JSON or form-encoded payloads
+        data = request.get_json(silent=True) or request.form
+
+        # Only update fields that were actually provided
+        if 'name' in data:
+            name = (data.get('name') or '').strip()
+            if not name:
+                return jsonify({'error': 'Name cannot be empty.'}), 400
+            model.name = name
+
+        if 'description' in data:
+            model.description = (data.get('description') or '').strip()
+
+        if 'is_public' in data:
+            raw = data.get('is_public')
+            # Normalize bool from JSON (true/false) or form ('true'/'on'/'1')
+            if isinstance(raw, bool):
+                model.is_public = raw
+            else:
+                model.is_public = str(raw).lower() in ('true', 'on', '1', 'yes')
+
+        model.save()
+
+        return jsonify({
+            'success': True,
+            'message': 'Model updated successfully.',
+            'model': {
+                'id': model.id,
+                'name': model.name,
+                'description': model.description,
+                'is_public': model.is_public,
+            }
+        })
+
+    except Exception as e:
+        print(f"API update error: {e}")
+        return jsonify({'error': 'Update failed. Please try again.'}), 500
+
+
 @api_bp.route('/model/<model_id>', methods=['DELETE'])
 @login_required
 def delete_model(model_id):
