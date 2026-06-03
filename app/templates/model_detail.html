@@ -177,13 +177,15 @@
                             <textarea id="edit-description" name="description" rows="4"
                                       class="w-full border border-gray-300 rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">{{ model.description or '' }}</textarea>
                         </div>
-                        <div>
+                        <div class="relative">
                             <label for="edit-tags" class="block text-sm font-semibold text-gray-700 mb-1">Tags (comma-separated)</label>
                             <input type="text" id="edit-tags" name="tags"
                                    value="{{ model.tags | join(', ') }}"
+                                   autocomplete="off" data-tag-autocomplete
                                    placeholder="character, rigged, walk-cycle"
                                    class="w-full border border-gray-300 rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
                         </div>
+                        <script id="tag-suggestions" type="application/json">{{ (all_tags or []) | tojson }}</script>
                         <div class="flex items-center">
                             <input type="checkbox" id="edit-public" name="is_public"
                                    {% if model.is_public %}checked{% endif %}

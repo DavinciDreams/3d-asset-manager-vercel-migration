@@ -280,15 +280,29 @@ class Model3D:
         return cls.SORT_OPTIONS.get(sort, cls.SORT_OPTIONS['newest'])
 
     @staticmethod
+    def _apply_tag_filter(query, tag):
+        """Add a tag filter to a Mongo query. `tag` may be a single string or a
+        list/tuple; multiple tags require a model to have ALL of them ($all)."""
+        if not tag:
+            return query
+        tags = Model3D.normalize_tags(tag)  # handles str or list -> clean list
+        if len(tags) == 1:
+            query['tags'] = tags[0]
+        elif len(tags) > 1:
+            query['tags'] = {'$all': tags}
+        return query
+
+    @staticmethod
     def get_public_models(page=1, per_page=20, search=None, sort='newest', tag=None):
-        """Get public models with pagination, optional search/tag/sort."""
+        """Get public models with pagination, optional search/tag/sort.
+
+        `tag` may be a single tag or a list of tags (matched with AND)."""
         db = current_app.config['MONGODB_DB']
 
         query = {'is_public': True}
         if search:
             query['$text'] = {'$search': search}
-        if tag:
-            query['tags'] = tag.strip().lower()
+        Model3D._apply_tag_filter(query, tag)
 
         total = db.models.count_documents(query)
 
@@ -304,12 +318,13 @@ class Model3D:
 
     @staticmethod
     def get_user_models(user_id, page=1, per_page=20, sort='newest', tag=None):
-        """Get a user's models with pagination, optional tag/sort."""
+        """Get a user's models with pagination, optional tag/sort.
+
+        `tag` may be a single tag or a list of tags (matched with AND)."""
         db = current_app.config['MONGODB_DB']
 
         query = {'user_id': user_id}
-        if tag:
-            query['tags'] = tag.strip().lower()
+        Model3D._apply_tag_filter(query, tag)
 
         total = db.models.count_documents(query)
 

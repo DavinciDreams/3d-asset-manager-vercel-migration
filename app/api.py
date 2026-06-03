@@ -1,10 +1,52 @@
-from flask import Blueprint, jsonify, request, current_app, make_response
+from flask import Blueprint, jsonify, request, current_app, make_response, url_for
 from flask_login import current_user, login_required
 from app.models import Model3D, User
+from app.openapi import get_openapi_spec
 from bson.objectid import ObjectId
 import io
 
 api_bp = Blueprint('api', __name__)
+
+
+@api_bp.route('/openapi.json')
+def openapi_spec():
+    """Serve the OpenAPI 3.0 spec as JSON."""
+    # request.url_root is e.g. "https://host/" -> strip the trailing slash so
+    # the spec's server URL points at this deployment's real origin.
+    base_url = request.url_root.rstrip('/')
+    return jsonify(get_openapi_spec(base_url=base_url))
+
+
+@api_bp.route('/docs')
+def swagger_ui():
+    """Render Swagger UI (assets loaded from CDN) against /api/openapi.json."""
+    spec_url = url_for('api.openapi_spec')
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>3D Asset Manager API – Swagger UI</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css" />
+  <style>body {{ margin: 0; }}</style>
+</head>
+<body>
+  <div id="swagger-ui"></div>
+  <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js" crossorigin></script>
+  <script>
+    window.onload = function () {{
+      window.ui = SwaggerUIBundle({{
+        url: "{spec_url}",
+        dom_id: "#swagger-ui",
+        deepLinking: true,
+        presets: [SwaggerUIBundle.presets.apis],
+      }});
+    }};
+  </script>
+</body>
+</html>"""
+    return make_response(html, 200, {'Content-Type': 'text/html; charset=utf-8'})
+
 
 @api_bp.route('/test')
 def test_api():
@@ -394,96 +436,155 @@ def get_user_models():
         print(f"API user models error: {e}")
         return jsonify({'error': 'Failed to retrieve user models'}), 500
 
+def _name_from_filename(original_filename):
+    """Derive a human-friendly model name from a filename.
+
+    Strips the directory part (folder uploads send paths like "robot/arm.glb"),
+    drops the extension, and turns separators into spaces.
+    e.g. "robot/walk_cycle.glb" -> "walk cycle".
+    """
+    base = original_filename.replace('\\', '/').split('/')[-1]
+    stem = base.rsplit('.', 1)[0] if '.' in base else base
+    cleaned = stem.replace('_', ' ').replace('-', ' ').strip()
+    return cleaned or base
+
+
+def _store_one_upload(file, base_name, description, is_public, tags, allowed_extensions, fs, max_bytes):
+    """Validate and persist a single uploaded file as a Model3D.
+
+    Returns (model, None) on success or (None, error_message) on failure.
+    """
+    from werkzeug.utils import secure_filename
+
+    if not file or file.filename == '':
+        return None, 'Empty file.'
+
+    filename = secure_filename(file.filename)
+    file_extension = filename.rsplit('.', 1)[1].lower() if '.' in filename else ''
+
+    if file_extension not in allowed_extensions:
+        return None, f'File type not supported (.{file_extension or "none"}).'
+
+    file_content = file.read()
+    file_size = len(file_content)
+
+    if file_size == 0:
+        return None, 'File is empty.'
+    if file_size > max_bytes:
+        limit_mb = max_bytes // (1024 * 1024)
+        return None, f'File too large. Maximum size is {limit_mb}MB.'
+
+    # Per-file name: when a shared base name is given AND multiple files are
+    # involved, the caller passes base_name="" so each model is named from its
+    # own filename. A single-file upload keeps the typed name.
+    model_name = base_name or _name_from_filename(file.filename)
+
+    gridfs_file_id = fs.put(
+        file_content,
+        filename=filename,
+        content_type=file.content_type,
+        metadata={
+            'original_filename': file.filename,
+            'uploaded_by': current_user.id,
+            'upload_date': Model3D().upload_date
+        }
+    )
+
+    model = Model3D(
+        name=model_name,
+        description=description,
+        file_format=file_extension,
+        file_size=file_size,
+        original_filename=file.filename,
+        user_id=current_user.id,
+        is_public=is_public,
+        gridfs_file_id=str(gridfs_file_id),
+        tags=tags
+    )
+    model.save()
+    return model, None
+
+
+def _serialize_model(model):
+    return {
+        'id': model.id,
+        'name': model.name,
+        'description': model.description,
+        'file_format': model.file_format,
+        'file_size': model.file_size,
+        'original_filename': model.original_filename,
+        'is_public': model.is_public,
+        'upload_date': model.upload_date.isoformat() if model.upload_date else None
+    }
+
+
 @api_bp.route('/upload', methods=['POST'])
 @login_required
 def upload_model():
-    """API endpoint for uploading 3D models"""
-    
+    """Upload one or more 3D models.
+
+    Accepts one or many files under the ``file`` form field (repeat the field
+    for multiple files, e.g. from a folder selection). Each file becomes its
+    own model. Backward compatible with single-file uploads.
+
+    With a single file, the optional ``name`` field names the model. With
+    multiple files, each model is named from its own filename.
+    """
     try:
-        # Log request info
-        
-        # Get form data
-        name = request.form.get('name', '').strip()
         description = request.form.get('description', '').strip()
-        is_public = request.form.get('is_public') == 'true'  # Note: 'true' for JSON boolean
+        is_public = request.form.get('is_public') == 'true'
         tags = Model3D.normalize_tags(request.form.get('tags', ''))
 
-        # Get uploaded file
-        file = request.files.get('file')
-        
-        if not file or file.filename == '':
+        # Collect all uploaded files (supports repeated 'file' fields).
+        files = [f for f in request.files.getlist('file') if f and f.filename]
+        if not files:
             return jsonify({'error': 'Please select a file to upload.'}), 400
-        
-        if not name:
-            return jsonify({'error': 'Please provide a name for your model.'}), 400
-        
-        
-        # Import secure_filename
-        from werkzeug.utils import secure_filename
-        
-        # Validate file extension
-        filename = secure_filename(file.filename)
-        file_extension = filename.rsplit('.', 1)[1].lower() if '.' in filename else ''
-        
-        
-        allowed_extensions = current_app.config['ALLOWED_EXTENSIONS']
-        if file_extension not in allowed_extensions:
-            return jsonify({'error': f'File type not supported. Allowed: {", ".join(allowed_extensions)}'}), 400
-        
-        # Read file content
-        file_content = file.read()
-        file_size = len(file_content)
-        
-        
-        # Check file size (4MB limit for Vercel)
-        if file_size > current_app.config['MAX_CONTENT_LENGTH']:
-            return jsonify({'error': 'File too large. Maximum size is 4MB for Vercel deployment.'}), 400
-        
-        # Store file in GridFS
-        fs = current_app.config['GRIDFS']
-        gridfs_file_id = fs.put(
-            file_content,
-            filename=filename,
-            content_type=file.content_type,
-            metadata={
-                'original_filename': file.filename,
-                'uploaded_by': current_user.id,
-                'upload_date': Model3D().upload_date
-            }
-        )
-        
-        
-        # Create model record
-        model = Model3D(
-            name=name,
-            description=description,
-            file_format=file_extension,
-            file_size=file_size,
-            original_filename=file.filename,
-            user_id=current_user.id,
-            is_public=is_public,
-            gridfs_file_id=str(gridfs_file_id),
-            tags=tags
-        )
 
-        model.save()
-        
-        # Return success response with model data
+        typed_name = request.form.get('name', '').strip()
+        single = len(files) == 1
+
+        if single and not typed_name:
+            return jsonify({'error': 'Please provide a name for your model.'}), 400
+
+        # For a single file, use the typed name. For multiple files, name each
+        # from its own filename (pass base_name="" to trigger that path).
+        base_name = typed_name if single else ''
+
+        allowed_extensions = current_app.config['ALLOWED_EXTENSIONS']
+        max_bytes = current_app.config['MAX_CONTENT_LENGTH']
+        fs = current_app.config['GRIDFS']
+
+        uploaded, errors = [], []
+        for file in files:
+            model, err = _store_one_upload(
+                file, base_name, description, is_public, tags,
+                allowed_extensions, fs, max_bytes
+            )
+            if model:
+                uploaded.append(model)
+            else:
+                errors.append({'filename': file.filename, 'error': err})
+
+        # Single-file path: preserve the original response shape exactly.
+        if single:
+            if uploaded:
+                model = uploaded[0]
+                return jsonify({
+                    'success': True,
+                    'message': f'Model "{model.name}" uploaded successfully!',
+                    'model': _serialize_model(model)
+                }), 201
+            return jsonify({'error': errors[0]['error']}), 400
+
+        # Multi-file path: report per-file outcomes.
+        status = 201 if uploaded else 400
         return jsonify({
-            'success': True,
-            'message': f'Model "{name}" uploaded successfully!',
-            'model': {
-                'id': model.id,
-                'name': model.name,
-                'description': model.description,
-                'file_format': model.file_format,
-                'file_size': model.file_size,
-                'original_filename': model.original_filename,
-                'is_public': model.is_public,
-                'upload_date': model.upload_date.isoformat() if model.upload_date else None
-            }
-        }), 201
-        
+            'success': bool(uploaded),
+            'message': f'{len(uploaded)} of {len(files)} file(s) uploaded successfully.',
+            'uploaded': [_serialize_model(m) for m in uploaded],
+            'errors': errors,
+        }), status
+
     except Exception as e:
         print(f"API upload error: {e}")
         import traceback

@@ -73,13 +73,14 @@ def dashboard():
     try:
         
         sort = request.args.get('sort', 'newest')
-        tag = request.args.get('tag', '').strip()
+        # Support multiple ?tag= values (AND-matched).
+        tags = Model3D.normalize_tags(request.args.getlist('tag'))
 
         # Show all of the user's models on the dashboard (not just the first
         # page), so the count card and the table agree.
         user_models, total_user_models = Model3D.get_user_models(
             current_user.id, page=1, per_page=1000,
-            sort=sort, tag=tag if tag else None)
+            sort=sort, tag=tags if tags else None)
 
         # Calculate user stats from the full set
         total_downloads = sum(model.download_count for model in user_models)
@@ -91,7 +92,7 @@ def dashboard():
                              total_models=total_user_models,
                              total_downloads=total_downloads,
                              public_models=public_models,
-                             sort=sort, tag=tag, all_tags=all_tags)
+                             sort=sort, tags=tags, all_tags=all_tags)
     except Exception as e:
         print(f"Dashboard error: {e}")
         import traceback
@@ -101,7 +102,7 @@ def dashboard():
                              total_models=0,
                              total_downloads=0,
                              public_models=0,
-                             sort='newest', tag='', all_tags=[],
+                             sort='newest', tags=[], all_tags=[],
                              error=str(e))
 
 @main_bp.route('/browse')
@@ -112,13 +113,14 @@ def browse():
         search = request.args.get('search', '').strip()
         page = request.args.get('page', 1, type=int)
         sort = request.args.get('sort', 'newest')
-        tag = request.args.get('tag', '').strip()
+        # Support multiple ?tag= values (AND-matched).
+        tags = Model3D.normalize_tags(request.args.getlist('tag'))
 
         # Get public models with pagination
         models, total = Model3D.get_public_models(
             page=page, per_page=12,
             search=search if search else None,
-            sort=sort, tag=tag if tag else None)
+            sort=sort, tag=tags if tags else None)
 
         # Add owner username to each model
         for model in models:
@@ -135,13 +137,13 @@ def browse():
         pagination = Pagination([], 0, 1, 12)
         search = ''
         sort = 'newest'
-        tag = ''
+        tags = []
         all_tags = []
 
     # Render outside the try so a template error surfaces instead of being
     # silently swallowed into a misleading "No Models Found" page.
     return render_template('browse.html', models=pagination, search=search,
-                           sort=sort, tag=tag, all_tags=all_tags)
+                           sort=sort, tags=tags, all_tags=all_tags)
 
 
 @main_bp.route('/local-assets')
@@ -169,8 +171,13 @@ def model_detail(model_id):
         
         # Get model owner info
         owner = User.get_by_id(model.user_id)
-        
-        return render_template('model_detail.html', model=model, owner=owner)
+
+        # Tag suggestions for the owner's edit form (autocomplete).
+        all_tags = Model3D.get_user_tags(model.user_id) if (
+            current_user.is_authenticated and current_user.id == model.user_id) else []
+
+        return render_template('model_detail.html', model=model, owner=owner,
+                               all_tags=all_tags)
         
     except Exception as e:
         print(f"Model detail error: {e}")
@@ -183,6 +190,8 @@ def model_detail(model_id):
 @login_required
 def upload():
     """Upload 3D model"""
+    # Per-file size limit (MB) shown in the UI and enforced by the API.
+    max_upload_mb = current_app.config['MAX_CONTENT_LENGTH'] // (1024 * 1024)
     if request.method == 'POST':
         try:
             # Get form data
@@ -196,11 +205,11 @@ def upload():
             
             if not file or file.filename == '':
                 flash('Please select a file to upload.', 'error')
-                return render_template('upload.html')
+                return render_template('upload.html', all_tags=Model3D.get_user_tags(current_user.id), max_upload_mb=max_upload_mb)
             
             if not name:
                 flash('Please provide a name for your model.', 'error')
-                return render_template('upload.html')
+                return render_template('upload.html', all_tags=Model3D.get_user_tags(current_user.id), max_upload_mb=max_upload_mb)
             
             # Validate file extension
             filename = secure_filename(file.filename)
@@ -209,7 +218,7 @@ def upload():
             allowed_extensions = current_app.config['ALLOWED_EXTENSIONS']
             if file_extension not in allowed_extensions:
                 flash(f'File type not supported. Allowed: {", ".join(allowed_extensions)}', 'error')
-                return render_template('upload.html')
+                return render_template('upload.html', all_tags=Model3D.get_user_tags(current_user.id), max_upload_mb=max_upload_mb)
             
             # Read file content
             file_content = file.read()
@@ -217,8 +226,8 @@ def upload():
             
             # Check file size (100MB limit)
             if file_size > current_app.config['MAX_CONTENT_LENGTH']:
-                flash('File too large. Maximum size is 100MB.', 'error')
-                return render_template('upload.html')
+                flash(f'File too large. Maximum size is {max_upload_mb}MB.', 'error')
+                return render_template('upload.html', all_tags=Model3D.get_user_tags(current_user.id), max_upload_mb=max_upload_mb)
             
             # Store file in GridFS
             fs = current_app.config['GRIDFS']
@@ -254,9 +263,9 @@ def upload():
         except Exception as e:
             print(f"Upload error: {e}")
             flash('Upload failed. Please try again.', 'error')
-            return render_template('upload.html')
+            return render_template('upload.html', all_tags=Model3D.get_user_tags(current_user.id), max_upload_mb=max_upload_mb)
     
-    return render_template('upload.html')
+    return render_template('upload.html', all_tags=Model3D.get_user_tags(current_user.id), max_upload_mb=max_upload_mb)
 
 @main_bp.route('/profile')
 @login_required

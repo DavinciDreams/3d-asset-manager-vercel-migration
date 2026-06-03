@@ -19,27 +19,43 @@
                 <option value="downloads" {% if sort == 'downloads' %}selected{% endif %}>Most downloaded</option>
                 <option value="name" {% if sort == 'name' %}selected{% endif %}>Name A–Z</option>
             </select>
-            {% if tag %}<input type="hidden" name="tag" value="{{ tag }}">{% endif %}
+            {# preserve active tags across a search/sort submit #}
+            {% for t in tags %}<input type="hidden" name="tag" value="{{ t }}">{% endfor %}
             <button type="submit" class="bg-blue-600 text-white px-6 py-2 rounded-lg hover:bg-blue-700 transition">
                 Search
             </button>
         </form>
     </div>
 
-    <!-- Tag filter bar -->
+    <!-- Tag filter bar (click to toggle; multiple tags match ALL) -->
     {% if all_tags %}
     <div class="flex flex-wrap items-center gap-2 mb-8">
         <span class="text-sm text-gray-500 mr-1">Tags:</span>
         <a href="{{ url_for('main.browse', search=search, sort=sort) }}"
-           class="px-3 py-1 rounded-full text-sm {{ 'bg-blue-600 text-white' if not tag else 'bg-gray-200 text-gray-700 hover:bg-gray-300' }}">
+           class="px-3 py-1 rounded-full text-sm {{ 'bg-blue-600 text-white' if not tags else 'bg-gray-200 text-gray-700 hover:bg-gray-300' }}">
             All
         </a>
         {% for t in all_tags %}
-        <a href="{{ url_for('main.browse', tag=t, search=search, sort=sort) }}"
-           class="px-3 py-1 rounded-full text-sm {{ 'bg-blue-600 text-white' if tag == t else 'bg-gray-200 text-gray-700 hover:bg-gray-300' }}">
-            {{ t }}
-        </a>
+            {% if t in tags %}
+                {# active -> link removes this tag from the set #}
+                <a href="{{ url_for('main.browse', search=search, sort=sort, tag=tags|reject('equalto', t)|list) }}"
+                   class="px-3 py-1 rounded-full text-sm bg-blue-600 text-white inline-flex items-center gap-1">
+                    {{ t }} <i class="fas fa-times text-xs"></i>
+                </a>
+            {% else %}
+                {# inactive -> link adds this tag to the set #}
+                <a href="{{ url_for('main.browse', search=search, sort=sort, tag=tags + [t]) }}"
+                   class="px-3 py-1 rounded-full text-sm bg-gray-200 text-gray-700 hover:bg-gray-300">
+                    {{ t }}
+                </a>
+            {% endif %}
         {% endfor %}
+        {% if tags %}
+        <a href="{{ url_for('main.browse', search=search, sort=sort) }}"
+           class="px-3 py-1 rounded-full text-sm text-red-600 hover:text-red-800">
+            <i class="fas fa-times-circle mr-1"></i>Clear
+        </a>
+        {% endif %}
     </div>
     {% endif %}
 
@@ -85,8 +101,8 @@
                     {% if model.tags %}
                     <div class="flex flex-wrap gap-1 mb-3">
                         {% for t in model.tags %}
-                        <a href="{{ url_for('main.browse', tag=t, sort=sort) }}"
-                           class="bg-indigo-50 text-indigo-700 text-xs px-2 py-1 rounded hover:bg-indigo-100">{{ t }}</a>
+                        <a href="{{ url_for('main.browse', sort=sort, tag=(tags + [t]) if t not in tags else tags) }}"
+                           class="text-xs px-2 py-1 rounded {{ 'bg-indigo-600 text-white' if t in tags else 'bg-indigo-50 text-indigo-700 hover:bg-indigo-100' }}">{{ t }}</a>
                         {% endfor %}
                     </div>
                     {% endif %}
@@ -111,7 +127,7 @@
         <div class="flex justify-center mt-8">
             <nav class="flex space-x-1">
                 {% if models.has_prev %}
-                    <a href="{{ url_for('main.browse', page=models.prev_num, search=search, sort=sort, tag=tag) }}"
+                    <a href="{{ url_for('main.browse', page=models.prev_num, search=search, sort=sort, tag=tags) }}"
                        class="px-3 py-2 bg-gray-200 text-gray-700 rounded hover:bg-gray-300">
                         Previous
                     </a>
@@ -120,7 +136,7 @@
                 {% for page_num in models.iter_pages() %}
                     {% if page_num %}
                         {% if page_num != models.page %}
-                            <a href="{{ url_for('main.browse', page=page_num, search=search, sort=sort, tag=tag) }}"
+                            <a href="{{ url_for('main.browse', page=page_num, search=search, sort=sort, tag=tags) }}"
                                class="px-3 py-2 bg-gray-200 text-gray-700 rounded hover:bg-gray-300">
                                 {{ page_num }}
                             </a>
@@ -133,7 +149,7 @@
                 {% endfor %}
                 
                 {% if models.has_next %}
-                    <a href="{{ url_for('main.browse', page=models.next_num, search=search, sort=sort, tag=tag) }}"
+                    <a href="{{ url_for('main.browse', page=models.next_num, search=search, sort=sort, tag=tags) }}"
                        class="px-3 py-2 bg-gray-200 text-gray-700 rounded hover:bg-gray-300">
                         Next
                     </a>

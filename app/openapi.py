@@ -1,0 +1,589 @@
+"""OpenAPI 3.0 specification for the 3D Asset Manager API.
+
+Hand-written spec (no extra pip dependencies) describing every JSON endpoint
+registered on ``api_bp`` (mounted at ``/api``). Served as JSON at
+``/api/openapi.json`` and rendered by Swagger UI at ``/api/docs``.
+
+Keep this in sync with ``app/api.py`` when routes change.
+"""
+
+# Allowed upload extensions are duplicated from create_app() config so the spec
+# stays self-contained; update both if the list changes.
+ALLOWED_EXTENSIONS = ['obj', 'fbx', 'gltf', 'glb', 'dae', '3ds', 'ply', 'stl']
+
+
+def _model_summary_schema():
+    return {
+        'type': 'object',
+        'properties': {
+            'id': {'type': 'string', 'example': '6650f1a2b3c4d5e6f7a8b9c0'},
+            'name': {'type': 'string', 'example': 'Spaceship'},
+            'description': {'type': 'string', 'example': 'A low-poly spaceship.'},
+            'file_format': {'type': 'string', 'enum': ALLOWED_EXTENSIONS, 'example': 'glb'},
+            'file_size': {'type': 'integer', 'description': 'Size in bytes', 'example': 248320},
+            'original_filename': {'type': 'string', 'example': 'spaceship.glb'},
+            'is_public': {'type': 'boolean', 'example': True},
+            'upload_date': {'type': 'string', 'format': 'date-time', 'nullable': True},
+            'download_count': {'type': 'integer', 'example': 12},
+            'owner': {
+                'type': 'object',
+                'properties': {
+                    'id': {'type': 'string', 'nullable': True},
+                    'username': {'type': 'string', 'example': 'jane'},
+                },
+            },
+        },
+    }
+
+
+def _pagination_schema():
+    return {
+        'type': 'object',
+        'properties': {
+            'page': {'type': 'integer', 'example': 1},
+            'per_page': {'type': 'integer', 'example': 20},
+            'total': {'type': 'integer', 'example': 57},
+            'pages': {'type': 'integer', 'example': 3},
+            'has_prev': {'type': 'boolean', 'example': False},
+            'has_next': {'type': 'boolean', 'example': True},
+        },
+    }
+
+
+def _error_response(description):
+    return {
+        'description': description,
+        'content': {
+            'application/json': {
+                'schema': {'$ref': '#/components/schemas/Error'},
+            }
+        },
+    }
+
+
+def get_openapi_spec(base_url=''):
+    """Return the OpenAPI 3.0 spec as a dict.
+
+    ``base_url`` is the externally-visible origin (scheme + host) used to fill
+    in the ``servers`` block so "Try it out" hits the right host.
+    """
+    server_url = (base_url.rstrip('/') + '/api') if base_url else '/api'
+
+    return {
+        'openapi': '3.0.3',
+        'info': {
+            'title': '3D Asset Manager API',
+            'description': (
+                'REST API for browsing, uploading, viewing and downloading 3D '
+                'models. Authenticated endpoints use the session cookie set by '
+                'the web login at `/auth/login` (Flask-Login). Call those from a '
+                'logged-in browser session or a client that carries the cookie.'
+            ),
+            'version': '1.0.0',
+        },
+        'servers': [{'url': server_url, 'description': 'API root'}],
+        'tags': [
+            {'name': 'System', 'description': 'Health and platform statistics'},
+            {'name': 'Models', 'description': 'List, view, update and delete models'},
+            {'name': 'Files', 'description': 'Download and view model binaries and thumbnails'},
+            {'name': 'Upload', 'description': 'Upload new models'},
+        ],
+        'components': {
+            'securitySchemes': {
+                'sessionCookie': {
+                    'type': 'apiKey',
+                    'in': 'cookie',
+                    'name': 'session',
+                    'description': 'Flask-Login session cookie obtained via /auth/login.',
+                }
+            },
+            'schemas': {
+                'Error': {
+                    'type': 'object',
+                    'properties': {
+                        'error': {'type': 'string', 'example': 'Model not found'},
+                    },
+                },
+                'ModelSummary': _model_summary_schema(),
+                'Pagination': _pagination_schema(),
+                'ModelListResponse': {
+                    'type': 'object',
+                    'properties': {
+                        'models': {
+                            'type': 'array',
+                            'items': {'$ref': '#/components/schemas/ModelSummary'},
+                        },
+                        'pagination': {'$ref': '#/components/schemas/Pagination'},
+                    },
+                },
+                'Stats': {
+                    'type': 'object',
+                    'properties': {
+                        'public_models': {'type': 'integer', 'example': 42},
+                        'total_users': {'type': 'integer', 'example': 8},
+                        'total_downloads': {'type': 'integer', 'example': 310},
+                    },
+                },
+            },
+        },
+        'paths': {
+            '/test': {
+                'get': {
+                    'tags': ['System'],
+                    'summary': 'Health check',
+                    'description': 'Simple endpoint to verify the API is reachable.',
+                    'responses': {
+                        '200': {
+                            'description': 'API is up',
+                            'content': {
+                                'application/json': {
+                                    'schema': {
+                                        'type': 'object',
+                                        'properties': {
+                                            'status': {'type': 'string', 'example': 'success'},
+                                            'message': {'type': 'string', 'example': 'API is working!'},
+                                            'timestamp': {'type': 'string'},
+                                        },
+                                    }
+                                }
+                            },
+                        }
+                    },
+                }
+            },
+            '/stats': {
+                'get': {
+                    'tags': ['System'],
+                    'summary': 'Platform statistics',
+                    'responses': {
+                        '200': {
+                            'description': 'Aggregate stats',
+                            'content': {
+                                'application/json': {
+                                    'schema': {'$ref': '#/components/schemas/Stats'}
+                                }
+                            },
+                        },
+                        '500': _error_response('Failed to retrieve statistics'),
+                    },
+                }
+            },
+            '/models': {
+                'get': {
+                    'tags': ['Models'],
+                    'summary': 'List models',
+                    'description': (
+                        'Returns public models by default. Pass `user_only=true` '
+                        'with an authenticated session to list the current '
+                        "user's models instead."
+                    ),
+                    'parameters': [
+                        {
+                            'name': 'page', 'in': 'query',
+                            'schema': {'type': 'integer', 'default': 1, 'minimum': 1},
+                        },
+                        {
+                            'name': 'per_page', 'in': 'query',
+                            'description': 'Items per page (max 100).',
+                            'schema': {'type': 'integer', 'default': 20, 'maximum': 100},
+                        },
+                        {
+                            'name': 'search', 'in': 'query',
+                            'description': 'Full-text search over name and description.',
+                            'schema': {'type': 'string'},
+                        },
+                        {
+                            'name': 'user_only', 'in': 'query',
+                            'description': "Restrict to the logged-in user's models.",
+                            'schema': {'type': 'boolean', 'default': False},
+                        },
+                    ],
+                    'responses': {
+                        '200': {
+                            'description': 'Paginated list of models',
+                            'content': {
+                                'application/json': {
+                                    'schema': {'$ref': '#/components/schemas/ModelListResponse'}
+                                }
+                            },
+                        },
+                        '500': _error_response('Failed to retrieve models'),
+                    },
+                }
+            },
+            '/user/models': {
+                'get': {
+                    'tags': ['Models'],
+                    'summary': "List the current user's models",
+                    'security': [{'sessionCookie': []}],
+                    'parameters': [
+                        {
+                            'name': 'page', 'in': 'query',
+                            'schema': {'type': 'integer', 'default': 1, 'minimum': 1},
+                        },
+                        {
+                            'name': 'per_page', 'in': 'query',
+                            'schema': {'type': 'integer', 'default': 20, 'maximum': 100},
+                        },
+                    ],
+                    'responses': {
+                        '200': {
+                            'description': "The user's models, paginated",
+                            'content': {
+                                'application/json': {
+                                    'schema': {'$ref': '#/components/schemas/ModelListResponse'}
+                                }
+                            },
+                        },
+                        '401': _error_response('Authentication required'),
+                        '500': _error_response('Failed to retrieve user models'),
+                    },
+                }
+            },
+            '/model/{model_id}': {
+                'parameters': [
+                    {
+                        'name': 'model_id', 'in': 'path', 'required': True,
+                        'schema': {'type': 'string'},
+                        'description': 'The model id (Mongo ObjectId).',
+                    }
+                ],
+                'put': {
+                    'tags': ['Models'],
+                    'summary': 'Update model metadata',
+                    'description': (
+                        'Owner-only. Updates only the fields present in the body. '
+                        'Accepts JSON or form-encoded data. PATCH behaves identically.'
+                    ),
+                    'security': [{'sessionCookie': []}],
+                    'requestBody': {
+                        'required': True,
+                        'content': {
+                            'application/json': {
+                                'schema': {
+                                    'type': 'object',
+                                    'properties': {
+                                        'name': {'type': 'string'},
+                                        'description': {'type': 'string'},
+                                        'is_public': {'type': 'boolean'},
+                                        'camera_orbit': {
+                                            'type': 'string',
+                                            'description': 'Default <model-viewer> angle, e.g. "180deg 75deg 105%". Empty resets to auto.',
+                                        },
+                                        'tags': {
+                                            'type': 'array',
+                                            'items': {'type': 'string'},
+                                            'description': 'Tags as an array or comma-separated string.',
+                                        },
+                                    },
+                                }
+                            }
+                        },
+                    },
+                    'responses': {
+                        '200': {
+                            'description': 'Updated model',
+                            'content': {
+                                'application/json': {
+                                    'schema': {
+                                        'type': 'object',
+                                        'properties': {
+                                            'success': {'type': 'boolean'},
+                                            'message': {'type': 'string'},
+                                            'model': {'$ref': '#/components/schemas/ModelSummary'},
+                                        },
+                                    }
+                                }
+                            },
+                        },
+                        '400': _error_response('Validation error (e.g. empty name)'),
+                        '401': _error_response('Authentication required'),
+                        '403': _error_response('Not the owner'),
+                        '404': _error_response('Model not found'),
+                        '500': _error_response('Update failed'),
+                    },
+                },
+                'patch': {
+                    'tags': ['Models'],
+                    'summary': 'Update model metadata (alias of PUT)',
+                    'security': [{'sessionCookie': []}],
+                    'requestBody': {
+                        'required': True,
+                        'content': {
+                            'application/json': {
+                                'schema': {
+                                    'type': 'object',
+                                    'properties': {
+                                        'name': {'type': 'string'},
+                                        'description': {'type': 'string'},
+                                        'is_public': {'type': 'boolean'},
+                                        'camera_orbit': {'type': 'string'},
+                                        'tags': {'type': 'array', 'items': {'type': 'string'}},
+                                    },
+                                }
+                            }
+                        },
+                    },
+                    'responses': {
+                        '200': {'description': 'Updated model'},
+                        '400': _error_response('Validation error'),
+                        '401': _error_response('Authentication required'),
+                        '403': _error_response('Not the owner'),
+                        '404': _error_response('Model not found'),
+                        '500': _error_response('Update failed'),
+                    },
+                },
+                'delete': {
+                    'tags': ['Models'],
+                    'summary': 'Delete a model',
+                    'description': 'Owner-only. Removes the model record and its stored file.',
+                    'security': [{'sessionCookie': []}],
+                    'responses': {
+                        '200': {
+                            'description': 'Deleted',
+                            'content': {
+                                'application/json': {
+                                    'schema': {
+                                        'type': 'object',
+                                        'properties': {
+                                            'message': {'type': 'string', 'example': 'Model deleted successfully'},
+                                        },
+                                    }
+                                }
+                            },
+                        },
+                        '401': _error_response('Authentication required'),
+                        '403': _error_response('Not the owner'),
+                        '404': _error_response('Model not found'),
+                        '500': _error_response('Delete failed'),
+                    },
+                },
+            },
+            '/download/{model_id}': {
+                'get': {
+                    'tags': ['Files'],
+                    'summary': 'Download a model file',
+                    'description': (
+                        'Streams the model binary as an attachment and increments '
+                        'the download counter. Private models require the owner session.'
+                    ),
+                    'parameters': [
+                        {
+                            'name': 'model_id', 'in': 'path', 'required': True,
+                            'schema': {'type': 'string'},
+                        }
+                    ],
+                    'responses': {
+                        '200': {
+                            'description': 'The model file',
+                            'content': {
+                                'application/octet-stream': {
+                                    'schema': {'type': 'string', 'format': 'binary'}
+                                }
+                            },
+                        },
+                        '403': _error_response('Access denied (private model)'),
+                        '404': _error_response('Model or file not found'),
+                        '500': _error_response('Download failed'),
+                    },
+                }
+            },
+            '/view/{model_id}': {
+                'get': {
+                    'tags': ['Files'],
+                    'summary': 'Stream a model file for inline 3D viewing',
+                    'description': 'Like download, but served inline with a cache header and no counter increment.',
+                    'parameters': [
+                        {
+                            'name': 'model_id', 'in': 'path', 'required': True,
+                            'schema': {'type': 'string'},
+                        }
+                    ],
+                    'responses': {
+                        '200': {
+                            'description': 'The model file (inline)',
+                            'content': {
+                                'application/octet-stream': {
+                                    'schema': {'type': 'string', 'format': 'binary'}
+                                }
+                            },
+                        },
+                        '403': _error_response('Access denied (private model)'),
+                        '404': _error_response('Model or file not found'),
+                        '500': _error_response('View failed'),
+                    },
+                }
+            },
+            '/model/{model_id}/thumbnail': {
+                'parameters': [
+                    {
+                        'name': 'model_id', 'in': 'path', 'required': True,
+                        'schema': {'type': 'string'},
+                    }
+                ],
+                'get': {
+                    'tags': ['Files'],
+                    'summary': "Get a model's PNG thumbnail",
+                    'description': 'Private models require the owner session. 404 when no thumbnail exists.',
+                    'responses': {
+                        '200': {
+                            'description': 'PNG image',
+                            'content': {
+                                'image/png': {
+                                    'schema': {'type': 'string', 'format': 'binary'}
+                                }
+                            },
+                        },
+                        '403': _error_response('Access denied (private model)'),
+                        '404': _error_response('No thumbnail'),
+                    },
+                },
+                'post': {
+                    'tags': ['Files'],
+                    'summary': 'Upload/replace a model thumbnail',
+                    'description': (
+                        'Owner-only. Send a base64 PNG (optionally as a data URL). '
+                        'Max 2MB. Replaces any existing thumbnail.'
+                    ),
+                    'security': [{'sessionCookie': []}],
+                    'requestBody': {
+                        'required': True,
+                        'content': {
+                            'application/json': {
+                                'schema': {
+                                    'type': 'object',
+                                    'required': ['image'],
+                                    'properties': {
+                                        'image': {
+                                            'type': 'string',
+                                            'description': 'Base64 PNG or "data:image/png;base64,..." URL.',
+                                        },
+                                    },
+                                }
+                            }
+                        },
+                    },
+                    'responses': {
+                        '200': {
+                            'description': 'Stored',
+                            'content': {
+                                'application/json': {
+                                    'schema': {
+                                        'type': 'object',
+                                        'properties': {
+                                            'success': {'type': 'boolean'},
+                                            'thumbnail_file_id': {'type': 'string'},
+                                        },
+                                    }
+                                }
+                            },
+                        },
+                        '400': _error_response('Missing/invalid/too-large image'),
+                        '401': _error_response('Authentication required'),
+                        '403': _error_response('Not the owner'),
+                        '404': _error_response('Model not found'),
+                        '500': _error_response('Thumbnail upload failed'),
+                    },
+                },
+            },
+            '/upload': {
+                'post': {
+                    'tags': ['Upload'],
+                    'summary': 'Upload one or more 3D models',
+                    'description': (
+                        'Multipart form upload. Repeat the `file` field to upload '
+                        'multiple files in one request (e.g. an entire folder) — '
+                        'each file becomes its own model. Allowed formats: '
+                        + ', '.join(ALLOWED_EXTENSIONS)
+                        + '. Size limited per file by server config (MAX_UPLOAD_MB).\n\n'
+                        '**Naming:** with a single file, `name` is required and '
+                        'used as the model name. With multiple files, `name` is '
+                        'ignored and each model is named from its own filename.\n\n'
+                        '**Response shape:** a single-file upload returns '
+                        '`{success, message, model}`; a multi-file upload returns '
+                        '`{success, message, uploaded[], errors[]}`.'
+                    ),
+                    'security': [{'sessionCookie': []}],
+                    'requestBody': {
+                        'required': True,
+                        'content': {
+                            'multipart/form-data': {
+                                'schema': {
+                                    'type': 'object',
+                                    'required': ['file'],
+                                    'properties': {
+                                        'file': {
+                                            'type': 'array',
+                                            'items': {'type': 'string', 'format': 'binary'},
+                                            'description': 'One or more model files. Repeat the field for multiple files.',
+                                        },
+                                        'name': {
+                                            'type': 'string',
+                                            'description': 'Required for single-file uploads; ignored when multiple files are sent.',
+                                        },
+                                        'description': {'type': 'string'},
+                                        'is_public': {
+                                            'type': 'string',
+                                            'enum': ['true', 'false'],
+                                            'description': 'Send "true" to make the model(s) public. Applies to all files.',
+                                        },
+                                        'tags': {
+                                            'type': 'string',
+                                            'description': 'Comma-separated tags. Applies to all files.',
+                                        },
+                                    },
+                                }
+                            }
+                        },
+                    },
+                    'responses': {
+                        '201': {
+                            'description': 'Created (one or more models)',
+                            'content': {
+                                'application/json': {
+                                    'schema': {
+                                        'oneOf': [
+                                            {
+                                                'type': 'object',
+                                                'description': 'Single-file response',
+                                                'properties': {
+                                                    'success': {'type': 'boolean'},
+                                                    'message': {'type': 'string'},
+                                                    'model': {'$ref': '#/components/schemas/ModelSummary'},
+                                                },
+                                            },
+                                            {
+                                                'type': 'object',
+                                                'description': 'Multi-file response',
+                                                'properties': {
+                                                    'success': {'type': 'boolean'},
+                                                    'message': {'type': 'string'},
+                                                    'uploaded': {
+                                                        'type': 'array',
+                                                        'items': {'$ref': '#/components/schemas/ModelSummary'},
+                                                    },
+                                                    'errors': {
+                                                        'type': 'array',
+                                                        'items': {
+                                                            'type': 'object',
+                                                            'properties': {
+                                                                'filename': {'type': 'string'},
+                                                                'error': {'type': 'string'},
+                                                            },
+                                                        },
+                                                    },
+                                                },
+                                            },
+                                        ]
+                                    }
+                                }
+                            },
+                        },
+                        '400': _error_response('Missing file/name, bad type, too large, or all files failed'),
+                        '401': _error_response('Authentication required'),
+                        '500': _error_response('Upload failed'),
+                    },
+                }
+            },
+        },
+    }

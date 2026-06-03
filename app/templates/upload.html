@@ -6,20 +6,20 @@
 <div class="max-w-4xl mx-auto px-4 py-8">
     <div class="bg-white rounded-xl card-shadow p-8">
         <h1 class="text-3xl font-bold mb-8">Upload 3D Model</h1>
-        
+
         <form id="uploadForm" enctype="multipart/form-data" class="space-y-6">
             <div>
                 <label for="name" class="block text-sm font-medium text-gray-700 mb-2">
                     Model Name
+                    <span id="nameHint" class="text-xs font-normal text-gray-500"></span>
                 </label>
-                <input type="text" 
-                       id="name" 
-                       name="name" 
-                       required 
+                <input type="text"
+                       id="name"
+                       name="name"
                        class="w-full px-3 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
                        placeholder="Enter model name">
             </div>
-            
+
             <div>
                 <label for="description" class="block text-sm font-medium text-gray-700 mb-2">
                     Description
@@ -35,146 +35,287 @@
                 <label for="tags" class="block text-sm font-medium text-gray-700 mb-2">
                     Tags
                 </label>
-                <input type="text"
-                       id="tags"
-                       name="tags"
-                       class="w-full px-3 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                       placeholder="Comma-separated, e.g. character, rigged, walk-cycle">
-                <p class="text-xs text-gray-500 mt-1">Separate tags with commas. Used for filtering on Browse.</p>
+                <div class="relative">
+                    <input type="text"
+                           id="tags"
+                           name="tags"
+                           autocomplete="off"
+                           data-tag-autocomplete
+                           class="w-full px-3 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                           placeholder="Comma-separated, e.g. character, rigged, walk-cycle">
+                </div>
+                <p class="text-xs text-gray-500 mt-1">Separate tags with commas. Applied to every uploaded file.</p>
             </div>
+
+            <!-- Existing tags for autocomplete suggestions -->
+            <script id="tag-suggestions" type="application/json">{{ (all_tags or []) | tojson }}</script>
 
             <div>
                 <label class="block text-sm font-medium text-gray-700 mb-2">
-                    3D Model File
+                    3D Model File(s)
                 </label>
                 <div id="dropZone" class="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center hover:border-indigo-500 transition duration-200">
                     <i class="fas fa-cloud-upload-alt text-4xl text-gray-400 mb-4"></i>
-                    <p class="text-gray-600 mb-2">Drag and drop your file here, or</p>
-                    <input type="file" 
-                           id="file" 
-                           name="file" 
+                    <p class="text-gray-600 mb-2">Drag and drop file(s) or a folder here, or</p>
+
+                    <!-- Multiple individual files -->
+                    <input type="file"
+                           id="file"
+                           name="file"
+                           multiple
                            accept=".obj,.fbx,.gltf,.glb,.dae,.3ds,.ply,.stl"
                            class="hidden">
-                    <button type="button" 
-                            onclick="document.getElementById('file').click()"
-                            class="bg-indigo-600 text-white px-6 py-2 rounded-lg hover:bg-indigo-700">
-                        Choose File
-                    </button>
-                    <p class="text-sm text-gray-500 mt-2">Supported formats: OBJ, FBX, GLTF, GLB, DAE, 3DS, PLY, STL (Max 4MB)</p>
-                    <div class="mt-3 p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
-                        <div class="flex items-start space-x-2">
-                            <i class="fas fa-info-circle text-yellow-600 mt-0.5"></i>
-                            <div class="text-sm text-yellow-800">
-                                <strong>Server Limitation Notice:</strong> Due to current server limitations, file uploads are restricted to 4MB. 
-                                We apologize for this inconvenience and are working to increase server capacity soon to support larger files.
-                            </div>
-                        </div>
+                    <!-- Whole folder (webkitdirectory). Same handler, separate input. -->
+                    <input type="file"
+                           id="folder"
+                           webkitdirectory
+                           directory
+                           multiple
+                           class="hidden">
+
+                    <div class="flex flex-wrap justify-center gap-2">
+                        <button type="button"
+                                onclick="document.getElementById('file').click()"
+                                class="bg-indigo-600 text-white px-6 py-2 rounded-lg hover:bg-indigo-700">
+                            <i class="fas fa-file mr-1"></i>Choose Files
+                        </button>
+                        <button type="button"
+                                onclick="document.getElementById('folder').click()"
+                                class="bg-indigo-100 text-indigo-700 px-6 py-2 rounded-lg hover:bg-indigo-200">
+                            <i class="fas fa-folder-open mr-1"></i>Choose Folder
+                        </button>
                     </div>
+                    <p class="text-sm text-gray-500 mt-2">
+                        Supported: OBJ, FBX, GLTF, GLB, DAE, 3DS, PLY, STL
+                        (Max {{ max_upload_mb }}MB per file)
+                    </p>
+                    <p class="text-xs text-gray-400 mt-1">
+                        Select multiple files or a whole folder &mdash; each model file becomes its own asset.
+                    </p>
                 </div>
-                <div id="fileInfo" class="mt-4 hidden">
-                    <div class="bg-gray-50 p-4 rounded-lg">
-                        <div class="flex items-center justify-between">
-                            <div class="flex items-center space-x-3">
-                                <i class="fas fa-file text-indigo-600"></i>
-                                <div>
-                                    <div id="fileName" class="font-medium"></div>
-                                    <div id="fileSize" class="text-sm text-gray-500"></div>
-                                </div>
-                            </div>
-                            <button type="button" 
-                                    onclick="clearFile()"
-                                    class="text-red-500 hover:text-red-700">
-                                <i class="fas fa-times"></i>
-                            </button>
-                        </div>
-                    </div>
-                </div>
+
+                <!-- Selected files list -->
+                <div id="fileList" class="mt-4 hidden space-y-2"></div>
+                <div id="fileSummary" class="mt-2 text-sm text-gray-600 hidden"></div>
             </div>
-            
+
             <div>
                 <label class="flex items-center space-x-2">
-                    <input type="checkbox" 
-                           id="is_public" 
-                           name="is_public" 
+                    <input type="checkbox"
+                           id="is_public"
+                           name="is_public"
                            checked
                            class="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500">
-                    <span class="text-sm text-gray-700">Make this model public (others can view and download)</span>
+                    <span class="text-sm text-gray-700">Make uploaded model(s) public (others can view and download)</span>
                 </label>
             </div>
-            
+
             <div class="flex space-x-4">
-                <button type="submit" 
+                <button type="submit"
                         id="uploadBtn"
                         class="bg-indigo-600 text-white px-8 py-3 rounded-lg font-semibold hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed">
-                    <i class="fas fa-upload mr-2"></i>Upload Model
+                    <i class="fas fa-upload mr-2"></i>Upload
                 </button>
-                <a href="{{ url_for('main.dashboard') }}" 
+                <a href="{{ url_for('main.dashboard') }}"
                    class="bg-gray-500 text-white px-8 py-3 rounded-lg font-semibold hover:bg-gray-600">
                     Cancel
                 </a>
             </div>
-            
+
             <div id="uploadProgress" class="hidden">
                 <div class="bg-gray-200 rounded-full h-2">
                     <div id="progressBar" class="bg-indigo-600 h-2 rounded-full transition-all duration-300" style="width: 0%"></div>
                 </div>
                 <p id="uploadStatus" class="text-sm text-gray-600 mt-2">Uploading...</p>
             </div>
+
+            <!-- Per-file results (multi-upload) -->
+            <div id="resultList" class="hidden space-y-2"></div>
         </form>
     </div>
 </div>
 
 <script>
+const ALLOWED_EXTENSIONS = ['obj', 'fbx', 'gltf', 'glb', 'dae', '3ds', 'ply', 'stl'];
+const MAX_UPLOAD_MB = {{ max_upload_mb }};
+const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024;
+
 const dropZone = document.getElementById('dropZone');
 const fileInput = document.getElementById('file');
-const fileInfo = document.getElementById('fileInfo');
-const fileName = document.getElementById('fileName');
-const fileSize = document.getElementById('fileSize');
+const folderInput = document.getElementById('folder');
+const fileListEl = document.getElementById('fileList');
+const fileSummaryEl = document.getElementById('fileSummary');
+const nameInput = document.getElementById('name');
+const nameHint = document.getElementById('nameHint');
 const uploadForm = document.getElementById('uploadForm');
 const uploadProgress = document.getElementById('uploadProgress');
 const progressBar = document.getElementById('progressBar');
 const uploadStatus = document.getElementById('uploadStatus');
 const uploadBtn = document.getElementById('uploadBtn');
+const resultList = document.getElementById('resultList');
 
-// Drag and drop events
+// The working set of selected files (accumulates across pickers/drops).
+let selectedFiles = [];
+
+function hasAllowedExt(name) {
+    const ext = name.includes('.') ? name.split('.').pop().toLowerCase() : '';
+    return ALLOWED_EXTENSIONS.includes(ext);
+}
+
+function fileKey(f) {
+    // webkitRelativePath disambiguates same-named files from different folders.
+    return (f.webkitRelativePath || f.name) + '::' + f.size;
+}
+
+function addFiles(fileArray) {
+    const incoming = Array.from(fileArray);
+    const accepted = incoming.filter(f => hasAllowedExt(f.name));
+    const rejectedCount = incoming.length - accepted.length;
+
+    const existing = new Set(selectedFiles.map(fileKey));
+    for (const f of accepted) {
+        if (!existing.has(fileKey(f))) {
+            selectedFiles.push(f);
+            existing.add(fileKey(f));
+        }
+    }
+    renderFileList();
+
+    if (rejectedCount > 0) {
+        fileSummaryEl.textContent =
+            `${rejectedCount} file(s) skipped (unsupported type). ` +
+            `${selectedFiles.length} model file(s) ready.`;
+    }
+}
+
+function removeFile(key) {
+    selectedFiles = selectedFiles.filter(f => fileKey(f) !== key);
+    renderFileList();
+}
+
+function renderFileList() {
+    fileListEl.innerHTML = '';
+    if (selectedFiles.length === 0) {
+        fileListEl.classList.add('hidden');
+        fileSummaryEl.classList.add('hidden');
+        updateNameRequirement();
+        return;
+    }
+
+    fileListEl.classList.remove('hidden');
+    let totalBytes = 0;
+    let oversize = 0;
+
+    selectedFiles.forEach((f) => {
+        totalBytes += f.size;
+        const over = f.size > MAX_UPLOAD_BYTES;
+        if (over) oversize++;
+
+        const row = document.createElement('div');
+        row.className = 'bg-gray-50 p-3 rounded-lg flex items-center justify-between';
+        const displayName = f.webkitRelativePath || f.name;
+        row.innerHTML = `
+            <div class="flex items-center space-x-3 min-w-0">
+                <i class="fas fa-cube ${over ? 'text-red-500' : 'text-indigo-600'}"></i>
+                <div class="min-w-0">
+                    <div class="font-medium truncate" title="${displayName}">${displayName}</div>
+                    <div class="text-sm ${over ? 'text-red-600' : 'text-gray-500'}">
+                        ${formatFileSize(f.size)}${over ? ' — exceeds ' + MAX_UPLOAD_MB + 'MB limit' : ''}
+                    </div>
+                </div>
+            </div>
+            <button type="button" class="text-red-500 hover:text-red-700 ml-3 flex-shrink-0" aria-label="Remove">
+                <i class="fas fa-times"></i>
+            </button>`;
+        row.querySelector('button').addEventListener('click', () => removeFile(fileKey(f)));
+        fileListEl.appendChild(row);
+    });
+
+    fileSummaryEl.classList.remove('hidden');
+    fileSummaryEl.textContent =
+        `${selectedFiles.length} file(s) selected · ${formatFileSize(totalBytes)} total` +
+        (oversize > 0 ? ` · ${oversize} over the size limit` : '');
+
+    updateNameRequirement();
+}
+
+function updateNameRequirement() {
+    // Name is only required (and used) for a single-file upload.
+    if (selectedFiles.length === 1) {
+        nameInput.disabled = false;
+        nameInput.placeholder = 'Enter model name';
+        nameHint.textContent = '(required)';
+    } else if (selectedFiles.length > 1) {
+        nameInput.disabled = true;
+        nameInput.value = '';
+        nameInput.placeholder = 'Each file is named from its own filename';
+        nameHint.textContent = '(auto-named per file)';
+    } else {
+        nameInput.disabled = false;
+        nameInput.placeholder = 'Enter model name';
+        nameHint.textContent = '';
+    }
+}
+
+// Drag and drop (files or folders)
 dropZone.addEventListener('dragover', (e) => {
     e.preventDefault();
     dropZone.classList.add('border-indigo-500', 'bg-indigo-50');
 });
-
 dropZone.addEventListener('dragleave', (e) => {
     e.preventDefault();
     dropZone.classList.remove('border-indigo-500', 'bg-indigo-50');
 });
-
-dropZone.addEventListener('drop', (e) => {
+dropZone.addEventListener('drop', async (e) => {
     e.preventDefault();
     dropZone.classList.remove('border-indigo-500', 'bg-indigo-50');
-    
-    const files = e.dataTransfer.files;
-    if (files.length > 0) {
-        fileInput.files = files;
-        showFileInfo(files[0]);
+
+    // Try to walk dropped folders recursively; fall back to flat file list.
+    const items = e.dataTransfer.items;
+    if (items && items.length && items[0].webkitGetAsEntry) {
+        const all = [];
+        const entries = [];
+        for (const it of items) {
+            const entry = it.webkitGetAsEntry();
+            if (entry) entries.push(entry);
+        }
+        for (const entry of entries) {
+            await walkEntry(entry, all);
+        }
+        if (all.length) { addFiles(all); return; }
     }
+    if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files);
 });
 
-// File input change
+// Recursively collect File objects from a dropped directory entry.
+function walkEntry(entry, out) {
+    return new Promise((resolve) => {
+        if (entry.isFile) {
+            entry.file((f) => { out.push(f); resolve(); }, () => resolve());
+        } else if (entry.isDirectory) {
+            const reader = entry.createReader();
+            const readBatch = () => {
+                reader.readEntries(async (batch) => {
+                    if (!batch.length) { resolve(); return; }
+                    for (const e of batch) await walkEntry(e, out);
+                    readBatch(); // readEntries returns in chunks
+                }, () => resolve());
+            };
+            readBatch();
+        } else {
+            resolve();
+        }
+    });
+}
+
 fileInput.addEventListener('change', (e) => {
-    if (e.target.files.length > 0) {
-        showFileInfo(e.target.files[0]);
-    }
+    if (e.target.files.length) addFiles(e.target.files);
+    fileInput.value = ''; // allow re-selecting the same file
 });
-
-function showFileInfo(file) {
-    fileName.textContent = file.name;
-    fileSize.textContent = formatFileSize(file.size);
-    fileInfo.classList.remove('hidden');
-}
-
-function clearFile() {
-    fileInput.value = '';
-    fileInfo.classList.add('hidden');
-}
+folderInput.addEventListener('change', (e) => {
+    if (e.target.files.length) addFiles(e.target.files);
+    folderInput.value = '';
+});
 
 function formatFileSize(bytes) {
     if (bytes === 0) return '0 Bytes';
@@ -184,46 +325,86 @@ function formatFileSize(bytes) {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
 
-// Form submission
+function showResults(uploaded, errors) {
+    resultList.innerHTML = '';
+    resultList.classList.remove('hidden');
+    uploaded.forEach((m) => {
+        const el = document.createElement('div');
+        el.className = 'bg-green-50 border border-green-200 text-green-800 p-3 rounded-lg text-sm';
+        el.innerHTML = `<i class="fas fa-check-circle mr-2"></i>${m.original_filename} → "${m.name}"`;
+        resultList.appendChild(el);
+    });
+    errors.forEach((er) => {
+        const el = document.createElement('div');
+        el.className = 'bg-red-50 border border-red-200 text-red-800 p-3 rounded-lg text-sm';
+        el.innerHTML = `<i class="fas fa-times-circle mr-2"></i>${er.filename}: ${er.error}`;
+        resultList.appendChild(el);
+    });
+}
+
 uploadForm.addEventListener('submit', async (e) => {
     e.preventDefault();
-    
-    const formData = new FormData();
-    formData.append('file', fileInput.files[0]);
-    formData.append('name', document.getElementById('name').value);
-    formData.append('description', document.getElementById('description').value);
-    formData.append('is_public', document.getElementById('is_public').checked);
-    
-    if (!fileInput.files[0]) {
-        alert('Please select a file to upload');
+
+    if (selectedFiles.length === 0) {
+        alert('Please select at least one file to upload.');
         return;
     }
-    
+    if (selectedFiles.length === 1 && !nameInput.value.trim()) {
+        alert('Please provide a name for your model.');
+        nameInput.focus();
+        return;
+    }
+    if (selectedFiles.some(f => f.size > MAX_UPLOAD_BYTES)) {
+        alert(`One or more files exceed the ${MAX_UPLOAD_MB}MB per-file limit. Remove them and try again.`);
+        return;
+    }
+
+    const formData = new FormData();
+    selectedFiles.forEach(f => formData.append('file', f, f.name));
+    if (selectedFiles.length === 1) {
+        formData.append('name', nameInput.value.trim());
+    }
+    formData.append('description', document.getElementById('description').value);
+    formData.append('tags', document.getElementById('tags').value);
+    formData.append('is_public', document.getElementById('is_public').checked ? 'true' : 'false');
+
     uploadBtn.disabled = true;
     uploadProgress.classList.remove('hidden');
-    
+    resultList.classList.add('hidden');
+    progressBar.style.width = '40%';
+    uploadStatus.textContent = `Uploading ${selectedFiles.length} file(s)...`;
+
     try {
-        const response = await fetch('/api/upload', {
-            method: 'POST',
-            body: formData
-        });
-        
+        const response = await fetch('/api/upload', { method: 'POST', body: formData });
         const result = await response.json();
-        
+        progressBar.style.width = '100%';
+
         if (response.ok) {
-            uploadStatus.textContent = 'Upload successful!';
-            progressBar.style.width = '100%';
-            setTimeout(() => {
-                window.location.href = '/dashboard';
-            }, 1500);
+            // Single-file shape: {model}. Multi-file shape: {uploaded, errors}.
+            if (result.model) {
+                uploadStatus.textContent = 'Upload successful!';
+                setTimeout(() => { window.location.href = '/dashboard'; }, 1200);
+            } else {
+                const uploaded = result.uploaded || [];
+                const errors = result.errors || [];
+                uploadStatus.textContent = result.message ||
+                    `${uploaded.length} uploaded, ${errors.length} failed.`;
+                showResults(uploaded, errors);
+                if (errors.length === 0) {
+                    setTimeout(() => { window.location.href = '/dashboard'; }, 1800);
+                } else {
+                    uploadBtn.disabled = false;
+                }
+            }
         } else {
             throw new Error(result.error || 'Upload failed');
         }
     } catch (error) {
         uploadStatus.textContent = 'Upload failed: ' + error.message;
         uploadBtn.disabled = false;
-        uploadProgress.classList.add('hidden');
     }
 });
+
+updateNameRequirement();
 </script>
 {% endblock %}

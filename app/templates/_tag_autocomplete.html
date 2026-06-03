@@ -1,0 +1,119 @@
+<!-- Reusable comma-token tag autocomplete. Attaches to any
+     <input data-tag-autocomplete>. Suggestions come from a JSON
+     <script id="tag-suggestions"> element on the page (a list of tags). -->
+<style>
+    .tag-ac-menu {
+        position: absolute;
+        z-index: 50;
+        background: #fff;
+        border: 1px solid #e5e7eb;
+        border-radius: 8px;
+        box-shadow: 0 8px 20px rgba(0,0,0,0.12);
+        max-height: 200px;
+        overflow-y: auto;
+        min-width: 160px;
+    }
+    .tag-ac-item { padding: 6px 12px; font-size: 0.875rem; cursor: pointer; }
+    .tag-ac-item:hover, .tag-ac-item.active { background: #eef2ff; color: #4338ca; }
+</style>
+<script>
+(function () {
+    function loadSuggestions() {
+        const el = document.getElementById('tag-suggestions');
+        if (!el) return [];
+        try { return JSON.parse(el.textContent) || []; }
+        catch (e) { return []; }
+    }
+
+    const suggestions = loadSuggestions();
+    if (!suggestions.length) return;
+
+    document.querySelectorAll('input[data-tag-autocomplete]').forEach(input => {
+        let menu = null;
+        let activeIndex = -1;
+
+        function closeMenu() {
+            if (menu) { menu.remove(); menu = null; }
+            activeIndex = -1;
+        }
+
+        // The token (tag fragment) the caret is currently inside.
+        function currentToken() {
+            const val = input.value;
+            const caret = input.selectionStart;
+            const start = val.lastIndexOf(',', caret - 1) + 1;
+            let end = val.indexOf(',', caret);
+            if (end === -1) end = val.length;
+            return { text: val.slice(start, end).trim(), start, end };
+        }
+
+        function applySuggestion(tag) {
+            const tok = currentToken();
+            const val = input.value;
+            const before = val.slice(0, tok.start);
+            const after = val.slice(tok.end);
+            // Rebuild with the chosen tag, leaving a trailing ", " to keep typing.
+            const sep = before && !before.trimEnd().endsWith(',') ? ' ' : (before ? ' ' : '');
+            input.value = (before + sep + tag).replace(/^\s+/, '') + ', ' + after.replace(/^[,\s]+/, '');
+            closeMenu();
+            input.focus();
+        }
+
+        function render() {
+            const tok = currentToken();
+            const q = tok.text.toLowerCase();
+            // Tags already present in the field (don't suggest dupes).
+            const used = input.value.split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+            const matches = suggestions.filter(t =>
+                t.toLowerCase().includes(q) && (q === '' ? !used.includes(t.toLowerCase()) : !used.includes(t.toLowerCase()) || t.toLowerCase() === q)
+            ).filter(t => !used.includes(t.toLowerCase())).slice(0, 8);
+
+            closeMenu();
+            if (!matches.length) return;
+
+            menu = document.createElement('div');
+            menu.className = 'tag-ac-menu';
+            matches.forEach((t, i) => {
+                const item = document.createElement('div');
+                item.className = 'tag-ac-item';
+                item.textContent = t;
+                item.addEventListener('mousedown', e => { e.preventDefault(); applySuggestion(t); });
+                menu.appendChild(item);
+            });
+
+            // Position right under the input.
+            const wrap = input.parentElement;
+            if (getComputedStyle(wrap).position === 'static') wrap.style.position = 'relative';
+            menu.style.left = input.offsetLeft + 'px';
+            menu.style.top = (input.offsetTop + input.offsetHeight + 2) + 'px';
+            wrap.appendChild(menu);
+            activeIndex = -1;
+        }
+
+        input.addEventListener('input', render);
+        input.addEventListener('focus', render);
+        input.addEventListener('blur', () => setTimeout(closeMenu, 150));
+        input.addEventListener('keydown', e => {
+            if (!menu) return;
+            const items = Array.from(menu.querySelectorAll('.tag-ac-item'));
+            if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                activeIndex = Math.min(activeIndex + 1, items.length - 1);
+            } else if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                activeIndex = Math.max(activeIndex - 1, 0);
+            } else if (e.key === 'Enter' && activeIndex >= 0) {
+                e.preventDefault();
+                applySuggestion(items[activeIndex].textContent);
+                return;
+            } else if (e.key === 'Escape') {
+                closeMenu();
+                return;
+            } else {
+                return;
+            }
+            items.forEach((it, i) => it.classList.toggle('active', i === activeIndex));
+        });
+    });
+})();
+</script>
