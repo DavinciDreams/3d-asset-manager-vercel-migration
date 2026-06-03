@@ -633,6 +633,9 @@
             modelViewer.setAttribute('touch-action', 'pan-y');
             modelViewer.setAttribute('auto-rotate', '');
             modelViewer.setAttribute('shadow-intensity', '1');
+            // Autoplay embedded glTF/GLB animations. No-op for models without
+            // animation tracks, so non-animated models keep auto-rotating.
+            modelViewer.setAttribute('autoplay', '');
             
             // Set size classes based on options
             if (options.large) {
