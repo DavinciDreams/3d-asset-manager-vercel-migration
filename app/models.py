@@ -208,7 +208,30 @@ class Model3D:
     def file_extension(self):
         """Get file extension (alias for file_format for template compatibility)"""
         return self.file_format
-    
+
+    @staticmethod
+    def from_doc(model_data):
+        """Build a Model3D from a MongoDB document, tolerating missing keys.
+
+        Older or partial documents may be missing some fields; using .get()
+        with defaults keeps one bad document from breaking a whole listing.
+        """
+        return Model3D(
+            name=model_data.get('name', 'Untitled'),
+            description=model_data.get('description', ''),
+            file_format=model_data.get('file_format', ''),
+            file_size=model_data.get('file_size', 0),
+            original_filename=model_data.get('original_filename', ''),
+            user_id=model_data.get('user_id'),
+            is_public=model_data.get('is_public', False),
+            _id=model_data.get('_id'),
+            upload_date=model_data.get('upload_date'),
+            download_count=model_data.get('download_count', 0),
+            gridfs_file_id=model_data.get('gridfs_file_id'),
+            camera_orbit=model_data.get('camera_orbit'),
+            thumbnail_file_id=model_data.get('thumbnail_file_id')
+        )
+
     @staticmethod
     def get_by_id(model_id):
         """Get model by ID"""
@@ -217,21 +240,7 @@ class Model3D:
             model_data = db.models.find_one({'_id': ObjectId(model_id)})
             
             if model_data:
-                return Model3D(
-                    name=model_data['name'],
-                    description=model_data['description'],
-                    file_format=model_data['file_format'],
-                    file_size=model_data['file_size'],
-                    original_filename=model_data['original_filename'],
-                    user_id=model_data['user_id'],
-                    is_public=model_data['is_public'],
-                    _id=model_data['_id'],
-                    upload_date=model_data.get('upload_date'),
-                    download_count=model_data.get('download_count', 0),
-                    gridfs_file_id=model_data.get('gridfs_file_id'),
-                    camera_orbit=model_data.get('camera_orbit'),
-                    thumbnail_file_id=model_data.get('thumbnail_file_id')
-                )
+                return Model3D.from_doc(model_data)
         except Exception as e:
             print(f"Error getting model by ID: {e}")
         return None
@@ -252,26 +261,10 @@ class Model3D:
                      .skip((page - 1) * per_page)
                      .limit(per_page))
         
-        model_objects = []
-        for model_data in models:
-            model_objects.append(Model3D(
-                name=model_data['name'],
-                description=model_data['description'],
-                file_format=model_data['file_format'],
-                file_size=model_data['file_size'],
-                original_filename=model_data['original_filename'],
-                user_id=model_data['user_id'],
-                is_public=model_data['is_public'],
-                _id=model_data['_id'],
-                upload_date=model_data.get('upload_date'),
-                download_count=model_data.get('download_count', 0),
-                gridfs_file_id=model_data.get('gridfs_file_id'),
-                camera_orbit=model_data.get('camera_orbit'),
-                thumbnail_file_id=model_data.get('thumbnail_file_id')
-            ))
-        
+        model_objects = [Model3D.from_doc(m) for m in models]
+
         return model_objects, total
-    
+
     @staticmethod
     def get_user_models(user_id, page=1, per_page=20):
         """Get user's models with pagination"""
@@ -285,24 +278,8 @@ class Model3D:
                      .skip((page - 1) * per_page)
                      .limit(per_page))
         
-        model_objects = []
-        for model_data in models:
-            model_objects.append(Model3D(
-                name=model_data['name'],
-                description=model_data['description'],
-                file_format=model_data['file_format'],
-                file_size=model_data['file_size'],
-                original_filename=model_data['original_filename'],
-                user_id=model_data['user_id'],
-                is_public=model_data['is_public'],
-                _id=model_data['_id'],
-                upload_date=model_data.get('upload_date'),
-                download_count=model_data.get('download_count', 0),
-                gridfs_file_id=model_data.get('gridfs_file_id'),
-                camera_orbit=model_data.get('camera_orbit'),
-                thumbnail_file_id=model_data.get('thumbnail_file_id')
-            ))
-        
+        model_objects = [Model3D.from_doc(m) for m in models]
+
         return model_objects, total
     
     @staticmethod

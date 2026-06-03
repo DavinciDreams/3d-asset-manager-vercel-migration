@@ -72,9 +72,11 @@ def dashboard():
     """User dashboard"""
     try:
         
-        user_models, total_user_models = Model3D.get_user_models(current_user.id, page=1, per_page=10)
+        # Show all of the user's models on the dashboard (not just the first
+        # page), so the count card and the table agree.
+        user_models, total_user_models = Model3D.get_user_models(current_user.id, page=1, per_page=1000)
 
-        # Calculate user stats
+        # Calculate user stats from the full set
         total_downloads = sum(model.download_count for model in user_models)
         public_models = sum(1 for model in user_models if model.is_public)
         
