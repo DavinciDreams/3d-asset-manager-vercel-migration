@@ -142,6 +142,7 @@ def create_app():
             db.models.create_index("user_id")
             db.models.create_index("is_public")
             db.models.create_index("upload_date")
+            db.models.create_index("tags")
             db.models.create_index([("name", "text"), ("description", "text")])
             print("Database indexes created")
     except Exception as e:

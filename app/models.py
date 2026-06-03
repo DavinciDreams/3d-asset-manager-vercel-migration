@@ -100,7 +100,7 @@ class Model3D:
     def __init__(self, name=None, description=None, file_format=None, file_size=None,
                  original_filename=None, user_id=None, is_public=True, _id=None,
                  upload_date=None, download_count=0, gridfs_file_id=None,
-                 camera_orbit=None, thumbnail_file_id=None):
+                 camera_orbit=None, thumbnail_file_id=None, tags=None):
         self.name = name
         self.description = description
         self.file_format = file_format
@@ -117,7 +117,9 @@ class Model3D:
         self.camera_orbit = camera_orbit
         # GridFS id of a captured PNG thumbnail. None until first generated.
         self.thumbnail_file_id = thumbnail_file_id
-    
+        # List of lowercase tag strings for filtering/sorting.
+        self.tags = tags or []
+
     def save(self):
         """Save model to MongoDB"""
         db = current_app.config['MONGODB_DB']
@@ -134,7 +136,8 @@ class Model3D:
             'download_count': self.download_count,
             'gridfs_file_id': self.gridfs_file_id,
             'camera_orbit': self.camera_orbit,
-            'thumbnail_file_id': self.thumbnail_file_id
+            'thumbnail_file_id': self.thumbnail_file_id,
+            'tags': self.tags
         }
         
         if self.id:
@@ -229,8 +232,27 @@ class Model3D:
             download_count=model_data.get('download_count', 0),
             gridfs_file_id=model_data.get('gridfs_file_id'),
             camera_orbit=model_data.get('camera_orbit'),
-            thumbnail_file_id=model_data.get('thumbnail_file_id')
+            thumbnail_file_id=model_data.get('thumbnail_file_id'),
+            tags=model_data.get('tags') or []
         )
+
+    @staticmethod
+    def normalize_tags(raw):
+        """Normalize tags from a string ('a, b, c') or list into a clean,
+        de-duplicated list of lowercase strings."""
+        if raw is None:
+            return []
+        if isinstance(raw, str):
+            parts = raw.split(',')
+        else:
+            parts = list(raw)
+        seen, out = set(), []
+        for p in parts:
+            t = str(p).strip().lower()
+            if t and t not in seen:
+                seen.add(t)
+                out.append(t)
+        return out
 
     @staticmethod
     def get_by_id(model_id):
@@ -245,42 +267,81 @@ class Model3D:
             print(f"Error getting model by ID: {e}")
         return None
     
+    # Allowed sort options -> (field, direction) for pymongo .sort().
+    SORT_OPTIONS = {
+        'newest': ('upload_date', -1),
+        'oldest': ('upload_date', 1),
+        'downloads': ('download_count', -1),
+        'name': ('name', 1),
+    }
+
+    @classmethod
+    def _sort_spec(cls, sort):
+        return cls.SORT_OPTIONS.get(sort, cls.SORT_OPTIONS['newest'])
+
     @staticmethod
-    def get_public_models(page=1, per_page=20, search=None):
-        """Get public models with pagination"""
+    def get_public_models(page=1, per_page=20, search=None, sort='newest', tag=None):
+        """Get public models with pagination, optional search/tag/sort."""
         db = current_app.config['MONGODB_DB']
-        
+
         query = {'is_public': True}
         if search:
             query['$text'] = {'$search': search}
-        
+        if tag:
+            query['tags'] = tag.strip().lower()
+
         total = db.models.count_documents(query)
-        
+
+        field, direction = Model3D._sort_spec(sort)
         models = list(db.models.find(query)
-                     .sort('upload_date', -1)
+                     .sort(field, direction)
                      .skip((page - 1) * per_page)
                      .limit(per_page))
-        
+
         model_objects = [Model3D.from_doc(m) for m in models]
 
         return model_objects, total
 
     @staticmethod
-    def get_user_models(user_id, page=1, per_page=20):
-        """Get user's models with pagination"""
+    def get_user_models(user_id, page=1, per_page=20, sort='newest', tag=None):
+        """Get a user's models with pagination, optional tag/sort."""
         db = current_app.config['MONGODB_DB']
-        
+
         query = {'user_id': user_id}
+        if tag:
+            query['tags'] = tag.strip().lower()
+
         total = db.models.count_documents(query)
-        
+
+        field, direction = Model3D._sort_spec(sort)
         models = list(db.models.find(query)
-                     .sort('upload_date', -1)
+                     .sort(field, direction)
                      .skip((page - 1) * per_page)
                      .limit(per_page))
-        
+
         model_objects = [Model3D.from_doc(m) for m in models]
 
         return model_objects, total
+
+    @staticmethod
+    def get_user_tags(user_id):
+        """Distinct tags used across a user's models (sorted)."""
+        db = current_app.config['MONGODB_DB']
+        try:
+            return sorted(db.models.distinct('tags', {'user_id': user_id}))
+        except Exception as e:
+            print(f"Error getting user tags: {e}")
+            return []
+
+    @staticmethod
+    def get_public_tags():
+        """Distinct tags across all public models (sorted)."""
+        db = current_app.config['MONGODB_DB']
+        try:
+            return sorted(db.models.distinct('tags', {'is_public': True}))
+        except Exception as e:
+            print(f"Error getting public tags: {e}")
+            return []
     
     @staticmethod
     def get_stats():

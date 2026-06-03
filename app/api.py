@@ -206,6 +206,9 @@ def update_model(model_id):
             orbit = (data.get('camera_orbit') or '').strip()
             model.camera_orbit = orbit or None
 
+        if 'tags' in data:
+            model.tags = Model3D.normalize_tags(data.get('tags'))
+
         model.save()
 
         return jsonify({
@@ -217,6 +220,7 @@ def update_model(model_id):
                 'description': model.description,
                 'is_public': model.is_public,
                 'camera_orbit': model.camera_orbit,
+                'tags': model.tags,
             }
         })
 
@@ -402,8 +406,8 @@ def upload_model():
         name = request.form.get('name', '').strip()
         description = request.form.get('description', '').strip()
         is_public = request.form.get('is_public') == 'true'  # Note: 'true' for JSON boolean
-        
-        
+        tags = Model3D.normalize_tags(request.form.get('tags', ''))
+
         # Get uploaded file
         file = request.files.get('file')
         
@@ -458,9 +462,10 @@ def upload_model():
             original_filename=file.filename,
             user_id=current_user.id,
             is_public=is_public,
-            gridfs_file_id=str(gridfs_file_id)
+            gridfs_file_id=str(gridfs_file_id),
+            tags=tags
         )
-        
+
         model.save()
         
         # Return success response with model data

@@ -72,28 +72,36 @@ def dashboard():
     """User dashboard"""
     try:
         
+        sort = request.args.get('sort', 'newest')
+        tag = request.args.get('tag', '').strip()
+
         # Show all of the user's models on the dashboard (not just the first
         # page), so the count card and the table agree.
-        user_models, total_user_models = Model3D.get_user_models(current_user.id, page=1, per_page=1000)
+        user_models, total_user_models = Model3D.get_user_models(
+            current_user.id, page=1, per_page=1000,
+            sort=sort, tag=tag if tag else None)
 
         # Calculate user stats from the full set
         total_downloads = sum(model.download_count for model in user_models)
         public_models = sum(1 for model in user_models if model.is_public)
-        
-        return render_template('dashboard.html', 
+        all_tags = Model3D.get_user_tags(current_user.id)
+
+        return render_template('dashboard.html',
                              user_models=user_models,
                              total_models=total_user_models,
                              total_downloads=total_downloads,
-                             public_models=public_models)
+                             public_models=public_models,
+                             sort=sort, tag=tag, all_tags=all_tags)
     except Exception as e:
         print(f"Dashboard error: {e}")
         import traceback
         traceback.print_exc()
-        return render_template('dashboard.html', 
+        return render_template('dashboard.html',
                              user_models=[],
                              total_models=0,
                              total_downloads=0,
                              public_models=0,
+                             sort='newest', tag='', all_tags=[],
                              error=str(e))
 
 @main_bp.route('/browse')
@@ -103,18 +111,22 @@ def browse():
         
         search = request.args.get('search', '').strip()
         page = request.args.get('page', 1, type=int)
-        
-        
+        sort = request.args.get('sort', 'newest')
+        tag = request.args.get('tag', '').strip()
+
         # Get public models with pagination
-        models, total = Model3D.get_public_models(page=page, per_page=12, search=search if search else None)
-        
-        
+        models, total = Model3D.get_public_models(
+            page=page, per_page=12,
+            search=search if search else None,
+            sort=sort, tag=tag if tag else None)
+
         # Add owner username to each model
         for model in models:
             user = User.get_by_id(model.user_id)
             model.owner_username = user.username if user else 'Unknown'
 
         pagination = Pagination(models, total, page, 12)
+        all_tags = Model3D.get_public_tags()
 
     except Exception as e:
         print(f"Browse error: {e}")
@@ -122,10 +134,14 @@ def browse():
         traceback.print_exc()
         pagination = Pagination([], 0, 1, 12)
         search = ''
+        sort = 'newest'
+        tag = ''
+        all_tags = []
 
     # Render outside the try so a template error surfaces instead of being
     # silently swallowed into a misleading "No Models Found" page.
-    return render_template('browse.html', models=pagination, search=search)
+    return render_template('browse.html', models=pagination, search=search,
+                           sort=sort, tag=tag, all_tags=all_tags)
 
 
 @main_bp.route('/local-assets')
@@ -173,7 +189,8 @@ def upload():
             name = request.form.get('name', '').strip()
             description = request.form.get('description', '').strip()
             is_public = request.form.get('is_public') == 'on'
-            
+            tags = Model3D.normalize_tags(request.form.get('tags', ''))
+
             # Get uploaded file
             file = request.files.get('file')
             
@@ -225,11 +242,12 @@ def upload():
                 original_filename=file.filename,
                 user_id=current_user.id,
                 is_public=is_public,
-                gridfs_file_id=str(gridfs_file_id)
+                gridfs_file_id=str(gridfs_file_id),
+                tags=tags
             )
-            
+
             model.save()
-            
+
             flash(f'Model "{name}" uploaded successfully!', 'success')
             return redirect(url_for('main.model_detail', model_id=model.id))
             
