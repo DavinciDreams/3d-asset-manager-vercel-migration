@@ -411,6 +411,76 @@ def list_vrma():
         return jsonify({'animations': []})
 
 
+@api_bp.route('/model/<model_id>/preview', methods=['POST'])
+@login_required
+def upload_preview(model_id):
+    """Store a client-captured looping preview video (WebM) for a model
+    (owner only). Sent as raw bytes (Content-Type: video/webm)."""
+    try:
+        model = Model3D.get_by_id(model_id)
+        if not model:
+            return jsonify({'error': 'Model not found'}), 404
+        if model.user_id != current_user.id:
+            return jsonify({'error': 'Access denied'}), 403
+
+        video_bytes = request.get_data()
+        # Cap preview size (~8MB) so a stray long recording can't bloat GridFS.
+        if not video_bytes or len(video_bytes) > 8 * 1024 * 1024:
+            return jsonify({'error': 'Preview missing or too large'}), 400
+
+        fs = current_app.config['GRIDFS']
+
+        # Remove the previous preview, if any
+        if model.preview_file_id:
+            try:
+                fs.delete(ObjectId(model.preview_file_id))
+            except Exception as e:
+                print(f"Preview cleanup warning: {e}")
+
+        content_type = request.content_type or 'video/webm'
+        new_id = fs.put(
+            video_bytes,
+            filename=f"preview_{model_id}.webm",
+            content_type=content_type,
+            metadata={'model_id': model_id, 'kind': 'preview'}
+        )
+        model.preview_file_id = str(new_id)
+        model.save()
+
+        return jsonify({'success': True, 'preview_file_id': model.preview_file_id})
+
+    except Exception as e:
+        print(f"API preview upload error: {e}")
+        return jsonify({'error': 'Preview upload failed'}), 500
+
+
+@api_bp.route('/model/<model_id>/preview', methods=['GET'])
+def get_preview(model_id):
+    """Serve a model's looping preview video. 404 if none."""
+    try:
+        model = Model3D.get_by_id(model_id)
+        if not model or not model.preview_file_id:
+            return jsonify({'error': 'No preview'}), 404
+
+        if not model.is_public:
+            if not current_user.is_authenticated or model.user_id != current_user.id:
+                return jsonify({'error': 'Access denied'}), 403
+
+        fs = current_app.config['GRIDFS']
+        grid_out = fs.get(ObjectId(model.preview_file_id))
+        video_bytes = grid_out.read()
+
+        response = make_response(video_bytes)
+        response.headers['Content-Type'] = getattr(grid_out, 'content_type', None) or 'video/webm'
+        response.headers['Content-Length'] = str(len(video_bytes))
+        response.headers['Cache-Control'] = 'public, max-age=300'
+        return response
+
+    except Exception as e:
+        print(f"API preview fetch error: {e}")
+        return jsonify({'error': 'Preview fetch failed'}), 404
+
+
 @api_bp.route('/model/<model_id>', methods=['DELETE'])
 @login_required
 def delete_model(model_id):
@@ -574,12 +644,16 @@ def _serialize_model(model):
 def upload_model():
     """Upload one or more 3D models.
 
-    Accepts one or many files under the ``file`` form field (repeat the field
-    for multiple files, e.g. from a folder selection). Each file becomes its
-    own model. Backward compatible with single-file uploads.
+    Accepts one or many files under the ``file`` form field. The web client
+    sends one file per request (so the size limit is enforced per file); the
+    endpoint also still accepts several repeated ``file`` fields in one request.
+    Each file becomes its own model.
 
-    With a single file, the optional ``name`` field names the model. With
-    multiple files, each model is named from its own filename.
+    Naming: if a ``name`` field is provided, it names the model — but only when
+    a *single* file is in the request (a shared name can't apply to many files).
+    When ``name`` is empty, or when multiple files are sent, each model is named
+    from its own filename. This means a multi-file upload (one request per file,
+    no name) does not require a name.
     """
     try:
         description = request.form.get('description', '').strip()
@@ -594,11 +668,11 @@ def upload_model():
         typed_name = request.form.get('name', '').strip()
         single = len(files) == 1
 
-        if single and not typed_name:
-            return jsonify({'error': 'Please provide a name for your model.'}), 400
-
-        # For a single file, use the typed name. For multiple files, name each
-        # from its own filename (pass base_name="" to trigger that path).
+        # Use the typed name only for a single-file request; otherwise auto-name
+        # each file from its own filename. An empty name is NOT an error — we
+        # fall back to the filename. (The web UI still asks for a name on
+        # single-file uploads for nicer UX, but the API no longer requires it,
+        # so per-file batch uploads — one request each, no name — work.)
         base_name = typed_name if single else ''
 
         allowed_extensions = current_app.config['ALLOWED_EXTENSIONS']

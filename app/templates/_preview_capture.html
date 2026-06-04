@@ -1,0 +1,72 @@
+<!-- Reusable client-side preview-video capture. Records a canvas to a short
+     looping WebM via MediaRecorder and uploads it to /api/model/<id>/preview.
+     Exposes window.capturePreview(canvas, modelId, opts) -> Promise<bool>. -->
+<script>
+(function () {
+    // Pick a WebM codec the browser actually supports.
+    function pickMimeType() {
+        const candidates = [
+            'video/webm;codecs=vp9',
+            'video/webm;codecs=vp8',
+            'video/webm'
+        ];
+        for (const m of candidates) {
+            if (window.MediaRecorder && MediaRecorder.isTypeSupported(m)) return m;
+        }
+        return null;
+    }
+
+    // Record `canvas` for durationMs and POST the resulting WebM.
+    // opts: { durationMs=4000, fps=30, onProgress }
+    window.capturePreview = function (canvas, modelId, opts = {}) {
+        return new Promise((resolve) => {
+            if (!canvas || typeof canvas.captureStream !== 'function' || !window.MediaRecorder) {
+                console.warn('Preview capture not supported in this browser.');
+                resolve(false);
+                return;
+            }
+            const mimeType = pickMimeType();
+            if (!mimeType) { resolve(false); return; }
+
+            const durationMs = opts.durationMs || 4000;
+            const fps = opts.fps || 30;
+            let stream, recorder;
+            try {
+                stream = canvas.captureStream(fps);
+                recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 2_500_000 });
+            } catch (e) {
+                console.warn('MediaRecorder init failed:', e);
+                resolve(false);
+                return;
+            }
+
+            const chunks = [];
+            recorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+            recorder.onstop = async () => {
+                try {
+                    const blob = new Blob(chunks, { type: mimeType });
+                    if (!blob.size) { resolve(false); return; }
+                    const resp = await fetch('/api/model/' + modelId + '/preview', {
+                        method: 'POST',
+                        headers: { 'Content-Type': mimeType },
+                        body: blob
+                    });
+                    const data = await resp.json().catch(() => ({}));
+                    resolve(data.success === true);
+                } catch (err) {
+                    console.warn('Preview upload failed:', err);
+                    resolve(false);
+                }
+            };
+
+            try {
+                recorder.start();
+                setTimeout(() => { if (recorder.state !== 'inactive') recorder.stop(); }, durationMs);
+            } catch (e) {
+                console.warn('Recording failed:', e);
+                resolve(false);
+            }
+        });
+    };
+})();
+</script>

@@ -253,6 +253,8 @@ let detailViewer = null;
 const SAVED_CAMERA_ORBIT = {{ model.camera_orbit | tojson }};
 // Whether this model already has a stored thumbnail.
 const HAS_THUMBNAIL = {{ (model.thumbnail_file_id is not none) | tojson }};
+// Whether this model already has a stored preview video.
+const HAS_PREVIEW = {{ (model.preview_file_id is not none) | tojson }};
 // Is the current user the owner? Only owners capture/upload thumbnails.
 const IS_OWNER = {{ (current_user.is_authenticated and current_user.id == model.user_id) | tojson }};
 
@@ -281,6 +283,14 @@ function loadDetailModel(modelId) {
             detailViewer.addEventListener('load', () => {
                 // Give the renderer a moment to settle at the saved angle.
                 setTimeout(() => captureThumbnail(false), 800);
+            }, { once: true });
+        }
+
+        // Auto-capture a rotating preview video (owner only, if none yet).
+        // Only when the model is allowed to spin (no fixed saved view).
+        if (detailViewer && IS_OWNER && !HAS_PREVIEW && !SAVED_CAMERA_ORBIT) {
+            detailViewer.addEventListener('load', () => {
+                setTimeout(() => captureModelViewerPreview(), 1200);
             }, { once: true });
         }
 
@@ -437,6 +447,21 @@ async function captureThumbnail(notify) {
     }
 }
 
+// Record a rotating preview video from the model-viewer canvas (shadow DOM).
+async function captureModelViewerPreview() {
+    const container = document.getElementById('viewer-detail-{{ model.id }}');
+    const modelViewer = container?.querySelector('model-viewer');
+    if (!modelViewer || !window.capturePreview) return;
+    const canvas = modelViewer.shadowRoot && modelViewer.shadowRoot.querySelector('canvas');
+    if (!canvas) return;
+    // model-viewer already has auto-rotate; ensure it's on for the recording.
+    const wasRotating = modelViewer.hasAttribute('auto-rotate');
+    modelViewer.setAttribute('auto-rotate', '');
+    const ok = await window.capturePreview(canvas, '{{ model.id }}', { durationMs: 4000 });
+    if (!wasRotating) modelViewer.removeAttribute('auto-rotate');
+    console.log('Preview auto-captured:', ok);
+}
+
 // Auto-load the model on page load
 document.addEventListener('DOMContentLoaded', function() {
     const fmt = '{{ model.file_format }}';
@@ -449,8 +474,13 @@ document.addEventListener('DOMContentLoaded', function() {
 
 </script>
 
+{% if model.file_format not in ['vrm', 'vrma'] %}
+{% include "_preview_capture.html" %}
+{% endif %}
+
 {% if model.file_format == 'vrm' %}
 {% include "_vrm_viewer.html" %}
+{% include "_preview_capture.html" %}
 <script>
 // Initialize the VRM avatar viewer and wire up the VRMA picker.
 (function () {
@@ -468,6 +498,10 @@ document.addEventListener('DOMContentLoaded', function() {
                 {% if not model.thumbnail_file_id %}
                 // Auto-capture a thumbnail on first load (owner, none yet).
                 setTimeout(captureVrmThumbnail, 1000);
+                {% endif %}
+                {% if not model.preview_file_id %}
+                // Auto-capture a rotating preview video (owner, none yet).
+                setTimeout(captureVrmPreview, 1500);
                 {% endif %}
                 {% endif %}
             },
@@ -517,6 +551,15 @@ document.addEventListener('DOMContentLoaded', function() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ image: dataUrl })
         }).then(r => r.json()).then(d => console.log('VRM thumbnail saved:', d.success === true)).catch(() => {});
+    };
+
+    // Record a ~4s rotating preview of the avatar and upload it.
+    window.captureVrmPreview = async function () {
+        if (!controller || !window.capturePreview) return;
+        controller.setAutoRotate(true, 6);  // spin during capture
+        const ok = await window.capturePreview(controller.canvas, MODEL_ID, { durationMs: 4000 });
+        controller.setAutoRotate(false);
+        console.log('VRM preview saved:', ok);
     };
     {% endif %}
 })();

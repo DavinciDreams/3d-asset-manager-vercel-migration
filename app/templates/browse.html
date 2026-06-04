@@ -66,67 +66,49 @@
     {% endif %}
 
     {% if models and models.items and models.items|length > 0 %}
-        <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-8">
+        <!-- Gallery grid: dense, compact, square previews -->
+        <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-5 gap-4">
             {% for model in models.items %}
-            <div class="bg-white rounded-xl card-shadow hover-scale overflow-hidden">
-                <!-- 3D Model Preview -->
-                <div class="h-48 relative">
-                {% if model.file_format == 'vrma' %}
-                    <!-- VRMA is an animation clip; no standalone preview. -->
-                    <div class="model-viewer flex items-center justify-center">
-                        <div class="text-center">
-                            <div class="text-3xl text-indigo-300 mb-1"><i class="fas fa-person-running"></i></div>
-                            <p class="text-gray-600 text-xs">VRMA Animation</p>
+            <div class="bg-white rounded-lg card-shadow hover-scale overflow-hidden flex flex-col">
+                <!-- Square preview -->
+                <a href="{{ url_for('main.model_detail', model_id=model.id) }}"
+                   class="block relative aspect-square bg-gray-100">
+                    {% if model.preview_file_id %}
+                        <video class="w-full h-full object-cover" autoplay loop muted playsinline
+                               poster="{% if model.thumbnail_file_id %}{{ url_for('api.get_thumbnail', model_id=model.id) }}{% endif %}">
+                            <source src="{{ url_for('api.get_preview', model_id=model.id) }}" type="video/webm">
+                        </video>
+                    {% elif model.thumbnail_file_id %}
+                        <img src="{{ url_for('api.get_thumbnail', model_id=model.id) }}"
+                             alt="{{ model.name }}" class="w-full h-full object-cover"
+                             onerror="this.style.display='none';this.nextElementSibling.style.display='flex';">
+                        <div class="absolute inset-0 hidden items-center justify-center text-gray-300">
+                            <i class="fas fa-cube text-3xl"></i>
                         </div>
-                    </div>
-                {% else %}
-                    <div id="viewer-{{ model.id }}" class="model-viewer" data-format="{{ model.file_format }}">
-                        <div class="viewer-loading">
-                            <div class="text-center">
-                                <div class="text-3xl text-gray-400 mb-2">{% if model.file_format == 'vrm' %}<i class="fas fa-user text-indigo-300"></i>{% else %}🎨{% endif %}</div>
-                                <p class="text-gray-600 text-xs">{{ model.file_format.upper() }} Model</p>
-                                <button onclick="load3DModel('{{ model.id }}', '{{ model.file_format }}')"
-                                        class="mt-2 bg-indigo-600 text-white px-3 py-1 rounded text-xs hover:bg-indigo-700">
-                                    Load Preview
-                                </button>
-                            </div>
+                    {% else %}
+                        <div class="absolute inset-0 flex items-center justify-center text-gray-300">
+                            <i class="fas {% if model.file_format == 'vrm' %}fa-user{% elif model.file_format == 'vrma' %}fa-person-running{% else %}fa-cube{% endif %} text-3xl"></i>
                         </div>
+                    {% endif %}
+                    <span class="absolute top-1.5 right-1.5 bg-black/60 text-white text-[10px] px-1.5 py-0.5 rounded uppercase">{{ model.file_format }}</span>
+                </a>
+
+                <!-- Compact info -->
+                <div class="p-3 flex flex-col flex-1">
+                    <a href="{{ url_for('main.model_detail', model_id=model.id) }}"
+                       class="font-semibold text-sm text-gray-800 hover:text-indigo-600 truncate" title="{{ model.name }}">{{ model.name }}</a>
+                    <div class="flex justify-between items-center text-xs text-gray-400 mt-1">
+                        <span class="truncate">{{ model.owner_username or 'Unknown' }}</span>
+                        <span><i class="fas fa-download mr-0.5"></i>{{ model.download_count }}</span>
                     </div>
-                {% endif %}
-                </div>
-                
-                <!-- Model Info -->
-                <div class="p-6">
-                    <h3 class="text-lg font-semibold mb-2">{{ model.name }}</h3>
-                    <p class="text-gray-600 text-sm mb-3">
-                        {% if model.description %}
-                            {% if model.description|length > 100 %}
-                                {{ model.description[:100] }}...
-                            {% else %}
-                                {{ model.description }}
-                            {% endif %}
-                        {% endif %}
-                    </p>
-                    
                     {% if model.tags %}
-                    <div class="flex flex-wrap gap-1 mb-3">
-                        {% for t in model.tags %}
+                    <div class="flex flex-wrap gap-1 mt-2">
+                        {% for t in model.tags[:3] %}
                         <a href="{{ url_for('main.browse', sort=sort, tag=(tags + [t]) if t not in tags else tags) }}"
-                           class="text-xs px-2 py-1 rounded {{ 'bg-indigo-600 text-white' if t in tags else 'bg-indigo-50 text-indigo-700 hover:bg-indigo-100' }}">{{ t }}</a>
+                           class="text-[10px] px-1.5 py-0.5 rounded {{ 'bg-indigo-600 text-white' if t in tags else 'bg-indigo-50 text-indigo-700 hover:bg-indigo-100' }}">{{ t }}</a>
                         {% endfor %}
                     </div>
                     {% endif %}
-
-                    <div class="flex justify-between items-center text-sm text-gray-500">
-                        <span>by {{ model.owner_username or 'Unknown' }}</span>
-                        <span>{{ model.download_count }} downloads</span>
-                    </div>
-                    <div class="mt-4">
-                        <a href="{{ url_for('main.model_detail', model_id=model.id) }}" 
-                           class="bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-indigo-700">
-                            View Details
-                        </a>
-                    </div>
                 </div>
             </div>
             {% endfor %}
@@ -196,78 +178,4 @@
         </div>
     {% endif %}
 </div>
-
-<script>
-const loadedViewers = new Set();
-
-function showCardError(modelId) {
-    const container = document.getElementById(`viewer-${modelId}`);
-    if (!container) return;
-    container.innerHTML = `
-        <div class="flex items-center justify-center h-full bg-red-50 text-red-600">
-            <div class="text-center">
-                <i class="fas fa-exclamation-triangle text-2xl mb-2"></i>
-                <div class="text-xs">Preview not available</div>
-            </div>
-        </div>
-    `;
-}
-
-function load3DModel(modelId, format) {
-    if (loadedViewers.has(modelId)) return;
-    loadedViewers.add(modelId);
-
-    // Resolve format from the element's data attribute if not passed.
-    if (!format) {
-        const el = document.getElementById(`viewer-${modelId}`);
-        format = el ? (el.getAttribute('data-format') || '') : '';
-    }
-
-    if (format === 'vrm') {
-        loadVrmCard(modelId);
-        return;
-    }
-
-    try {
-        // Use the model-viewer web component for standard formats.
-        createCardModelViewer(`viewer-${modelId}`, modelId, {
-            id: modelId,
-            name: 'Model ' + modelId
-        });
-    } catch (error) {
-        console.error('Failed to load 3D model:', error);
-        showCardError(modelId);
-    }
-}
-
-// Render a VRM avatar into a browse card using the dedicated VRM viewer.
-function loadVrmCard(modelId) {
-    const start = () => {
-        if (!window.VRMViewer) return false;
-        window.VRMViewer.init(`viewer-${modelId}`, `/api/view/${modelId}`, {
-            onError: () => showCardError(modelId)
-        });
-        return true;
-    };
-    if (!start()) {
-        window.addEventListener('vrmviewer-ready', start, { once: true });
-    }
-}
-
-// Auto-load first 6 previews on page load for better UX.
-document.addEventListener('DOMContentLoaded', function() {
-    const viewers = document.querySelectorAll('[id^="viewer-"]');
-    viewers.forEach((viewer, index) => {
-        if (index < 6) {
-            const modelId = viewer.id.replace('viewer-', '');
-            const format = viewer.getAttribute('data-format') || '';
-            setTimeout(() => load3DModel(modelId, format), index * 300);
-        }
-    });
-});
-</script>
-
-{% if has_vrm %}
-{% include "_vrm_viewer.html" %}
-{% endif %}
 {% endblock %}

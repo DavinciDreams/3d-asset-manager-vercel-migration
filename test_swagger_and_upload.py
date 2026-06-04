@@ -69,12 +69,15 @@ def main():
     assert j['model']['name'] == 'Single Model', j
     print('PASS: single-file upload returns {model} with the given name')
 
-    # --- Single-file upload still requires a name ---
+    # --- Single-file upload WITHOUT a name auto-names from the filename ---
+    # This is the per-file batch case: the web client uploads each file in its
+    # own request and omits 'name', so the server must auto-name (not reject).
     r = client.post('/api/upload', data={
-        'is_public': 'true', 'file': (io.BytesIO(glb), 'noname.glb'),
+        'is_public': 'true', 'file': (io.BytesIO(glb), 'robot/walk_cycle.glb'),
     }, content_type='multipart/form-data')
-    assert r.status_code == 400, r.get_json()
-    print('PASS: single-file upload without a name is rejected')
+    assert r.status_code == 201, r.get_json()
+    assert r.get_json()['model']['name'] == 'walk cycle', r.get_json()
+    print('PASS: single-file upload without a name auto-names from the filename')
 
     # --- Multi-file upload: auto-named, per-file errors ---
     r = client.post('/api/upload', data={
@@ -90,6 +93,21 @@ def main():
     assert sorted(m['name'] for m in j['uploaded']) == ['idle pose', 'walk cycle'], j
     assert len(j['errors']) == 1 and j['errors'][0]['filename'] == 'readme.txt', j
     print('PASS: multi-file upload auto-names from filenames and reports errors')
+
+    # --- Batch as the web client does it: one request per file, no name ---
+    # Mirrors the browser's sequential per-file uploader. Each request has a
+    # single file and no 'name'; all must succeed and be auto-named.
+    batch = ['hero/walk_cycle.glb', 'hero/idle-pose.glb', 'props/crate.glb']
+    names = []
+    for path in batch:
+        r = client.post('/api/upload', data={
+            'is_public': 'true', 'tags': 'scene',
+            'file': (io.BytesIO(glb), path),
+        }, content_type='multipart/form-data')
+        assert r.status_code == 201, (path, r.get_json())
+        names.append(r.get_json()['model']['name'])
+    assert names == ['walk cycle', 'idle pose', 'crate'], names
+    print('PASS: per-file batch (separate requests, no name) all succeed + auto-named')
 
     # --- Multi-file upload where every file is invalid -> 400 ---
     r = client.post('/api/upload', data={

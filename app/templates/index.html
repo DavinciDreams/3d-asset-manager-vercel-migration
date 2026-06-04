@@ -109,21 +109,23 @@
         <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-8">
             {% for model in recent_models %}
             <div class="bg-white rounded-xl card-shadow hover-scale overflow-hidden">
-                <!-- 3D Preview for Recent Models -->
-                <div class="h-48 relative">
-                    <div id="viewer-recent-{{ model.id }}" class="model-viewer">
-                        <div class="viewer-loading">
-                            <div class="text-center">
-                                <div class="text-3xl text-gray-400 mb-2">🎨</div>
-                                <p class="text-gray-600 text-xs">{{ model.file_format.upper() }} Model</p>
-                                <button onclick="loadRecentModel('{{ model.id }}')" 
-                                        class="mt-2 bg-indigo-600 text-white px-3 py-1 rounded text-xs hover:bg-indigo-700">
-                                    Load Preview
-                                </button>
-                            </div>
+                <!-- Big preview for Recent Models -->
+                <a href="{{ url_for('main.model_detail', model_id=model.id) }}" class="block h-56 relative bg-gray-100">
+                    {% if model.preview_file_id %}
+                        <video class="w-full h-full object-cover" autoplay loop muted playsinline
+                               poster="{% if model.thumbnail_file_id %}{{ url_for('api.get_thumbnail', model_id=model.id) }}{% endif %}">
+                            <source src="{{ url_for('api.get_preview', model_id=model.id) }}" type="video/webm">
+                        </video>
+                    {% elif model.thumbnail_file_id %}
+                        <img src="{{ url_for('api.get_thumbnail', model_id=model.id) }}"
+                             alt="{{ model.name }}" class="w-full h-full object-cover">
+                    {% else %}
+                        <div class="absolute inset-0 flex items-center justify-center text-gray-300">
+                            <i class="fas {% if model.file_format == 'vrm' %}fa-user{% elif model.file_format == 'vrma' %}fa-person-running{% else %}fa-cube{% endif %} text-5xl"></i>
                         </div>
-                    </div>
-                </div>
+                    {% endif %}
+                    <span class="absolute top-2 right-2 bg-black/60 text-white text-xs px-2 py-0.5 rounded uppercase">{{ model.file_format }}</span>
+                </a>
                 <div class="p-6">
                     <h3 class="text-lg font-semibold mb-2">{{ model.name }}</h3>
                     <p class="text-gray-600 text-sm mb-3">

@@ -100,7 +100,8 @@ class Model3D:
     def __init__(self, name=None, description=None, file_format=None, file_size=None,
                  original_filename=None, user_id=None, is_public=True, _id=None,
                  upload_date=None, download_count=0, gridfs_file_id=None,
-                 camera_orbit=None, thumbnail_file_id=None, tags=None):
+                 camera_orbit=None, thumbnail_file_id=None, tags=None,
+                 preview_file_id=None):
         self.name = name
         self.description = description
         self.file_format = file_format
@@ -119,6 +120,8 @@ class Model3D:
         self.thumbnail_file_id = thumbnail_file_id
         # List of lowercase tag strings for filtering/sorting.
         self.tags = tags or []
+        # GridFS id of a short looping preview video (WebM). None until captured.
+        self.preview_file_id = preview_file_id
 
     def save(self):
         """Save model to MongoDB"""
@@ -137,7 +140,8 @@ class Model3D:
             'gridfs_file_id': self.gridfs_file_id,
             'camera_orbit': self.camera_orbit,
             'thumbnail_file_id': self.thumbnail_file_id,
-            'tags': self.tags
+            'tags': self.tags,
+            'preview_file_id': self.preview_file_id
         }
         
         if self.id:
@@ -171,6 +175,13 @@ class Model3D:
                 fs.delete(ObjectId(self.thumbnail_file_id))
             except Exception as e:
                 print(f"Error deleting thumbnail from GridFS: {e}")
+
+        # Delete preview video from GridFS
+        if self.preview_file_id:
+            try:
+                fs.delete(ObjectId(self.preview_file_id))
+            except Exception as e:
+                print(f"Error deleting preview from GridFS: {e}")
 
         # Delete model document
         db.models.delete_one({'_id': ObjectId(self.id)})
@@ -233,7 +244,8 @@ class Model3D:
             gridfs_file_id=model_data.get('gridfs_file_id'),
             camera_orbit=model_data.get('camera_orbit'),
             thumbnail_file_id=model_data.get('thumbnail_file_id'),
-            tags=model_data.get('tags') or []
+            tags=model_data.get('tags') or [],
+            preview_file_id=model_data.get('preview_file_id')
         )
 
     @staticmethod

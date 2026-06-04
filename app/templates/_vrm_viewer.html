@@ -114,6 +114,11 @@ async function init(containerId, vrmUrl, options = {}) {
 
     return {
         get vrm() { return vrm; },
+        get canvas() { return renderer.domElement; },
+        setAutoRotate(on, speed) {
+            controls.autoRotate = !!on;
+            if (speed) controls.autoRotateSpeed = speed;
+        },
         async applyAnimation(vrmaUrl) {
             if (!vrm) return false;
             try {

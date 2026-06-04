@@ -502,10 +502,12 @@ def get_openapi_spec(base_url=''):
                         'accepts several repeated `file` fields in a single '
                         'request, but then the whole request must fit under the '
                         'server body cap.)\n\n'
-                        '**Naming:** with a single file, `name` is required and '
-                        'used as the model name. With multiple files in one '
-                        'request, `name` is ignored and each model is named from '
-                        'its own filename.\n\n'
+                        '**Naming:** if `name` is provided (single-file request '
+                        'only), it names the model. If `name` is omitted, or '
+                        'multiple files are sent in one request, each model is '
+                        'named from its own filename. `name` is therefore optional '
+                        '— a per-file batch (one request each, no name) auto-names '
+                        'from filenames.\n\n'
                         '**Response shape:** a single-file request returns '
                         '`{success, message, model}`; a multi-file request returns '
                         '`{success, message, uploaded[], errors[]}`.'
@@ -526,7 +528,7 @@ def get_openapi_spec(base_url=''):
                                         },
                                         'name': {
                                             'type': 'string',
-                                            'description': 'Required for single-file uploads; ignored when multiple files are sent.',
+                                            'description': 'Optional. Names the model on a single-file request; ignored when multiple files are sent. When omitted, the model is named from the filename.',
                                         },
                                         'description': {'type': 'string'},
                                         'is_public': {

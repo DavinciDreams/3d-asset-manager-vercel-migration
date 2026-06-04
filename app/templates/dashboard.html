@@ -138,7 +138,12 @@
                     <tr class="hover:bg-gray-50">
                         <td class="px-6 py-4">
                             <a href="{{ url_for('main.model_detail', model_id=model.id) }}" class="block dashboard-thumb">
-                                {% if model.thumbnail_file_id %}
+                                {% if model.preview_file_id %}
+                                <video class="dashboard-thumb object-cover" autoplay loop muted playsinline
+                                       poster="{% if model.thumbnail_file_id %}{{ url_for('api.get_thumbnail', model_id=model.id) }}{% endif %}">
+                                    <source src="{{ url_for('api.get_preview', model_id=model.id) }}" type="video/webm">
+                                </video>
+                                {% elif model.thumbnail_file_id %}
                                 <img src="{{ url_for('api.get_thumbnail', model_id=model.id) }}"
                                      alt="{{ model.name }}"
                                      class="dashboard-thumb object-contain"
@@ -147,7 +152,7 @@
                                     <i class="fas fa-cube text-2xl text-indigo-300"></i>
                                 </div>
                                 {% else %}
-                                <div class="dashboard-thumb-fallback" title="Open the model and save a default view to generate a thumbnail">
+                                <div class="dashboard-thumb-fallback" title="Open the model to generate a preview">
                                     <i class="fas fa-cube text-2xl text-indigo-300"></i>
                                 </div>
                                 {% endif %}
