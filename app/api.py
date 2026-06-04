@@ -277,6 +277,16 @@ def update_model(model_id):
         if 'tags' in data:
             model.tags = Model3D.normalize_tags(data.get('tags'))
 
+        if 'default_animation' in data:
+            # Embedded-clip name to auto-play; empty clears it.
+            clip = (data.get('default_animation') or '').strip()
+            model.default_animation = clip or None
+
+        if 'default_vrma_id' in data:
+            # VRMA asset id to auto-apply on a VRM; empty clears it.
+            vid = (data.get('default_vrma_id') or '').strip()
+            model.default_vrma_id = vid or None
+
         model.save()
 
         return jsonify({
@@ -289,6 +299,8 @@ def update_model(model_id):
                 'is_public': model.is_public,
                 'camera_orbit': model.camera_orbit,
                 'tags': model.tags,
+                'default_animation': model.default_animation,
+                'default_vrma_id': model.default_vrma_id,
             }
         })
 

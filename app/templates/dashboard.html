@@ -199,6 +199,12 @@
                                class="text-indigo-600 hover:text-indigo-900">View</a>
                             <button type="button" onclick="toggleQuickEdit('{{ model.id }}')"
                                     class="text-blue-600 hover:text-blue-900">Edit</button>
+                            {% if model.file_format != 'vrma' %}
+                            <a href="{{ url_for('main.model_detail', model_id=model.id) }}?regen=1"
+                               class="text-purple-600 hover:text-purple-900"
+                               title="Open the model and (re)generate its rotating preview">
+                                {% if model.preview_file_id %}Regen{% else %}Gen{% endif %} preview</a>
+                            {% endif %}
                             <a href="{{ url_for('api.download_model', model_id=model.id) }}"
                                class="text-green-600 hover:text-green-900">Download</a>
                             <button onclick="deleteModel('{{ model.id }}')"

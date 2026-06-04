@@ -101,7 +101,7 @@ class Model3D:
                  original_filename=None, user_id=None, is_public=True, _id=None,
                  upload_date=None, download_count=0, gridfs_file_id=None,
                  camera_orbit=None, thumbnail_file_id=None, tags=None,
-                 preview_file_id=None):
+                 preview_file_id=None, default_animation=None, default_vrma_id=None):
         self.name = name
         self.description = description
         self.file_format = file_format
@@ -122,6 +122,10 @@ class Model3D:
         self.tags = tags or []
         # GridFS id of a short looping preview video (WebM). None until captured.
         self.preview_file_id = preview_file_id
+        # Default embedded-animation clip name (for glb/gltf/fbx with animations).
+        self.default_animation = default_animation
+        # Default VRMA asset id to auto-apply on a VRM avatar.
+        self.default_vrma_id = default_vrma_id
 
     def save(self):
         """Save model to MongoDB"""
@@ -141,7 +145,9 @@ class Model3D:
             'camera_orbit': self.camera_orbit,
             'thumbnail_file_id': self.thumbnail_file_id,
             'tags': self.tags,
-            'preview_file_id': self.preview_file_id
+            'preview_file_id': self.preview_file_id,
+            'default_animation': self.default_animation,
+            'default_vrma_id': self.default_vrma_id
         }
         
         if self.id:
@@ -245,7 +251,9 @@ class Model3D:
             camera_orbit=model_data.get('camera_orbit'),
             thumbnail_file_id=model_data.get('thumbnail_file_id'),
             tags=model_data.get('tags') or [],
-            preview_file_id=model_data.get('preview_file_id')
+            preview_file_id=model_data.get('preview_file_id'),
+            default_animation=model_data.get('default_animation'),
+            default_vrma_id=model_data.get('default_vrma_id')
         )
 
     @staticmethod

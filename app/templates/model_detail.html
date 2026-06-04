@@ -42,12 +42,18 @@
                 <label for="vrma-select" class="text-sm text-gray-600">Apply animation:</label>
                 <select id="vrma-select"
                         class="border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500">
-                    <option value="">— None (T-pose) —</option>
+                    <option value="" data-vrma-id="">— None (T-pose) —</option>
                 </select>
                 <button type="button" onclick="stopVrmAnimation()"
                         class="text-gray-500 hover:text-gray-700 text-sm">
                     <i class="fas fa-stop mr-1"></i>Stop
                 </button>
+                {% if current_user.is_authenticated and current_user.id == model.user_id %}
+                <button id="set-default-vrma-btn" type="button" onclick="setDefaultVrma()"
+                        class="text-green-600 hover:text-green-800 text-sm font-medium">
+                    <i class="fas fa-save mr-1"></i>Set as default
+                </button>
+                {% endif %}
             </div>
         {% else %}
             <div id="viewer-detail-{{ model.id }}" class="model-viewer-large">
@@ -74,6 +80,12 @@
                     <select id="animation-select" onchange="changeAnimation(this.value)"
                             class="border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500">
                     </select>
+                    {% if current_user.is_authenticated and current_user.id == model.user_id %}
+                    <button id="set-default-anim-btn" type="button" onclick="setDefaultAnimation()"
+                            class="text-green-600 hover:text-green-800 text-sm font-medium whitespace-nowrap">
+                        <i class="fas fa-save mr-1"></i>Set as default
+                    </button>
+                    {% endif %}
                 </div>
             </div>
 
@@ -249,6 +261,8 @@
 <script>
 let detailViewer = null;
 
+// ?regen=1 forces (re)capture of the preview even if one already exists.
+const FORCE_REGEN = new URLSearchParams(window.location.search).get('regen') === '1';
 // Saved default view angle for this model (empty string if none set yet).
 const SAVED_CAMERA_ORBIT = {{ model.camera_orbit | tojson }};
 // Whether this model already has a stored thumbnail.
@@ -286,9 +300,9 @@ function loadDetailModel(modelId) {
             }, { once: true });
         }
 
-        // Auto-capture a rotating preview video (owner only, if none yet).
-        // Only when the model is allowed to spin (no fixed saved view).
-        if (detailViewer && IS_OWNER && !HAS_PREVIEW && !SAVED_CAMERA_ORBIT) {
+        // Auto-capture a rotating preview video (owner only, if none yet or
+        // when ?regen=1). Only when the model is allowed to spin.
+        if (detailViewer && IS_OWNER && (!HAS_PREVIEW || FORCE_REGEN) && !SAVED_CAMERA_ORBIT) {
             detailViewer.addEventListener('load', () => {
                 setTimeout(() => captureModelViewerPreview(), 1200);
             }, { once: true });
@@ -329,12 +343,39 @@ function getDetailViewer() {
     return container?.querySelector('model-viewer') || null;
 }
 
-// Pick the preferred default clip: prefer one whose name looks like a
-// walk loop, otherwise fall back to the model's first clip.
+// Owner-saved default animation clip name (null if none set).
+const SAVED_DEFAULT_ANIM = {{ model.default_animation | tojson }};
+
+// Pick the preferred default clip: the owner's saved choice if it exists,
+// else a walk-loop by name, else the model's first clip.
 function pickDefaultClip(clips) {
     if (!clips || !clips.length) return null;
+    if (SAVED_DEFAULT_ANIM && clips.includes(SAVED_DEFAULT_ANIM)) return SAVED_DEFAULT_ANIM;
     const walk = clips.find(name => /walk/i.test(name));
     return walk || clips[0];
+}
+
+// Save the currently-selected animation as this model's default.
+function setDefaultAnimation() {
+    const sel = document.getElementById('animation-select');
+    const clip = sel ? sel.value : '';
+    const btn = document.getElementById('set-default-anim-btn');
+    const original = btn ? btn.innerHTML : '';
+    if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>Saving...'; }
+    fetch('/api/model/{{ model.id }}', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ default_animation: clip })
+    })
+    .then(r => r.json())
+    .then(d => {
+        if (btn) {
+            btn.innerHTML = d.success ? '<i class="fas fa-check mr-1"></i>Saved!' : original;
+            if (!d.success) alert('Save failed: ' + (d.error || 'unknown error'));
+            setTimeout(() => { btn.disabled = false; btn.innerHTML = original; }, 1500);
+        }
+    })
+    .catch(() => { if (btn) { btn.disabled = false; btn.innerHTML = original; } });
 }
 
 // Reveal animation controls if the loaded model has animation clips.
@@ -494,15 +535,18 @@ document.addEventListener('DOMContentLoaded', function() {
             onLoad: () => {
                 const loading = document.getElementById('vrm-loading-' + MODEL_ID);
                 if (loading) loading.remove();
+                // Apply the owner's saved default animation, if the picker is ready.
+                maybeApplyDefault();
                 {% if current_user.is_authenticated and current_user.id == model.user_id %}
-                {% if not model.thumbnail_file_id %}
-                // Auto-capture a thumbnail on first load (owner, none yet).
-                setTimeout(captureVrmThumbnail, 1000);
-                {% endif %}
-                {% if not model.preview_file_id %}
-                // Auto-capture a rotating preview video (owner, none yet).
-                setTimeout(captureVrmPreview, 1500);
-                {% endif %}
+                if ({{ (model.thumbnail_file_id is none) | tojson }} || FORCE_REGEN) {
+                    // Auto-capture a thumbnail on first load (owner) or on regen.
+                    setTimeout(captureVrmThumbnail, 1000);
+                }
+                // Auto-capture a rotating preview video (owner): if none yet,
+                // or when ?regen=1 forces it.
+                if ({{ (model.preview_file_id is none) | tojson }} || FORCE_REGEN) {
+                    setTimeout(captureVrmPreview, 1500);
+                }
                 {% endif %}
             },
             onError: () => {
@@ -518,6 +562,17 @@ document.addEventListener('DOMContentLoaded', function() {
     if (window.VRMViewer) start();
     else window.addEventListener('vrmviewer-ready', start, { once: true });
 
+    const SAVED_DEFAULT_VRMA = {{ model.default_vrma_id | tojson }};
+
+    // Apply the saved default VRMA once both the avatar and the picker are ready.
+    let pendingDefaultUrl = null;
+    function maybeApplyDefault() {
+        if (controller && pendingDefaultUrl) {
+            controller.applyAnimation(pendingDefaultUrl);
+            pendingDefaultUrl = null;
+        }
+    }
+
     // Populate the VRMA dropdown from the user's + public VRMA assets.
     fetch('/api/vrma')
         .then(r => r.json())
@@ -527,7 +582,12 @@ document.addEventListener('DOMContentLoaded', function() {
             data.animations.forEach(a => {
                 const opt = document.createElement('option');
                 opt.value = a.view_url;
+                opt.setAttribute('data-vrma-id', a.id);
                 opt.textContent = a.name;
+                if (SAVED_DEFAULT_VRMA && a.id === SAVED_DEFAULT_VRMA) {
+                    opt.selected = true;
+                    pendingDefaultUrl = a.view_url;
+                }
                 sel.appendChild(opt);
             });
             sel.addEventListener('change', async () => {
@@ -536,6 +596,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 const ok = await controller.applyAnimation(sel.value);
                 if (!ok) alert('Could not apply that animation to this avatar.');
             });
+            maybeApplyDefault();
         })
         .catch(() => {});
 
@@ -556,10 +617,36 @@ document.addEventListener('DOMContentLoaded', function() {
     // Record a ~4s rotating preview of the avatar and upload it.
     window.captureVrmPreview = async function () {
         if (!controller || !window.capturePreview) return;
+        // If a default animation is set, make sure it's playing in the clip.
+        if (pendingDefaultUrl) { await controller.applyAnimation(pendingDefaultUrl); pendingDefaultUrl = null; }
         controller.setAutoRotate(true, 6);  // spin during capture
         const ok = await window.capturePreview(controller.canvas, MODEL_ID, { durationMs: 4000 });
         controller.setAutoRotate(false);
         console.log('VRM preview saved:', ok);
+    };
+
+    // Save the currently-selected VRMA as this avatar's default animation.
+    window.setDefaultVrma = function () {
+        const sel = document.getElementById('vrma-select');
+        const opt = sel && sel.options[sel.selectedIndex];
+        const vrmaId = opt ? (opt.getAttribute('data-vrma-id') || '') : '';
+        const btn = document.getElementById('set-default-vrma-btn');
+        const original = btn ? btn.innerHTML : '';
+        if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>Saving...'; }
+        fetch('/api/model/' + MODEL_ID, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ default_vrma_id: vrmaId })
+        })
+        .then(r => r.json())
+        .then(d => {
+            if (btn) {
+                btn.innerHTML = d.success ? '<i class="fas fa-check mr-1"></i>Saved!' : original;
+                if (!d.success) alert('Save failed: ' + (d.error || 'unknown error'));
+                setTimeout(() => { btn.disabled = false; btn.innerHTML = original; }, 1500);
+            }
+        })
+        .catch(() => { if (btn) { btn.disabled = false; btn.innerHTML = original; } });
     };
     {% endif %}
 })();
