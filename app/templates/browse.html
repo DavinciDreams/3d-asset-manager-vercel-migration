@@ -71,18 +71,28 @@
             <div class="bg-white rounded-xl card-shadow hover-scale overflow-hidden">
                 <!-- 3D Model Preview -->
                 <div class="h-48 relative">
-                    <div id="viewer-{{ model.id }}" class="model-viewer">
+                {% if model.file_format == 'vrma' %}
+                    <!-- VRMA is an animation clip; no standalone preview. -->
+                    <div class="model-viewer flex items-center justify-center">
+                        <div class="text-center">
+                            <div class="text-3xl text-indigo-300 mb-1"><i class="fas fa-person-running"></i></div>
+                            <p class="text-gray-600 text-xs">VRMA Animation</p>
+                        </div>
+                    </div>
+                {% else %}
+                    <div id="viewer-{{ model.id }}" class="model-viewer" data-format="{{ model.file_format }}">
                         <div class="viewer-loading">
                             <div class="text-center">
-                                <div class="text-3xl text-gray-400 mb-2">🎨</div>
+                                <div class="text-3xl text-gray-400 mb-2">{% if model.file_format == 'vrm' %}<i class="fas fa-user text-indigo-300"></i>{% else %}🎨{% endif %}</div>
                                 <p class="text-gray-600 text-xs">{{ model.file_format.upper() }} Model</p>
-                                <button onclick="load3DModel('{{ model.id }}')" 
+                                <button onclick="load3DModel('{{ model.id }}', '{{ model.file_format }}')"
                                         class="mt-2 bg-indigo-600 text-white px-3 py-1 rounded text-xs hover:bg-indigo-700">
                                     Load Preview
                                 </button>
                             </div>
                         </div>
                     </div>
+                {% endif %}
                 </div>
                 
                 <!-- Model Info -->
@@ -190,40 +200,74 @@
 <script>
 const loadedViewers = new Set();
 
-function load3DModel(modelId) {
+function showCardError(modelId) {
+    const container = document.getElementById(`viewer-${modelId}`);
+    if (!container) return;
+    container.innerHTML = `
+        <div class="flex items-center justify-center h-full bg-red-50 text-red-600">
+            <div class="text-center">
+                <i class="fas fa-exclamation-triangle text-2xl mb-2"></i>
+                <div class="text-xs">Preview not available</div>
+            </div>
+        </div>
+    `;
+}
+
+function load3DModel(modelId, format) {
     if (loadedViewers.has(modelId)) return;
-    
     loadedViewers.add(modelId);
-    
+
+    // Resolve format from the element's data attribute if not passed.
+    if (!format) {
+        const el = document.getElementById(`viewer-${modelId}`);
+        format = el ? (el.getAttribute('data-format') || '') : '';
+    }
+
+    if (format === 'vrm') {
+        loadVrmCard(modelId);
+        return;
+    }
+
     try {
-        // Use the new model-viewer web component
+        // Use the model-viewer web component for standard formats.
         createCardModelViewer(`viewer-${modelId}`, modelId, {
             id: modelId,
             name: 'Model ' + modelId
         });
     } catch (error) {
         console.error('Failed to load 3D model:', error);
-        const container = document.getElementById(`viewer-${modelId}`);
-        container.innerHTML = `
-            <div class="flex items-center justify-center h-full bg-red-50 text-red-600">
-                <div class="text-center">
-                    <i class="fas fa-exclamation-triangle text-2xl mb-2"></i>
-                    <div class="text-xs">Preview not available</div>
-                </div>
-            </div>
-        `;
+        showCardError(modelId);
     }
 }
 
-// Auto-load first 6 models on page load for better user experience
+// Render a VRM avatar into a browse card using the dedicated VRM viewer.
+function loadVrmCard(modelId) {
+    const start = () => {
+        if (!window.VRMViewer) return false;
+        window.VRMViewer.init(`viewer-${modelId}`, `/api/view/${modelId}`, {
+            onError: () => showCardError(modelId)
+        });
+        return true;
+    };
+    if (!start()) {
+        window.addEventListener('vrmviewer-ready', start, { once: true });
+    }
+}
+
+// Auto-load first 6 previews on page load for better UX.
 document.addEventListener('DOMContentLoaded', function() {
     const viewers = document.querySelectorAll('[id^="viewer-"]');
     viewers.forEach((viewer, index) => {
-        if (index < 6) { // Auto-load first 6 models
+        if (index < 6) {
             const modelId = viewer.id.replace('viewer-', '');
-            setTimeout(() => load3DModel(modelId), index * 300); // Faster loading
+            const format = viewer.getAttribute('data-format') || '';
+            setTimeout(() => load3DModel(modelId, format), index * 300);
         }
     });
 });
 </script>
+
+{% if has_vrm %}
+{% include "_vrm_viewer.html" %}
+{% endif %}
 {% endblock %}

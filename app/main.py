@@ -129,6 +129,8 @@ def browse():
 
         pagination = Pagination(models, total, page, 12)
         all_tags = Model3D.get_public_tags()
+        # Only load the (heavy) VRM viewer module if a VRM card is on the page.
+        has_vrm = any(m.file_format == 'vrm' for m in models)
 
     except Exception as e:
         print(f"Browse error: {e}")
@@ -139,11 +141,12 @@ def browse():
         sort = 'newest'
         tags = []
         all_tags = []
+        has_vrm = False
 
     # Render outside the try so a template error surfaces instead of being
     # silently swallowed into a misleading "No Models Found" page.
     return render_template('browse.html', models=pagination, search=search,
-                           sort=sort, tags=tags, all_tags=all_tags)
+                           sort=sort, tags=tags, all_tags=all_tags, has_vrm=has_vrm)
 
 
 @main_bp.route('/local-assets')
