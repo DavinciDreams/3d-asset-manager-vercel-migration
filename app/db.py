@@ -171,7 +171,12 @@ class S3FileStore:
         try:
             self.client.head_bucket(Bucket=self.bucket)
         except Exception:
-            self.client.create_bucket(Bucket=self.bucket)
+            try:
+                self.client.create_bucket(Bucket=self.bucket)
+            except Exception as error:
+                code = getattr(error, "response", {}).get("Error", {}).get("Code")
+                if code not in {"BucketAlreadyOwnedByYou", "BucketAlreadyExists"}:
+                    raise
 
     def _key(self, file_id, filename):
         clean_name = (filename or "asset.bin").replace("\\", "/").split("/")[-1]
