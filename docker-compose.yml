@@ -18,6 +18,11 @@ services:
       S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
       SECRET_KEY: ${SECRET_KEY}
       TELLUS_PERSISTENCE_API_TOKEN: ${TELLUS_PERSISTENCE_API_TOKEN}
+      ENABLE_CONVERSION: ${ENABLE_CONVERSION:-1}
+      FBX2GLTF_BIN: ${FBX2GLTF_BIN:-/usr/local/bin/FBX2glTF}
+      ASSIMP_BIN: ${ASSIMP_BIN:-assimp}
+      NODE_BIN: ${NODE_BIN:-node}
+      FBX2VRMA_DIR: ${FBX2VRMA_DIR:-/app/tools}
     expose:
       - "8000"
     restart: unless-stopped

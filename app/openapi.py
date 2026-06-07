@@ -25,6 +25,13 @@ def _model_summary_schema():
             'is_public': {'type': 'boolean', 'example': True},
             'upload_date': {'type': 'string', 'format': 'date-time', 'nullable': True},
             'download_count': {'type': 'integer', 'example': 12},
+            'conversion_status': {
+                'type': 'string',
+                'nullable': True,
+                'enum': ['pending', 'processing', 'done', 'failed', 'skipped', None],
+            },
+            'has_viewable': {'type': 'boolean'},
+            'has_vrma': {'type': 'boolean'},
             'owner': {
                 'type': 'object',
                 'properties': {
@@ -391,8 +398,8 @@ def get_openapi_spec(base_url=''):
             '/view/{model_id}': {
                 'get': {
                     'tags': ['Files'],
-                    'summary': 'Stream a model file for inline 3D viewing',
-                    'description': 'Like download, but served inline with a cache header and no counter increment.',
+                    'summary': 'Stream the renderable model for inline 3D viewing',
+                    'description': 'Serves a derived GLB when conversion produced one, otherwise the original file.',
                     'parameters': [
                         {
                             'name': 'model_id', 'in': 'path', 'required': True,
@@ -401,7 +408,7 @@ def get_openapi_spec(base_url=''):
                     ],
                     'responses': {
                         '200': {
-                            'description': 'The model file (inline)',
+                            'description': 'The renderable model file (inline)',
                             'content': {
                                 'application/octet-stream': {
                                     'schema': {'type': 'string', 'format': 'binary'}
@@ -411,6 +418,77 @@ def get_openapi_spec(base_url=''):
                         '403': _error_response('Access denied (private model)'),
                         '404': _error_response('Model or file not found'),
                         '500': _error_response('View failed'),
+                    },
+                }
+            },
+            '/model/{model_id}/status': {
+                'get': {
+                    'tags': ['Files'],
+                    'summary': 'Get conversion status for a model',
+                    'parameters': [
+                        {
+                            'name': 'model_id', 'in': 'path', 'required': True,
+                            'schema': {'type': 'string'},
+                        }
+                    ],
+                    'responses': {
+                        '200': {
+                            'description': 'Current conversion status',
+                            'content': {
+                                'application/json': {
+                                    'schema': {
+                                        'type': 'object',
+                                        'properties': {
+                                            'status': {
+                                                'type': 'string',
+                                                'nullable': True,
+                                                'enum': ['pending', 'processing', 'done', 'failed', 'skipped', None],
+                                            },
+                                            'has_viewable': {'type': 'boolean'},
+                                            'has_vrma': {'type': 'boolean'},
+                                            'error': {'type': 'string', 'nullable': True},
+                                        },
+                                    }
+                                }
+                            },
+                        },
+                        '403': _error_response('Access denied (private model)'),
+                        '404': _error_response('Model not found'),
+                    },
+                }
+            },
+            '/export/{model_id}': {
+                'get': {
+                    'tags': ['Files'],
+                    'summary': 'Export/transcode a model to another format',
+                    'parameters': [
+                        {
+                            'name': 'model_id', 'in': 'path', 'required': True,
+                            'schema': {'type': 'string'},
+                        },
+                        {
+                            'name': 'format', 'in': 'query', 'required': True,
+                            'schema': {
+                                'type': 'string',
+                                'enum': ['glb', 'gltf', 'obj', 'stl', 'ply', 'fbx', 'dae', '3ds', 'vrma'],
+                            },
+                        },
+                    ],
+                    'responses': {
+                        '200': {
+                            'description': 'The exported file',
+                            'content': {
+                                'application/octet-stream': {
+                                    'schema': {'type': 'string', 'format': 'binary'}
+                                }
+                            },
+                        },
+                        '400': _error_response('Unsupported or missing format'),
+                        '403': _error_response('Access denied (private model)'),
+                        '404': _error_response('Model or source file not found'),
+                        '409': _error_response('No VRMA animation for this model'),
+                        '502': _error_response('Transcode failed'),
+                        '503': _error_response('Transcoding disabled on this server'),
                     },
                 }
             },

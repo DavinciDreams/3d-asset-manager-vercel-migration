@@ -22,11 +22,11 @@
         <!-- Profile Stats -->
         <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
             <div class="bg-white rounded-lg shadow p-6 text-center">
-                <div class="text-3xl font-bold text-blue-600">{{ user_models|length if user_models else 0 }}</div>
+                <div class="text-3xl font-bold text-blue-600">{{ stats.total_models if stats else 0 }}</div>
                 <div class="text-gray-600">Total Models</div>
             </div>
             <div class="bg-white rounded-lg shadow p-6 text-center">
-                <div class="text-3xl font-bold text-green-600">{{ total_downloads or 0 }}</div>
+                <div class="text-3xl font-bold text-green-600">{{ stats.total_downloads if stats else 0 }}</div>
                 <div class="text-gray-600">Total Downloads</div>
             </div>
             <div class="bg-white rounded-lg shadow p-6 text-center">
@@ -70,7 +70,7 @@
             </div>
             
             <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                {% for model in user_models[:6] %}
+                {% for model in user_models %}
                 <div class="border rounded-lg p-4 hover:shadow-md transition">
                     <h3 class="font-semibold text-gray-800 mb-2 truncate">{{ model.name }}</h3>
                     <div class="flex justify-between items-center text-sm text-gray-600 mb-2">

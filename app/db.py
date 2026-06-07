@@ -24,9 +24,15 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import OperationalError
 
 
 metadata = MetaData()
+
+
+def _ignore_duplicate_column(error):
+    message = str(error).lower()
+    return "duplicate column" in message or "already exists" in message
 
 
 def _json_type():
@@ -78,6 +84,12 @@ models = Table(
     Column("preview_file_id", String(36), ForeignKey("asset_files.id")),
     Column("default_animation", String(255)),
     Column("default_vrma_id", String(36)),
+    Column("viewable_file_id", String(36), ForeignKey("asset_files.id")),
+    Column("viewable_format", String(20)),
+    Column("conversion_status", String(40), index=True),
+    Column("conversion_error", Text),
+    Column("conversion_claimed_at", DateTime),
+    Column("vrma_file_id", String(36), ForeignKey("asset_files.id")),
 )
 
 world_states = Table(
@@ -252,6 +264,7 @@ def create_database_engine():
 def init_database(engine):
     metadata.create_all(engine)
     _ensure_asset_file_columns(engine)
+    _ensure_model_columns(engine)
 
 
 def _ensure_asset_file_columns(engine):
@@ -265,9 +278,33 @@ def _ensure_asset_file_columns(engine):
     with engine.begin() as conn:
         for column, ddl_type in desired.items():
             if column not in existing:
-                conn.execute(text(f"ALTER TABLE asset_files ADD COLUMN {column} {ddl_type}"))
+                try:
+                    conn.execute(text(f"ALTER TABLE asset_files ADD COLUMN {column} {ddl_type}"))
+                except OperationalError as error:
+                    if not _ignore_duplicate_column(error):
+                        raise
         if engine.dialect.name == "postgresql":
             conn.execute(text("ALTER TABLE asset_files ALTER COLUMN data DROP NOT NULL"))
+
+
+def _ensure_model_columns(engine):
+    existing = {column["name"] for column in inspect(engine).get_columns("models")}
+    desired = {
+        "viewable_file_id": "VARCHAR(36)",
+        "viewable_format": "VARCHAR(20)",
+        "conversion_status": "VARCHAR(40)",
+        "conversion_error": "TEXT",
+        "conversion_claimed_at": "TIMESTAMP",
+        "vrma_file_id": "VARCHAR(36)",
+    }
+    with engine.begin() as conn:
+        for column, ddl_type in desired.items():
+            if column not in existing:
+                try:
+                    conn.execute(text(f"ALTER TABLE models ADD COLUMN {column} {ddl_type}"))
+                except OperationalError as error:
+                    if not _ignore_duplicate_column(error):
+                        raise
 
 
 @contextmanager

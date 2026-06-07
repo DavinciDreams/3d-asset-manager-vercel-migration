@@ -100,6 +100,8 @@ def migrate_models(conn, mongo_db, file_store):
         file_id = migrate_file(file_store, fs, doc.get("gridfs_file_id"))
         thumbnail_file_id = migrate_file(file_store, fs, doc.get("thumbnail_file_id"))
         preview_file_id = migrate_file(file_store, fs, doc.get("preview_file_id"))
+        viewable_file_id = migrate_file(file_store, fs, doc.get("viewable_file_id"))
+        vrma_file_id = migrate_file(file_store, fs, doc.get("vrma_file_id"))
         upsert(conn, models, {
             "id": oid(doc.get("_id")),
             "name": doc.get("name") or "Untitled",
@@ -118,6 +120,12 @@ def migrate_models(conn, mongo_db, file_store):
             "preview_file_id": preview_file_id,
             "default_animation": doc.get("default_animation"),
             "default_vrma_id": oid(doc.get("default_vrma_id")),
+            "viewable_file_id": viewable_file_id,
+            "viewable_format": doc.get("viewable_format"),
+            "conversion_status": doc.get("conversion_status"),
+            "conversion_error": doc.get("conversion_error"),
+            "conversion_claimed_at": doc.get("conversion_claimed_at"),
+            "vrma_file_id": vrma_file_id,
         }, "id")
         count += 1
     return count

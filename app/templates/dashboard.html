@@ -162,7 +162,19 @@
                             <div class="flex items-center">
                                 <i class="fas fa-cube text-indigo-600 mr-3"></i>
                                 <div>
-                                    <div class="text-sm font-medium text-gray-900">{{ model.name }}</div>
+                                    <div class="text-sm font-medium text-gray-900">
+                                        {{ model.name }}
+                                        {% if model.conversion_status in ['pending', 'processing'] %}
+                                        <span class="ml-1 px-2 py-0.5 text-xs font-medium bg-yellow-100 text-yellow-800 rounded-full">
+                                            <i class="fas fa-spinner fa-spin mr-1"></i>Processing
+                                        </span>
+                                        {% elif model.conversion_status == 'failed' %}
+                                        <span class="ml-1 px-2 py-0.5 text-xs font-medium bg-red-100 text-red-800 rounded-full"
+                                              title="{{ model.conversion_error or 'Conversion failed' }}">
+                                            <i class="fas fa-exclamation-triangle mr-1"></i>Preview failed
+                                        </span>
+                                        {% endif %}
+                                    </div>
                                     <div class="text-sm text-gray-500">{{ model.file_extension.upper() }}</div>
                                     {% if model.tags %}
                                     <div class="flex flex-wrap gap-1 mt-1">

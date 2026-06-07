@@ -56,7 +56,12 @@
                 {% endif %}
             </div>
         {% else %}
-            <div id="viewer-detail-{{ model.id }}" class="model-viewer-large">
+            {% set native_view = model.file_format in ['glb', 'gltf'] %}
+            {% set viewable_ready = native_view or model.viewable_file_id or model.conversion_status in ['done', 'skipped'] %}
+            <div id="viewer-detail-{{ model.id }}" class="model-viewer-large"
+                 data-conversion-status="{{ model.conversion_status or '' }}"
+                 data-viewable-ready="{{ '1' if viewable_ready else '0' }}">
+                {% if viewable_ready %}
                 <div class="flex items-center justify-center h-full bg-gray-50">
                     <div class="text-center">
                         <div class="text-6xl text-gray-400 mb-4">🎨</div>
@@ -67,6 +72,24 @@
                         </button>
                     </div>
                 </div>
+                {% elif model.conversion_status == 'failed' %}
+                <div class="flex items-center justify-center h-full bg-red-50">
+                    <div class="text-center px-6">
+                        <i class="fas fa-exclamation-triangle text-4xl text-red-400 mb-3"></i>
+                        <p class="text-red-700 font-semibold mb-1">Preview unavailable</p>
+                        <p class="text-red-600 text-sm">{{ model.conversion_error or 'This file could not be converted for preview.' }}</p>
+                        <p class="text-gray-500 text-xs mt-2">You can still download the original file below.</p>
+                    </div>
+                </div>
+                {% else %}
+                <div class="flex items-center justify-center h-full bg-gray-50">
+                    <div class="text-center px-6">
+                        <i class="fas fa-spinner fa-spin text-3xl text-indigo-400 mb-3"></i>
+                        <p class="text-gray-700 font-semibold mb-1">Preparing 3D preview</p>
+                        <p class="text-gray-500 text-sm">Converting {{ model.file_format.upper() }} to a viewable format.</p>
+                    </div>
+                </div>
+                {% endif %}
             </div>
 
             <!-- Animation Controls (shown only if the model has animations) -->
@@ -115,12 +138,36 @@
             </div>
         {% endif %}
 
-            <!-- Download Button -->
-            <a href="{{ url_for('api.download_model', model_id=model.id) }}"
-               class="w-full bg-green-600 text-white py-3 px-6 rounded-lg hover:bg-green-700 transition flex items-center justify-center mt-4">
-                <i class="fas fa-download mr-2"></i>
-                Download Model ({{ "%.2f"|format(model.file_size / 1024 / 1024) }} MB)
-            </a>
+            <div class="mt-4 flex flex-col sm:flex-row gap-3">
+                <a href="{{ url_for('api.download_model', model_id=model.id) }}"
+                   class="flex-1 bg-green-600 text-white py-3 px-6 rounded-lg hover:bg-green-700 transition flex items-center justify-center">
+                    <i class="fas fa-download mr-2"></i>
+                    Download Original ({{ "%.2f"|format(model.file_size / 1024 / 1024) }} MB)
+                </a>
+                <div class="relative" id="export-wrap">
+                    <button type="button" id="export-btn"
+                            class="w-full sm:w-auto bg-indigo-600 text-white py-3 px-6 rounded-lg hover:bg-indigo-700 transition flex items-center justify-center">
+                        <i class="fas fa-file-export mr-2"></i>Export as
+                        <i class="fas fa-chevron-down ml-2 text-xs"></i>
+                    </button>
+                    <div id="export-menu"
+                         class="hidden absolute right-0 z-20 mt-1 w-44 bg-white border border-gray-200 rounded-lg shadow-lg py-1">
+                        {% for fmt in ['glb', 'gltf', 'obj', 'stl', 'ply', 'fbx', 'dae', '3ds'] %}
+                        <a href="{{ url_for('api.export_model', model_id=model.id) }}?format={{ fmt }}"
+                           class="block px-4 py-2 text-sm text-gray-700 hover:bg-indigo-50">
+                            {{ fmt.upper() }}
+                        </a>
+                        {% endfor %}
+                        {% if model.vrma_file_id %}
+                        <div class="border-t border-gray-100 my-1"></div>
+                        <a href="{{ url_for('api.export_model', model_id=model.id) }}?format=vrma"
+                           class="block px-4 py-2 text-sm text-indigo-700 hover:bg-indigo-50">
+                            VRMA (animation)
+                        </a>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
         </div>
 
         <!-- Model Details -->
@@ -403,9 +450,13 @@ function setupAnimationControls() {
     const selectWrap = document.getElementById('animation-select-wrap');
     const select = document.getElementById('animation-select');
     if (clips.length > 1 && select) {
-        select.innerHTML = clips
-            .map(name => `<option value="${name}">${name}</option>`)
-            .join('');
+        select.replaceChildren();
+        clips.forEach(name => {
+            const opt = document.createElement('option');
+            opt.value = name;
+            opt.textContent = name;
+            select.appendChild(opt);
+        });
         // Reflect the currently playing clip.
         select.value = modelViewer.animationName || defaultClip;
         if (selectWrap) selectWrap.classList.remove('hidden');
@@ -503,14 +554,107 @@ async function captureModelViewerPreview() {
     console.log('Preview auto-captured:', ok);
 }
 
+function showPreviewReady(modelId) {
+    const container = document.getElementById(`viewer-detail-${modelId}`);
+    if (!container) return;
+    container.setAttribute('data-viewable-ready', '1');
+    container.replaceChildren();
+
+    const wrap = document.createElement('div');
+    wrap.className = 'flex items-center justify-center h-full bg-gray-50';
+    const inner = document.createElement('div');
+    inner.className = 'text-center';
+    const icon = document.createElement('div');
+    icon.className = 'text-6xl text-gray-400 mb-4';
+    icon.textContent = '🎨';
+    const label = document.createElement('p');
+    label.className = 'text-gray-600 mb-4';
+    label.textContent = '3D Model';
+    const button = document.createElement('button');
+    button.className = 'bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 transition';
+    button.innerHTML = '<i class="fas fa-cube mr-2"></i>Load 3D Preview';
+    button.addEventListener('click', () => loadDetailModel(modelId));
+    inner.append(icon, label, button);
+    wrap.appendChild(inner);
+    container.appendChild(wrap);
+    setTimeout(() => loadDetailModel(modelId), 300);
+}
+
+function showPreviewFailed(modelId, message) {
+    const container = document.getElementById(`viewer-detail-${modelId}`);
+    if (!container) return;
+    container.replaceChildren();
+
+    const wrap = document.createElement('div');
+    wrap.className = 'flex items-center justify-center h-full bg-red-50';
+    const inner = document.createElement('div');
+    inner.className = 'text-center px-6';
+    const icon = document.createElement('i');
+    icon.className = 'fas fa-exclamation-triangle text-4xl text-red-400 mb-3';
+    const title = document.createElement('p');
+    title.className = 'text-red-700 font-semibold mb-1';
+    title.textContent = 'Preview unavailable';
+    const detail = document.createElement('p');
+    detail.className = 'text-red-600 text-sm';
+    detail.textContent = message || 'This file could not be converted for preview.';
+    const note = document.createElement('p');
+    note.className = 'text-gray-500 text-xs mt-2';
+    note.textContent = 'You can still download the original file below.';
+    inner.append(icon, title, detail, note);
+    wrap.appendChild(inner);
+    container.appendChild(wrap);
+}
+
+function pollConversionStatus(modelId) {
+    let tries = 0;
+    const maxTries = 120;
+    const tick = () => {
+        tries++;
+        fetch(`/api/model/${modelId}/status`)
+            .then(r => r.json())
+            .then(s => {
+                if (s.status === 'done' || s.status === 'skipped' || s.has_viewable) {
+                    showPreviewReady(modelId);
+                } else if (s.status === 'failed') {
+                    showPreviewFailed(modelId, s.error);
+                } else if (tries < maxTries) {
+                    setTimeout(tick, 2000);
+                } else {
+                    showPreviewFailed(modelId, 'Conversion is taking longer than expected.');
+                }
+            })
+            .catch(() => { if (tries < maxTries) setTimeout(tick, 3000); });
+    };
+    setTimeout(tick, 1500);
+}
+
 // Auto-load the model on page load
 document.addEventListener('DOMContentLoaded', function() {
     const fmt = '{{ model.file_format }}';
     if (fmt === 'vrm' || fmt === 'vrma') return;  // handled by VRM-specific script
-    // Small delay to ensure model-viewer is ready
-    setTimeout(() => {
-        loadDetailModel('{{ model.id }}');
-    }, 500);
+
+    const container = document.getElementById('viewer-detail-{{ model.id }}');
+    const ready = container && container.getAttribute('data-viewable-ready') === '1';
+    if (ready) {
+        setTimeout(() => loadDetailModel('{{ model.id }}'), 500);
+    } else if (container && container.getAttribute('data-conversion-status') !== 'failed') {
+        pollConversionStatus('{{ model.id }}');
+    }
+
+    const exportBtn = document.getElementById('export-btn');
+    const exportMenu = document.getElementById('export-menu');
+    const exportWrap = document.getElementById('export-wrap');
+    if (exportBtn && exportMenu && exportWrap) {
+        exportBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            exportMenu.classList.toggle('hidden');
+        });
+        document.addEventListener('click', (e) => {
+            if (!exportWrap.contains(e.target)) {
+                exportMenu.classList.add('hidden');
+            }
+        });
+    }
 });
 
 </script>

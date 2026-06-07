@@ -1,0 +1,17 @@
+{
+  "name": "fbx2vrma-converter",
+  "version": "1.0.0",
+  "description": "Convert FBX animation files to VRMA-like JSON for the 3D Asset Manager conversion pipeline.",
+  "main": "fbx2vrma-converter.js",
+  "bin": {
+    "fbx2vrma": "./fbx2vrma-converter.js"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "commander": "^11.1.0",
+    "fs-extra": "^11.2.0"
+  }
+}

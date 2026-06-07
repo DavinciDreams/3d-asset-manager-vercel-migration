@@ -1,12 +1,37 @@
 from flask import Blueprint, jsonify, request, current_app, make_response, url_for
 from flask_login import current_user, login_required
 from werkzeug.exceptions import HTTPException
+from sqlalchemy import select
+from app.db import asset_files
 from app.models import Model3D, User, WorldState
 from app.openapi import get_openapi_spec
 import io
 import os
 
 api_bp = Blueprint('api', __name__)
+
+MIME_TYPES = {
+    'glb': 'model/gltf-binary',
+    'gltf': 'application/json',
+    'obj': 'text/plain',
+    'fbx': 'application/octet-stream',
+    'dae': 'application/xml',
+    '3ds': 'application/octet-stream',
+    'ply': 'application/octet-stream',
+    'stl': 'application/octet-stream',
+    'vrm': 'model/gltf-binary',
+    'vrma': 'application/octet-stream',
+}
+
+
+def _mime_for(fmt):
+    return MIME_TYPES.get((fmt or '').lower(), 'application/octet-stream')
+
+
+def _can_access_model(model):
+    if model.is_public:
+        return True
+    return current_user.is_authenticated and model.user_id == current_user.id
 
 
 def _authorized_service_token():
@@ -135,6 +160,9 @@ def list_models():
                 'is_public': model.is_public,
                 'upload_date': model.upload_date.isoformat() if model.upload_date else None,
                 'download_count': model.download_count,
+                'conversion_status': model.conversion_status,
+                'has_viewable': bool(model.viewable_file_id),
+                'has_vrma': bool(model.vrma_file_id),
                 'owner': {
                     'id': owner.id if owner else None,
                     'username': owner.username if owner else 'Unknown'
@@ -169,10 +197,8 @@ def download_model(model_id):
         if not model:
             return jsonify({'error': 'Model not found'}), 404
         
-        # Check access permissions
-        if not model.is_public:
-            if not current_user.is_authenticated or model.user_id != current_user.id:
-                return jsonify({'error': 'Access denied'}), 403
+        if not _can_access_model(model):
+            return jsonify({'error': 'Access denied'}), 403
         
         # Get file data from the database-backed file store.
         file_data = model.get_file_data()
@@ -183,25 +209,9 @@ def download_model(model_id):
         # Increment download counter
         model.increment_download_count()
         
-        # Determine MIME type
-        mime_types = {
-            'glb': 'model/gltf-binary',
-            'gltf': 'application/json',
-            'obj': 'text/plain',
-            'fbx': 'application/octet-stream',
-            'dae': 'application/xml',
-            '3ds': 'application/octet-stream',
-            'ply': 'application/octet-stream',
-            'stl': 'application/octet-stream',
-            'vrm': 'model/gltf-binary',
-            'vrma': 'application/octet-stream'
-        }
-        
-        mimetype = mime_types.get(model.file_format.lower(), 'application/octet-stream')
-        
         # Create response
         response = make_response(file_data)
-        response.headers['Content-Type'] = mimetype
+        response.headers['Content-Type'] = _mime_for(model.file_format)
         response.headers['Content-Disposition'] = f'attachment; filename="{model.original_filename}"'
         response.headers['Content-Length'] = str(len(file_data))
         
@@ -213,43 +223,24 @@ def download_model(model_id):
 
 @api_bp.route('/view/<model_id>')
 def view_model(model_id):
-    """Serve model file for 3D viewing (not as download)"""
+    """Serve the renderable model file for inline 3D viewing."""
     try:
         model = Model3D.get_by_id(model_id)
         
         if not model:
             return jsonify({'error': 'Model not found'}), 404
         
-        # Check access permissions
-        if not model.is_public:
-            if not current_user.is_authenticated or model.user_id != current_user.id:
-                return jsonify({'error': 'Access denied'}), 403
-        
-        # Get file data from the database-backed file store.
-        file_data = model.get_file_data()
+        if not _can_access_model(model):
+            return jsonify({'error': 'Access denied'}), 403
+
+        file_data, view_format = model.get_viewable_data()
         
         if not file_data:
             return jsonify({'error': 'File not found'}), 404
         
-        # Determine MIME type
-        mime_types = {
-            'glb': 'model/gltf-binary',
-            'gltf': 'application/json',
-            'obj': 'text/plain',
-            'fbx': 'application/octet-stream',
-            'dae': 'application/xml',
-            '3ds': 'application/octet-stream',
-            'ply': 'application/octet-stream',
-            'stl': 'application/octet-stream',
-            'vrm': 'model/gltf-binary',
-            'vrma': 'application/octet-stream'
-        }
-        
-        mimetype = mime_types.get(model.file_format.lower(), 'application/octet-stream')
-        
         # Create response for viewing (not download)
         response = make_response(file_data)
-        response.headers['Content-Type'] = mimetype
+        response.headers['Content-Type'] = _mime_for(view_format)
         response.headers['Content-Length'] = str(len(file_data))
         response.headers['Cache-Control'] = 'public, max-age=3600'  # Cache for 1 hour
         
@@ -258,6 +249,121 @@ def view_model(model_id):
     except Exception as e:
         print(f"API view error: {e}")
         return jsonify({'error': 'View failed'}), 500
+
+
+@api_bp.route('/model/<model_id>/status')
+def conversion_status(model_id):
+    try:
+        model = Model3D.get_by_id(model_id)
+        if not model:
+            return jsonify({'error': 'Model not found'}), 404
+        if not _can_access_model(model):
+            return jsonify({'error': 'Access denied'}), 403
+        return jsonify({
+            'status': model.conversion_status,
+            'has_viewable': bool(model.viewable_file_id),
+            'has_vrma': bool(model.vrma_file_id),
+            'error': model.conversion_error,
+        })
+    except Exception as e:
+        print(f"API status error: {e}")
+        return jsonify({'error': 'Status lookup failed'}), 500
+
+
+_EXPORT_MESH_FORMATS = {'glb', 'gltf', 'obj', 'stl', 'ply', 'fbx', 'dae', '3ds'}
+
+
+def _safe_stem(model):
+    base = model.name or model.original_filename or 'model'
+    stem = base.rsplit('.', 1)[0] if '.' in base else base
+    keep = ''.join(c if c.isalnum() or c in ' -_' else '_' for c in stem).strip()
+    return keep or 'model'
+
+
+def _download_bytes(data, filename, mimetype):
+    response = make_response(data)
+    response.headers['Content-Type'] = mimetype
+    response.headers['Content-Disposition'] = f'attachment; filename="{filename}"'
+    response.headers['Content-Length'] = str(len(data))
+    return response
+
+
+def _cached_export_file_id(model_id, fmt):
+    engine = current_app.config["DB_ENGINE"]
+    with engine.begin() as conn:
+        rows = conn.execute(select(asset_files.c.id, asset_files.c.metadata)).all()
+    for row in rows:
+        metadata = row.metadata or {}
+        if metadata.get('export_for') == str(model_id) and metadata.get('export_format') == fmt:
+            return row.id
+    return None
+
+
+@api_bp.route('/export/<model_id>')
+def export_model(model_id):
+    import shutil
+    import tempfile
+    from app.conversion import assimp_export, tool_paths
+
+    try:
+        fmt = (request.args.get('format') or '').lower().strip()
+        model = Model3D.get_by_id(model_id)
+        if not model:
+            return jsonify({'error': 'Model not found'}), 404
+        if not _can_access_model(model):
+            return jsonify({'error': 'Access denied'}), 403
+
+        if fmt == 'vrma':
+            data = model.get_vrma_data()
+            if not data:
+                return jsonify({'error': 'No VRMA animation for this model.'}), 409
+            return _download_bytes(data, f'{_safe_stem(model)}.vrma', _mime_for('vrma'))
+
+        if fmt not in _EXPORT_MESH_FORMATS:
+            return jsonify({'error': f'Unsupported export format: {fmt or "(none)"}'}), 400
+
+        fs = current_app.config['FILE_STORE']
+        cached_id = _cached_export_file_id(model.id, fmt)
+        if cached_id:
+            return _download_bytes(fs.get(cached_id).read(), f'{_safe_stem(model)}.{fmt}', _mime_for(fmt))
+
+        src_bytes, src_fmt = model.get_viewable_data()
+        if not src_bytes:
+            return jsonify({'error': 'Source file not found'}), 404
+
+        if fmt == (src_fmt or '').lower():
+            return _download_bytes(src_bytes, f'{_safe_stem(model)}.{fmt}', _mime_for(fmt))
+
+        if not current_app.config.get('ENABLE_CONVERSION', True):
+            return jsonify({'error': 'Transcoding is disabled on this server.'}), 503
+
+        workdir = tempfile.mkdtemp(prefix='export_')
+        try:
+            in_path = os.path.join(workdir, f'src.{src_fmt or "glb"}')
+            out_path = os.path.join(workdir, f'out.{fmt}')
+            with open(in_path, 'wb') as f:
+                f.write(src_bytes)
+            try:
+                assimp_export(tool_paths(current_app)['assimp'], in_path, out_path, timeout=60)
+            except Exception as e:
+                print(f"Export transcode failed: {e}")
+                return jsonify({'error': f'Could not export to {fmt}.'}), 502
+            with open(out_path, 'rb') as f:
+                out_bytes = f.read()
+        finally:
+            shutil.rmtree(workdir, ignore_errors=True)
+
+        try:
+            fs.put(out_bytes, filename=f'export_{model.id}.{fmt}',
+                   content_type=_mime_for(fmt),
+                   metadata={'export_for': model.id, 'export_format': fmt})
+        except Exception as e:
+            print(f"Export cache warning: {e}")
+
+        return _download_bytes(out_bytes, f'{_safe_stem(model)}.{fmt}', _mime_for(fmt))
+    except Exception as e:
+        print(f"API export error: {e}")
+        return jsonify({'error': 'Export failed'}), 500
 
 @api_bp.route('/model/<model_id>', methods=['PUT', 'PATCH'])
 @login_required
@@ -404,9 +510,8 @@ def get_thumbnail(model_id):
             return jsonify({'error': 'No thumbnail'}), 404
 
         # Respect privacy: private models' thumbnails are owner-only
-        if not model.is_public:
-            if not current_user.is_authenticated or model.user_id != current_user.id:
-                return jsonify({'error': 'Access denied'}), 403
+        if not _can_access_model(model):
+            return jsonify({'error': 'Access denied'}), 403
 
         fs = current_app.config['FILE_STORE']
         grid_out = fs.get(model.thumbnail_file_id)
@@ -429,12 +534,22 @@ def list_vrma():
     """List VRMA animation assets available to apply on a VRM avatar:
     the current user's own VRMA assets plus all public ones."""
     try:
-        docs = Model3D.list_vrma_for_user(current_user.id if current_user.is_authenticated else None)
-        items = [{
-            'id': model.id,
-            'name': model.name or 'Untitled',
-            'view_url': url_for('api.view_model', model_id=model.id),
-        } for model in docs]
+        user_id = current_user.id if current_user.is_authenticated else None
+        items = []
+        for model in Model3D.list_vrma_for_user(user_id):
+            items.append({
+                'id': model.id,
+                'name': model.name or 'Untitled',
+                'view_url': url_for('api.view_model', model_id=model.id),
+                'source': 'upload',
+            })
+        for model in Model3D.list_generated_vrma_for_user(user_id):
+            items.append({
+                'id': model.id + ':vrma',
+                'name': (model.name or 'Untitled') + ' (animation)',
+                'view_url': url_for('api.export_model', model_id=model.id) + '?format=vrma',
+                'source': 'generated',
+            })
         return jsonify({'animations': items})
     except Exception as e:
         print(f"API list vrma error: {e}")
@@ -555,13 +670,14 @@ def list_tellus_worlds():
         search = request.args.get('search', '').strip()
         user_only = request.args.get('user_only', 'false').lower() == 'true'
         user_id = current_user.id if current_user.is_authenticated else None
+        service_token = _authorized_service_token()
 
         worlds, total = WorldState.list_worlds(
             page=page,
             per_page=per_page,
             search=search if search else None,
             user_id=user_id,
-            public_only=not user_only,
+            public_only=False if service_token else not user_only,
         )
         total_pages = (total + per_page - 1) // per_page
         return jsonify({
@@ -650,7 +766,10 @@ def get_user_models():
                 'original_filename': model.original_filename,
                 'is_public': model.is_public,
                 'upload_date': model.upload_date.isoformat() if model.upload_date else None,
-                'download_count': model.download_count
+                'download_count': model.download_count,
+                'conversion_status': model.conversion_status,
+                'has_viewable': bool(model.viewable_file_id),
+                'has_vrma': bool(model.vrma_file_id),
             })
         
         total_pages = (total + per_page - 1) // per_page
@@ -736,6 +855,8 @@ def _store_one_upload(file, base_name, description, is_public, tags, allowed_ext
         gridfs_file_id=str(gridfs_file_id),
         tags=tags
     )
+    from app.conversion import enqueue
+    enqueue(model, enabled=current_app.config.get('ENABLE_CONVERSION', True))
     model.save()
     return model, None
 
@@ -749,7 +870,10 @@ def _serialize_model(model):
         'file_size': model.file_size,
         'original_filename': model.original_filename,
         'is_public': model.is_public,
-        'upload_date': model.upload_date.isoformat() if model.upload_date else None
+        'upload_date': model.upload_date.isoformat() if model.upload_date else None,
+        'conversion_status': model.conversion_status,
+        'has_viewable': bool(model.viewable_file_id),
+        'has_vrma': bool(model.vrma_file_id),
     }
 
 
