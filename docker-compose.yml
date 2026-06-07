@@ -18,8 +18,8 @@ services:
       S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
       SECRET_KEY: ${SECRET_KEY}
       TELLUS_PERSISTENCE_API_TOKEN: ${TELLUS_PERSISTENCE_API_TOKEN}
-    ports:
-      - "${PORT:-8000}:8000"
+    expose:
+      - "8000"
     restart: unless-stopped
 
   postgres:
