@@ -257,6 +257,8 @@ def upload():
                 tags=tags
             )
 
+            from app.conversion import enqueue
+            enqueue(model, enabled=current_app.config.get('ENABLE_CONVERSION', True))
             model.save()
 
             flash(f'Model "{name}" uploaded successfully!', 'success')
@@ -274,14 +276,10 @@ def upload():
 def profile():
     """User profile page"""
     try:
-        user_models, total = Model3D.get_user_models(current_user.id)
-        stats = {
-            'total_models': total,
-            'public_models': sum(1 for model in user_models if model.is_public),
-            'total_downloads': sum(model.download_count for model in user_models)
-        }
+        user_models, _ = Model3D.get_user_models(current_user.id, page=1, per_page=6)
+        stats = Model3D.get_user_stats(current_user.id)
         
-        return render_template('profile.html', user=current_user, stats=stats)
+        return render_template('profile.html', user=current_user, stats=stats, user_models=user_models)
         
     except Exception as e:
         print(f"Profile error: {e}")
@@ -289,4 +287,4 @@ def profile():
             'total_models': 0,
             'public_models': 0,
             'total_downloads': 0
-        })
+        }, user_models=[])

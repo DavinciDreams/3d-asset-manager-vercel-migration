@@ -97,6 +97,15 @@
                 <div class="p-3 flex flex-col flex-1">
                     <a href="{{ url_for('main.model_detail', model_id=model.id) }}"
                        class="font-semibold text-sm text-gray-800 hover:text-indigo-600 truncate" title="{{ model.name }}">{{ model.name }}</a>
+                    {% if model.conversion_status in ['pending', 'processing'] %}
+                    <span class="inline-flex items-center mt-1 w-fit px-1.5 py-0.5 text-[10px] font-medium bg-yellow-100 text-yellow-800 rounded">
+                        <i class="fas fa-spinner fa-spin mr-1"></i>Processing
+                    </span>
+                    {% elif model.conversion_status == 'failed' %}
+                    <span class="inline-flex items-center mt-1 w-fit px-1.5 py-0.5 text-[10px] font-medium bg-red-100 text-red-800 rounded">
+                        <i class="fas fa-exclamation-triangle mr-1"></i>Preview failed
+                    </span>
+                    {% endif %}
                     <div class="flex justify-between items-center text-xs text-gray-400 mt-1">
                         <span class="truncate">{{ model.owner_username or 'Unknown' }}</span>
                         <span><i class="fas fa-download mr-0.5"></i>{{ model.download_count }}</span>

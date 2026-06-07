@@ -3,10 +3,10 @@ from datetime import datetime
 
 from flask import current_app
 from flask_login import UserMixin
-from sqlalchemy import and_, desc, func, or_, select, update
+from sqlalchemy import and_, desc, func, or_, select, true, update
 from werkzeug.security import check_password_hash, generate_password_hash
 
-from app.db import count_rows, models, users, world_states
+from app.db import asset_files, count_rows, models, users, world_states
 
 
 class User(UserMixin):
@@ -84,7 +84,10 @@ class Model3D:
                  original_filename=None, user_id=None, is_public=True, _id=None,
                  upload_date=None, download_count=0, gridfs_file_id=None,
                  camera_orbit=None, thumbnail_file_id=None, tags=None,
-                 preview_file_id=None, default_animation=None, default_vrma_id=None):
+                 preview_file_id=None, default_animation=None, default_vrma_id=None,
+                 viewable_file_id=None, viewable_format=None,
+                 conversion_status=None, conversion_error=None,
+                 conversion_claimed_at=None, vrma_file_id=None):
         self.name = name
         self.description = description
         self.file_format = file_format
@@ -102,6 +105,12 @@ class Model3D:
         self.preview_file_id = preview_file_id
         self.default_animation = default_animation
         self.default_vrma_id = default_vrma_id
+        self.viewable_file_id = viewable_file_id
+        self.viewable_format = viewable_format
+        self.conversion_status = conversion_status
+        self.conversion_error = conversion_error
+        self.conversion_claimed_at = conversion_claimed_at
+        self.vrma_file_id = vrma_file_id
 
     def save(self):
         engine = current_app.config["DB_ENGINE"]
@@ -122,6 +131,12 @@ class Model3D:
             "preview_file_id": self.preview_file_id,
             "default_animation": self.default_animation,
             "default_vrma_id": self.default_vrma_id,
+            "viewable_file_id": self.viewable_file_id,
+            "viewable_format": self.viewable_format,
+            "conversion_status": self.conversion_status,
+            "conversion_error": self.conversion_error,
+            "conversion_claimed_at": self.conversion_claimed_at,
+            "vrma_file_id": self.vrma_file_id,
         }
 
         with engine.begin() as conn:
@@ -136,12 +151,27 @@ class Model3D:
     def delete(self):
         engine = current_app.config["DB_ENGINE"]
         fs = current_app.config["FILE_STORE"]
-        for file_id in [self.gridfs_file_id, self.thumbnail_file_id, self.preview_file_id]:
+        for file_id in [
+            self.gridfs_file_id,
+            self.thumbnail_file_id,
+            self.preview_file_id,
+            self.viewable_file_id,
+            self.vrma_file_id,
+        ]:
             if file_id:
                 try:
                     fs.delete(file_id)
                 except Exception as e:
                     print(f"Error deleting stored file: {e}")
+        try:
+            with engine.begin() as conn:
+                rows = conn.execute(select(asset_files.c.id, asset_files.c.metadata)).all()
+            for row in rows:
+                metadata = row.metadata or {}
+                if metadata.get("export_for") == self.id:
+                    fs.delete(row.id)
+        except Exception as e:
+            print(f"Error deleting cached exports: {e}")
         with engine.begin() as conn:
             conn.execute(models.delete().where(models.c.id == self.id))
 
@@ -163,6 +193,25 @@ class Model3D:
         except Exception as e:
             print(f"Error reading stored file: {e}")
         return None
+
+    def _read_stored_file(self, file_id):
+        fs = current_app.config["FILE_STORE"]
+        try:
+            if file_id:
+                return fs.get(file_id).read()
+        except Exception as e:
+            print(f"Error reading stored file {file_id}: {e}")
+        return None
+
+    def get_viewable_data(self):
+        if self.viewable_file_id:
+            data = self._read_stored_file(self.viewable_file_id)
+            if data is not None:
+                return data, (self.viewable_format or "glb")
+        return self.get_file_data(), self.file_format
+
+    def get_vrma_data(self):
+        return self._read_stored_file(self.vrma_file_id)
 
     def get_file_size_formatted(self):
         if not self.file_size:
@@ -199,6 +248,12 @@ class Model3D:
             preview_file_id=model_data.get("preview_file_id"),
             default_animation=model_data.get("default_animation"),
             default_vrma_id=model_data.get("default_vrma_id"),
+            viewable_file_id=model_data.get("viewable_file_id"),
+            viewable_format=model_data.get("viewable_format"),
+            conversion_status=model_data.get("conversion_status"),
+            conversion_error=model_data.get("conversion_error"),
+            conversion_claimed_at=model_data.get("conversion_claimed_at"),
+            vrma_file_id=model_data.get("vrma_file_id"),
         )
 
     @staticmethod
@@ -265,7 +320,7 @@ class Model3D:
         if search_predicate is not None:
             predicates.append(search_predicate)
         predicates.extend(Model3D._tag_predicates(tag))
-        where = and_(*predicates)
+        where = and_(*predicates) if predicates else true()
 
         with engine.begin() as conn:
             total = count_rows(conn, models, where)
@@ -284,7 +339,7 @@ class Model3D:
         engine = current_app.config["DB_ENGINE"]
         predicates = [models.c.user_id == str(user_id)]
         predicates.extend(Model3D._tag_predicates(tag))
-        where = and_(*predicates)
+        where = and_(*predicates) if predicates else true()
 
         with engine.begin() as conn:
             total = count_rows(conn, models, where)
@@ -341,6 +396,21 @@ class Model3D:
         return [Model3D.from_doc(row) for row in rows]
 
     @staticmethod
+    def list_generated_vrma_for_user(user_id=None):
+        engine = current_app.config["DB_ENGINE"]
+        predicates = [models.c.vrma_file_id.is_not(None)]
+        if user_id:
+            predicates.append(or_(models.c.is_public.is_(True), models.c.user_id == str(user_id)))
+        else:
+            predicates.append(models.c.is_public.is_(True))
+
+        with engine.begin() as conn:
+            rows = conn.execute(
+                select(models).where(and_(*predicates)).order_by(models.c.name.asc())
+            ).mappings().all()
+        return [Model3D.from_doc(row) for row in rows]
+
+    @staticmethod
     def get_stats():
         engine = current_app.config["DB_ENGINE"]
         with engine.begin() as conn:
@@ -353,6 +423,23 @@ class Model3D:
             "total_models": total_models,
             "public_models": public_models,
             "total_users": total_users,
+            "total_downloads": total_downloads,
+        }
+
+    @staticmethod
+    def get_user_stats(user_id):
+        engine = current_app.config["DB_ENGINE"]
+        user_filter = models.c.user_id == str(user_id)
+        with engine.begin() as conn:
+            total_models = count_rows(conn, models, user_filter)
+            public_models = count_rows(conn, models, and_(user_filter, models.c.is_public.is_(True)))
+            total_downloads = conn.execute(
+                select(func.coalesce(func.sum(models.c.download_count), 0)).where(user_filter)
+            ).scalar_one()
+
+        return {
+            "total_models": total_models,
+            "public_models": public_models,
             "total_downloads": total_downloads,
         }
 
@@ -419,7 +506,9 @@ class WorldState:
     def list_worlds(page=1, per_page=20, search=None, user_id=None, public_only=True):
         engine = current_app.config["DB_ENGINE"]
         predicates = []
-        if user_id and not public_only:
+        if not public_only and not user_id:
+            predicates = []
+        elif user_id and not public_only:
             predicates.append(world_states.c.owner_id == str(user_id))
         elif user_id:
             predicates.append(or_(world_states.c.is_public.is_(True), world_states.c.owner_id == str(user_id)))
@@ -432,7 +521,7 @@ class WorldState:
                 func.lower(world_states.c.description).like(pattern),
                 func.lower(world_states.c.world_id).like(pattern),
             ))
-        where = and_(*predicates)
+        where = and_(*predicates) if predicates else true()
         with engine.begin() as conn:
             total = count_rows(conn, world_states, where)
             rows = conn.execute(

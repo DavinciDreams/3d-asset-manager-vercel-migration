@@ -20,6 +20,16 @@ def create_app():
     app.config["ALLOWED_EXTENSIONS"] = {
         "obj", "fbx", "gltf", "glb", "dae", "3ds", "ply", "stl", "vrm", "vrma"
     }
+    enable_conversion = os.environ.get("ENABLE_CONVERSION")
+    has_configured_database = bool(os.environ.get("DATABASE_URL") or os.environ.get("POSTGRES_URL"))
+    if enable_conversion is None:
+        app.config["ENABLE_CONVERSION"] = has_configured_database
+    else:
+        app.config["ENABLE_CONVERSION"] = enable_conversion.lower() in {"1", "true", "yes", "on"}
+    app.config["FBX2GLTF_BIN"] = os.environ.get("FBX2GLTF_BIN", "/usr/local/bin/FBX2glTF")
+    app.config["ASSIMP_BIN"] = os.environ.get("ASSIMP_BIN", "assimp")
+    app.config["NODE_BIN"] = os.environ.get("NODE_BIN", "node")
+    app.config["FBX2VRMA_DIR"] = os.environ.get("FBX2VRMA_DIR", "/app/tools")
 
     try:
         engine = create_database_engine()
@@ -53,5 +63,13 @@ def create_app():
     app.register_blueprint(auth_bp, url_prefix="/auth")
     app.register_blueprint(main_bp)
     app.register_blueprint(api_bp, url_prefix="/api")
+
+    if app.config["ENABLE_CONVERSION"]:
+        try:
+            from app.conversion import start_worker
+            start_worker(app)
+            print("Conversion worker started")
+        except Exception as e:
+            print(f"Conversion worker failed to start: {e}")
 
     return app
