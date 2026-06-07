@@ -1,8 +1,8 @@
 """Tests for the Swagger/OpenAPI docs and multi-file upload.
 
 Run with: python test_swagger_and_upload.py
-Uses the in-memory MongoDB (mongomock) that create_app() falls back to when no
-MONGODB_URI is set, so it needs no live database.
+Uses the local SQLite fallback when DATABASE_URL is not set, so it needs no live
+database.
 """
 import io
 import os

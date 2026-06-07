@@ -1,55 +1,99 @@
-# 3D Asset Manager - Vercel Edition
+# 3D Asset Manager
 
-A Flask-based 3D model management platform optimized for Vercel deployment with MongoDB Atlas.
+A Flask-based 3D model management platform with Postgres-backed assets and
+world-state persistence for Tellus/EvoFlow-style worlds.
 
-## 🔧 Technology Stack
+## Technology Stack
 
-- **Backend**: Python Flask (Serverless)
-- **Database**: MongoDB Atlas (Free Tier)
-- **File Storage**: MongoDB GridFS
-- **Frontend**: HTML5, Tailwind CSS, JavaScript
-- **3D Viewer**: Google Model-Viewer.js
-- **Deployment**: Vercel
+- Backend: Python Flask
+- Database: Postgres via SQLAlchemy
+- File storage: MinIO/S3-compatible object storage
+- Frontend: HTML5, Tailwind CSS, JavaScript
+- 3D viewer: Google Model-Viewer.js
+- Deployment: Coolify or another Flask-capable container host
 
-## 🚀 Quick Deployment Guide
+## Environment
 
-### Prerequisites
-1. Vercel account
-2. MongoDB Atlas account (free tier)
-3. Git repository
+Copy `.env.example` to `.env` and configure:
 
-### Step-by-Step Deployment
+```bash
+POSTGRES_PASSWORD=long-random-postgres-password
+MINIO_ROOT_USER=asset-manager
+MINIO_ROOT_PASSWORD=long-random-minio-password
+S3_BUCKET=asset-manager
+TELLUS_PERSISTENCE_API_TOKEN=long-random-shared-secret
+SECRET_KEY=long-random-flask-secret
+```
 
-1. **Setup MongoDB Atlas**
-2. **Configure Environment Variables** (see SECURITY.md)
-3. **Deploy with Vercel**
-4. **Test Functionality**
+When running with `docker-compose.yml`, `DATABASE_URL` is built automatically
+from `POSTGRES_PASSWORD` and the internal `postgres` service name. For an
+external database, set `DATABASE_URL` directly instead.
 
-See `VERCEL_DEPLOYMENT_GUIDE.md` for detailed instructions.
+If `DATABASE_URL` is omitted in development, the app falls back to local SQLite
+at `asset_manager_dev.sqlite3`.
 
-## 🔒 Security
+## Coolify Docker Compose
 
-**IMPORTANT**: This project handles sensitive data. Please read `SECURITY.md` before deployment.
+The repo includes `docker-compose.yml` with:
 
-### Environment Variables Required:
-- `MONGODB_URI` - Your MongoDB Atlas connection string
-- `SECRET_KEY` - Flask session encryption key
-- `FLASK_ENV` - Application environment
+- `app`: the Flask/Gunicorn asset manager
+- `postgres`: Postgres 16 with a persistent `postgres_data` volume
+- `minio`: S3-compatible object storage with a persistent `minio_data` volume
+- `migrate-mongo`: optional one-shot migration profile
 
-### Setup:
-1. Copy `.env.example` to `.env`
-2. Fill in your credentials (never commit `.env`)
-3. Set production variables in Vercel dashboard
+For Coolify, set at least:
 
-**⚠️ Never commit sensitive credentials to version control**
+```bash
+POSTGRES_PASSWORD=long-random-postgres-password
+MINIO_ROOT_USER=asset-manager
+MINIO_ROOT_PASSWORD=long-random-minio-password
+S3_BUCKET=asset-manager
+SECRET_KEY=long-random-flask-secret
+TELLUS_PERSISTENCE_API_TOKEN=long-random-shared-secret
+MAX_UPLOAD_MB=100
+```
 
-## 📋 Features
+The app stores model binaries, thumbnails, previews, generated assets, and
+future optimized/compressed derivatives in MinIO. Postgres stores the metadata,
+ownership, visibility, world snapshots, and MinIO object keys.
 
-- ✅ User Authentication with MongoDB
-- ✅ 3D Model Upload/Download
-- ✅ MongoDB GridFS for File Storage
-- ✅ Professional 3D Model Viewer
-- ✅ RESTful API
-- ✅ Responsive Design
-- ✅ Serverless Architecture
+## Tellus Persistence
 
+Tellus should keep using Cloudflare Durable Objects for live WebSocket
+coordination and multiplayer room state. Configure the Durable Object to save
+durable snapshots to this API:
+
+```bash
+TELLUS_PERSISTENCE_API_BASE=https://your-asset-manager.example.com
+TELLUS_PERSISTENCE_API_TOKEN=the-same-long-random-shared-secret
+```
+
+The Flask API exposes:
+
+```text
+GET /api/tellus/worlds
+GET /api/tellus/worlds/:worldId/state
+PUT /api/tellus/worlds/:worldId/state
+PATCH /api/tellus/worlds/:worldId
+```
+
+Worlds support `is_public`, ownership, a `source` field, and a JSON snapshot.
+EvoFlow Worlds can be added as another `source` later.
+
+## Mongo Migration
+
+Set the old `MONGODB_URI` and new `DATABASE_URL`, then run:
+
+```bash
+python scripts/migrate_mongo_to_postgres.py
+```
+
+With Docker Compose, set `MONGODB_URI` to the old Mongo service connection
+string and run:
+
+```bash
+docker compose --profile migration run --rm migrate-mongo
+```
+
+The script migrates users, model metadata, old GridFS binaries into MinIO, and
+existing Tellus world snapshots if the Mongo collection exists.

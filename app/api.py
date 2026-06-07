@@ -1,12 +1,38 @@
 from flask import Blueprint, jsonify, request, current_app, make_response, url_for
 from flask_login import current_user, login_required
 from werkzeug.exceptions import HTTPException
-from app.models import Model3D, User
+from app.models import Model3D, User, WorldState
 from app.openapi import get_openapi_spec
-from bson.objectid import ObjectId
 import io
+import os
 
 api_bp = Blueprint('api', __name__)
+
+
+def _authorized_service_token():
+    expected = os.environ.get('TELLUS_PERSISTENCE_API_TOKEN', '').strip()
+    if not expected:
+        return False
+    header = request.headers.get('Authorization', '')
+    return header == f'Bearer {expected}'
+
+
+def _can_read_world(world):
+    return (
+        world.is_public
+        or _authorized_service_token()
+        or (current_user.is_authenticated and world.owner_id == current_user.id)
+    )
+
+
+def _can_write_world(world=None):
+    return (
+        _authorized_service_token()
+        or (
+            current_user.is_authenticated
+            and (world is None or world.owner_id in (None, current_user.id))
+        )
+    )
 
 
 @api_bp.app_errorhandler(413)
@@ -148,7 +174,7 @@ def download_model(model_id):
             if not current_user.is_authenticated or model.user_id != current_user.id:
                 return jsonify({'error': 'Access denied'}), 403
         
-        # Get file data from GridFS
+        # Get file data from the database-backed file store.
         file_data = model.get_file_data()
         
         if not file_data:
@@ -199,7 +225,7 @@ def view_model(model_id):
             if not current_user.is_authenticated or model.user_id != current_user.id:
                 return jsonify({'error': 'Access denied'}), 403
         
-        # Get file data from GridFS
+        # Get file data from the database-backed file store.
         file_data = model.get_file_data()
         
         if not file_data:
@@ -344,12 +370,12 @@ def upload_thumbnail(model_id):
         if not png_bytes or len(png_bytes) > 2 * 1024 * 1024:
             return jsonify({'error': 'Thumbnail missing or too large'}), 400
 
-        fs = current_app.config['GRIDFS']
+        fs = current_app.config['FILE_STORE']
 
         # Remove the previous thumbnail, if any
         if model.thumbnail_file_id:
             try:
-                fs.delete(ObjectId(model.thumbnail_file_id))
+                fs.delete(model.thumbnail_file_id)
             except Exception as e:
                 print(f"Thumbnail cleanup warning: {e}")
 
@@ -382,8 +408,8 @@ def get_thumbnail(model_id):
             if not current_user.is_authenticated or model.user_id != current_user.id:
                 return jsonify({'error': 'Access denied'}), 403
 
-        fs = current_app.config['GRIDFS']
-        grid_out = fs.get(ObjectId(model.thumbnail_file_id))
+        fs = current_app.config['FILE_STORE']
+        grid_out = fs.get(model.thumbnail_file_id)
         png_bytes = grid_out.read()
 
         response = make_response(png_bytes)
@@ -403,20 +429,12 @@ def list_vrma():
     """List VRMA animation assets available to apply on a VRM avatar:
     the current user's own VRMA assets plus all public ones."""
     try:
-        db = current_app.config['MONGODB_DB']
-        query = {'file_format': 'vrma'}
-        if current_user.is_authenticated:
-            query = {'file_format': 'vrma',
-                     '$or': [{'is_public': True}, {'user_id': current_user.id}]}
-        else:
-            query['is_public'] = True
-
-        docs = list(db.models.find(query).sort('name', 1))
+        docs = Model3D.list_vrma_for_user(current_user.id if current_user.is_authenticated else None)
         items = [{
-            'id': str(d['_id']),
-            'name': d.get('name', 'Untitled'),
-            'view_url': url_for('api.view_model', model_id=str(d['_id'])),
-        } for d in docs]
+            'id': model.id,
+            'name': model.name or 'Untitled',
+            'view_url': url_for('api.view_model', model_id=model.id),
+        } for model in docs]
         return jsonify({'animations': items})
     except Exception as e:
         print(f"API list vrma error: {e}")
@@ -436,16 +454,16 @@ def upload_preview(model_id):
             return jsonify({'error': 'Access denied'}), 403
 
         video_bytes = request.get_data()
-        # Cap preview size (~8MB) so a stray long recording can't bloat GridFS.
+        # Cap preview size (~8MB) so a stray long recording can't bloat storage.
         if not video_bytes or len(video_bytes) > 8 * 1024 * 1024:
             return jsonify({'error': 'Preview missing or too large'}), 400
 
-        fs = current_app.config['GRIDFS']
+        fs = current_app.config['FILE_STORE']
 
         # Remove the previous preview, if any
         if model.preview_file_id:
             try:
-                fs.delete(ObjectId(model.preview_file_id))
+                fs.delete(model.preview_file_id)
             except Exception as e:
                 print(f"Preview cleanup warning: {e}")
 
@@ -478,8 +496,8 @@ def get_preview(model_id):
             if not current_user.is_authenticated or model.user_id != current_user.id:
                 return jsonify({'error': 'Access denied'}), 403
 
-        fs = current_app.config['GRIDFS']
-        grid_out = fs.get(ObjectId(model.preview_file_id))
+        fs = current_app.config['FILE_STORE']
+        grid_out = fs.get(model.preview_file_id)
         video_bytes = grid_out.read()
 
         response = make_response(video_bytes)
@@ -526,6 +544,90 @@ def get_stats():
     except Exception as e:
         print(f"API stats error: {e}")
         return jsonify({'error': 'Failed to retrieve statistics'}), 500
+
+
+@api_bp.route('/tellus/worlds')
+def list_tellus_worlds():
+    """List public worlds, or the current user's accessible worlds."""
+    try:
+        page = request.args.get('page', 1, type=int)
+        per_page = min(request.args.get('per_page', 20, type=int), 100)
+        search = request.args.get('search', '').strip()
+        user_only = request.args.get('user_only', 'false').lower() == 'true'
+        user_id = current_user.id if current_user.is_authenticated else None
+
+        worlds, total = WorldState.list_worlds(
+            page=page,
+            per_page=per_page,
+            search=search if search else None,
+            user_id=user_id,
+            public_only=not user_only,
+        )
+        total_pages = (total + per_page - 1) // per_page
+        return jsonify({
+            'worlds': [world.to_api(include_state=False) for world in worlds],
+            'pagination': {
+                'page': page,
+                'per_page': per_page,
+                'total': total,
+                'pages': total_pages,
+                'has_prev': page > 1,
+                'has_next': page < total_pages,
+            },
+        })
+    except Exception as e:
+        print(f"Tellus list worlds error: {e}")
+        return jsonify({'error': 'Failed to retrieve worlds'}), 500
+
+
+@api_bp.route('/tellus/worlds/<world_id>/state', methods=['GET'])
+def get_tellus_world_state(world_id):
+    try:
+        world = WorldState.get(world_id)
+        if not world:
+            return jsonify({'error': 'World not found'}), 404
+        if not _can_read_world(world):
+            return jsonify({'error': 'Access denied'}), 403
+        return jsonify(world.to_api(include_state=True))
+    except Exception as e:
+        print(f"Tellus get world error: {e}")
+        return jsonify({'error': 'Failed to retrieve world'}), 500
+
+
+@api_bp.route('/tellus/worlds/<world_id>/state', methods=['PUT'])
+def put_tellus_world_state(world_id):
+    try:
+        existing = WorldState.get(world_id)
+        if not _can_write_world(existing):
+            return jsonify({'error': 'Access denied'}), 403
+
+        payload = request.get_json(silent=True) or {}
+        if payload.get('worldId') not in (None, world_id):
+            return jsonify({'error': 'worldId mismatch'}), 400
+
+        owner_id = current_user.id if current_user.is_authenticated else None
+        world = WorldState.upsert(world_id, payload, owner_id=owner_id)
+        return jsonify(world.to_api(include_state=True))
+    except Exception as e:
+        print(f"Tellus save world error: {e}")
+        return jsonify({'error': 'Failed to save world'}), 500
+
+
+@api_bp.route('/tellus/worlds/<world_id>', methods=['PATCH'])
+def patch_tellus_world_metadata(world_id):
+    try:
+        world = WorldState.get(world_id)
+        if not world:
+            return jsonify({'error': 'World not found'}), 404
+        if not _can_write_world(world):
+            return jsonify({'error': 'Access denied'}), 403
+
+        payload = request.get_json(silent=True) or {}
+        world = world.patch_metadata(payload)
+        return jsonify(world.to_api(include_state=False))
+    except Exception as e:
+        print(f"Tellus patch world error: {e}")
+        return jsonify({'error': 'Failed to update world'}), 500
 
 @api_bp.route('/user/models')
 @login_required
@@ -691,7 +793,7 @@ def upload_model():
         # Per-file limit (not the request-body cap), so each file is judged on
         # its own size regardless of how many are sent.
         max_bytes = current_app.config['MAX_FILE_BYTES']
-        fs = current_app.config['GRIDFS']
+        fs = current_app.config['FILE_STORE']
 
         uploaded, errors = [], []
         for file in files:

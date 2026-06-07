@@ -18,5 +18,5 @@ EXPOSE 8000
 
 # gunicorn imports `app` from wsgi.py
 # - 2 workers x 4 threads is a sane default for a small Flask app
-# - timeout raised to 120s for larger model uploads to GridFS
+# - timeout raised to 120s for larger model uploads
 CMD ["sh", "-c", "gunicorn wsgi:app --bind 0.0.0.0:${PORT:-8000} --workers 2 --threads 4 --timeout 120"]

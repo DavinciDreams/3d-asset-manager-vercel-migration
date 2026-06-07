@@ -3,7 +3,6 @@ from flask_login import login_required, current_user
 from app.models import Model3D, User
 from werkzeug.utils import secure_filename
 import io
-from bson.objectid import ObjectId
 
 main_bp = Blueprint('main', __name__)
 
@@ -232,8 +231,8 @@ def upload():
                 flash(f'File too large. Maximum size is {max_upload_mb}MB.', 'error')
                 return render_template('upload.html', all_tags=Model3D.get_user_tags(current_user.id), max_upload_mb=max_upload_mb)
             
-            # Store file in GridFS
-            fs = current_app.config['GRIDFS']
+            # Store file in the configured database-backed file store.
+            fs = current_app.config['FILE_STORE']
             gridfs_file_id = fs.put(
                 file_content,
                 filename=filename,

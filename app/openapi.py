@@ -245,7 +245,7 @@ def get_openapi_spec(base_url=''):
                     {
                         'name': 'model_id', 'in': 'path', 'required': True,
                         'schema': {'type': 'string'},
-                        'description': 'The model id (Mongo ObjectId).',
+                        'description': 'The model id.',
                     }
                 ],
                 'put': {

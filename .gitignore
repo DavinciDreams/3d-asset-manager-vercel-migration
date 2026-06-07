@@ -64,6 +64,7 @@ yarn-error.log*
 # Database
 *.db
 *.sqlite
+*.sqlite3
 
 # Local uploads (not needed with GridFS)
 uploads/
