@@ -1,4 +1,4 @@
-from flask import Blueprint, render_template, request, redirect, url_for, flash, current_app
+from flask import Blueprint, render_template, request, redirect, url_for, flash, current_app, session
 from flask_login import login_required, current_user
 from app.models import ApiKey, Model3D, User
 from werkzeug.utils import secure_filename
@@ -279,9 +279,11 @@ def profile():
         user_models, _ = Model3D.get_user_models(current_user.id, page=1, per_page=6)
         stats = Model3D.get_user_stats(current_user.id)
         api_keys = ApiKey.list_for_user(current_user.id)
+        new_api_key = session.pop('new_api_key', None)
         
         return render_template('profile.html', user=current_user, stats=stats,
-                               user_models=user_models, api_keys=api_keys)
+                               user_models=user_models, api_keys=api_keys,
+                               new_api_key=new_api_key)
         
     except Exception as e:
         print(f"Profile error: {e}")
@@ -289,7 +291,7 @@ def profile():
             'total_models': 0,
             'public_models': 0,
             'total_downloads': 0
-        }, user_models=[], api_keys=[])
+        }, user_models=[], api_keys=[], new_api_key=None)
 
 
 @main_bp.route('/profile/api-keys', methods=['POST'])
@@ -298,8 +300,14 @@ def create_api_key():
     """Create an upload API key for the current user."""
     name = request.form.get('name', '').strip() or 'Upload API key'
     try:
-        _, token = ApiKey.create_for_user(current_user.id, name=name, scopes=['upload'])
-        flash(f'API key created. Copy it now: {token}', 'success')
+        api_key, token = ApiKey.create_for_user(current_user.id, name=name, scopes=['upload'])
+        session['new_api_key'] = {
+            'id': api_key.id,
+            'name': api_key.name,
+            'prefix': api_key.key_prefix,
+            'token': token,
+        }
+        flash('API key created. Copy it from the API Keys panel.', 'success')
     except Exception as e:
         print(f"API key creation error: {e}")
         flash('Could not create API key.', 'error')
