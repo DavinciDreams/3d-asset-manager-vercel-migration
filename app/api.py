@@ -3,8 +3,9 @@ from flask_login import current_user, login_required
 from werkzeug.exceptions import HTTPException
 from sqlalchemy import select
 from app.db import asset_files
-from app.models import Model3D, User, WorldState
+from app.models import ApiKey, Model3D, User, WorldState
 from app.openapi import get_openapi_spec
+import hmac
 import io
 import os
 
@@ -39,7 +40,30 @@ def _authorized_service_token():
     if not expected:
         return False
     header = request.headers.get('Authorization', '')
-    return header == f'Bearer {expected}'
+    return hmac.compare_digest(header, f'Bearer {expected}')
+
+
+def _bearer_token():
+    header = request.headers.get('Authorization', '').strip()
+    prefix = 'Bearer '
+    if not header.startswith(prefix):
+        return ''
+    return header[len(prefix):].strip()
+
+
+def _upload_actor_user():
+    """Return the user that should own an upload request, or (None, message)."""
+    if current_user.is_authenticated:
+        return current_user, None
+
+    api_key = ApiKey.verify_token(_bearer_token(), required_scope='upload')
+    if not api_key:
+        return None, 'Authentication required'
+
+    user = User.get_by_id(api_key.user_id)
+    if not user:
+        return None, 'API key owner was not found'
+    return user, None
 
 
 def _can_read_world(world):
@@ -803,7 +827,7 @@ def _name_from_filename(original_filename):
     return cleaned or base
 
 
-def _store_one_upload(file, base_name, description, is_public, tags, allowed_extensions, fs, max_bytes):
+def _store_one_upload(file, base_name, description, is_public, tags, allowed_extensions, fs, max_bytes, owner_user):
     """Validate and persist a single uploaded file as a Model3D.
 
     Returns (model, None) on success or (None, error_message) on failure.
@@ -839,7 +863,7 @@ def _store_one_upload(file, base_name, description, is_public, tags, allowed_ext
         content_type=file.content_type,
         metadata={
             'original_filename': file.filename,
-            'uploaded_by': current_user.id,
+            'uploaded_by': owner_user.id,
             'upload_date': Model3D().upload_date
         }
     )
@@ -850,7 +874,7 @@ def _store_one_upload(file, base_name, description, is_public, tags, allowed_ext
         file_format=file_extension,
         file_size=file_size,
         original_filename=file.filename,
-        user_id=current_user.id,
+        user_id=owner_user.id,
         is_public=is_public,
         gridfs_file_id=str(gridfs_file_id),
         tags=tags
@@ -878,7 +902,6 @@ def _serialize_model(model):
 
 
 @api_bp.route('/upload', methods=['POST'])
-@login_required
 def upload_model():
     """Upload one or more 3D models.
 
@@ -894,6 +917,10 @@ def upload_model():
     no name) does not require a name.
     """
     try:
+        owner_user, auth_error = _upload_actor_user()
+        if not owner_user:
+            return jsonify({'error': auth_error}), 401
+
         description = request.form.get('description', '').strip()
         is_public = request.form.get('is_public') == 'true'
         tags = Model3D.normalize_tags(request.form.get('tags', ''))
@@ -923,7 +950,7 @@ def upload_model():
         for file in files:
             model, err = _store_one_upload(
                 file, base_name, description, is_public, tags,
-                allowed_extensions, fs, max_bytes
+                allowed_extensions, fs, max_bytes, owner_user
             )
             if model:
                 uploaded.append(model)

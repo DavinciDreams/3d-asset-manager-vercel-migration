@@ -57,6 +57,26 @@ The app stores model binaries, thumbnails, previews, generated assets, and
 future optimized/compressed derivatives in MinIO. Postgres stores the metadata,
 ownership, visibility, world snapshots, and MinIO object keys.
 
+## Upload API Keys
+
+Logged-in users can create upload API keys from Profile. Keys are shown once,
+stored only as SHA-256 hashes, and can be revoked from the same page. Use them
+for scripts, Tellus, or other asset tooling:
+
+```bash
+curl -X POST "https://your-asset-manager.example.com/api/upload" \
+  -H "Authorization: Bearer tam_your-api-key" \
+  -F "file=@model.glb" \
+  -F "name=Golden Apple Tree" \
+  -F "is_public=true" \
+  -F "tags=tellus,generated"
+```
+
+Tellus should store one of these generated keys in its generation backend as
+`TELLUS_ASSET_STORE_UPLOAD_TOKEN`. The asset manager resolves that key to the
+owning user, so generated assets persist in that user's inventory and the shared
+asset library.
+
 ## Tellus Persistence
 
 Tellus should keep using Cloudflare Durable Objects for live WebSocket
