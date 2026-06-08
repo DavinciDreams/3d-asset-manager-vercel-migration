@@ -88,6 +88,21 @@ def main():
 
     _login(app, client)
 
+    # --- API key creation UI shows a persistent copy panel once ---
+    r = client.post('/profile/api-keys', data={'name': 'Copy Button Test'}, follow_redirects=True)
+    assert r.status_code == 200, r.status_code
+    profile_html = r.get_data(as_text=True)
+    assert 'data-copy-api-key' in profile_html, 'new key panel should include a copy button'
+    assert 'Copy Button Test' in profile_html, 'new key panel should show the key name'
+    assert 'tam_' in profile_html, 'new key token should be visible once'
+    r = client.get('/profile')
+    refreshed_html = r.get_data(as_text=True)
+    assert 'New API key created' not in refreshed_html, \
+        'new key panel should be cleared after first render'
+    assert 'value="tam_' not in refreshed_html, \
+        'new key token should be cleared after first render'
+    print('PASS: profile API key creation shows a one-time copy panel')
+
     # --- Upload page UI ---
     up = client.get('/upload').get_data(as_text=True)
     assert 'Choose Folder' in up, 'upload page should offer folder selection'
