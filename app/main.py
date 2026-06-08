@@ -1,6 +1,6 @@
 from flask import Blueprint, render_template, request, redirect, url_for, flash, current_app
 from flask_login import login_required, current_user
-from app.models import Model3D, User
+from app.models import ApiKey, Model3D, User
 from werkzeug.utils import secure_filename
 import io
 
@@ -278,8 +278,10 @@ def profile():
     try:
         user_models, _ = Model3D.get_user_models(current_user.id, page=1, per_page=6)
         stats = Model3D.get_user_stats(current_user.id)
+        api_keys = ApiKey.list_for_user(current_user.id)
         
-        return render_template('profile.html', user=current_user, stats=stats, user_models=user_models)
+        return render_template('profile.html', user=current_user, stats=stats,
+                               user_models=user_models, api_keys=api_keys)
         
     except Exception as e:
         print(f"Profile error: {e}")
@@ -287,4 +289,29 @@ def profile():
             'total_models': 0,
             'public_models': 0,
             'total_downloads': 0
-        }, user_models=[])
+        }, user_models=[], api_keys=[])
+
+
+@main_bp.route('/profile/api-keys', methods=['POST'])
+@login_required
+def create_api_key():
+    """Create an upload API key for the current user."""
+    name = request.form.get('name', '').strip() or 'Upload API key'
+    try:
+        _, token = ApiKey.create_for_user(current_user.id, name=name, scopes=['upload'])
+        flash(f'API key created. Copy it now: {token}', 'success')
+    except Exception as e:
+        print(f"API key creation error: {e}")
+        flash('Could not create API key.', 'error')
+    return redirect(url_for('main.profile'))
+
+
+@main_bp.route('/profile/api-keys/<key_id>/revoke', methods=['POST'])
+@login_required
+def revoke_api_key(key_id):
+    """Revoke one of the current user's API keys."""
+    if ApiKey.revoke_for_user(key_id, current_user.id):
+        flash('API key revoked.', 'success')
+    else:
+        flash('API key not found.', 'error')
+    return redirect(url_for('main.profile'))

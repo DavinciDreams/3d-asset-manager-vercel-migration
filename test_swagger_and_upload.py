@@ -12,7 +12,7 @@ import sys
 os.environ.setdefault('MAX_UPLOAD_MB', '1')
 
 from app import create_app
-from app.models import User
+from app.models import ApiKey, Model3D, User
 
 
 def _login(app, client, username='swagtester'):
@@ -38,6 +38,9 @@ def main():
         'content']['multipart/form-data']['schema']
     assert upload_schema['properties']['file']['type'] == 'array', \
         'spec should document multi-file upload'
+    upload_security = spec['paths']['/upload']['post']['security']
+    assert {'uploadApiKey': []} in upload_security, \
+        'spec should document upload API key auth'
     print('PASS: /api/openapi.json serves a valid spec with multi-file upload')
 
     # --- Swagger UI ---
@@ -50,6 +53,38 @@ def main():
     assert '/api/docs' in client.get('/').get_data(as_text=True), \
         'home page (base_3d.html) should link to API docs'
     print('PASS: API docs link present in navigation')
+
+    # --- Upload API key auth ---
+    r = client.post('/api/upload', data={
+        'is_public': 'true', 'file': (io.BytesIO(glb), 'no-auth.glb'),
+    }, content_type='multipart/form-data')
+    assert r.status_code == 401, r.get_data(as_text=True)
+
+    with app.app_context():
+        api_user = User.get_by_username('apitester')
+        if not api_user:
+            api_user = User(username='apitester', email='apitester@example.com')
+            api_user.set_password('pw123456')
+            api_user.save()
+        api_key, token = ApiKey.create_for_user(api_user.id, name='Tellus test', scopes=['upload'])
+
+    r = client.post('/api/upload', headers={'Authorization': f'Bearer {token}'}, data={
+        'name': 'API Key Model', 'is_public': 'true',
+        'file': (io.BytesIO(glb), 'api-key-model.glb'),
+    }, content_type='multipart/form-data')
+    assert r.status_code == 201, r.get_json()
+    model_id = r.get_json()['model']['id']
+    with app.app_context():
+        model = Model3D.get_by_id(model_id)
+        assert model.user_id == api_user.id, model.user_id
+        assert ApiKey.revoke_for_user(api_key.id, api_user.id)
+
+    r = client.post('/api/upload', headers={'Authorization': f'Bearer {token}'}, data={
+        'name': 'Revoked Key Model', 'is_public': 'true',
+        'file': (io.BytesIO(glb), 'revoked-key-model.glb'),
+    }, content_type='multipart/form-data')
+    assert r.status_code == 401, r.get_json()
+    print('PASS: upload API keys can upload as owner and revoked keys are rejected')
 
     _login(app, client)
 

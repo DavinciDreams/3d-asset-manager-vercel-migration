@@ -49,6 +49,20 @@ users = Table(
     Column("created_at", DateTime, nullable=False, default=datetime.utcnow),
 )
 
+api_keys = Table(
+    "api_keys",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("user_id", String(36), ForeignKey("users.id"), nullable=False, index=True),
+    Column("name", String(120), nullable=False),
+    Column("key_hash", String(64), nullable=False, unique=True, index=True),
+    Column("key_prefix", String(16), nullable=False, index=True),
+    Column("scopes", _json_type(), nullable=False, default=list),
+    Column("created_at", DateTime, nullable=False, default=datetime.utcnow),
+    Column("last_used_at", DateTime),
+    Column("revoked_at", DateTime),
+)
+
 asset_files = Table(
     "asset_files",
     metadata,

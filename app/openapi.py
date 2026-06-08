@@ -102,6 +102,11 @@ def get_openapi_spec(base_url=''):
                     'in': 'cookie',
                     'name': 'session',
                     'description': 'Flask-Login session cookie obtained via /auth/login.',
+                },
+                'uploadApiKey': {
+                    'type': 'http',
+                    'scheme': 'bearer',
+                    'description': 'User-owned upload API key created from the Profile page.',
                 }
             },
             'schemas': {
@@ -590,7 +595,7 @@ def get_openapi_spec(base_url=''):
                         '`{success, message, model}`; a multi-file request returns '
                         '`{success, message, uploaded[], errors[]}`.'
                     ),
-                    'security': [{'sessionCookie': []}],
+                    'security': [{'sessionCookie': []}, {'uploadApiKey': []}],
                     'requestBody': {
                         'required': True,
                         'content': {

@@ -1,4 +1,6 @@
 import uuid
+import hashlib
+import secrets
 from datetime import datetime
 
 from flask import current_app
@@ -6,7 +8,7 @@ from flask_login import UserMixin
 from sqlalchemy import and_, desc, func, or_, select, true, update
 from werkzeug.security import check_password_hash, generate_password_hash
 
-from app.db import asset_files, count_rows, models, users, world_states
+from app.db import api_keys, asset_files, count_rows, models, users, world_states
 
 
 class User(UserMixin):
@@ -77,6 +79,125 @@ class User(UserMixin):
         with engine.begin() as conn:
             row = conn.execute(select(users).where(users.c.email == email)).mappings().first()
         return User.from_row(row)
+
+
+class ApiKey:
+    def __init__(
+        self,
+        user_id=None,
+        name=None,
+        key_hash=None,
+        key_prefix=None,
+        scopes=None,
+        _id=None,
+        created_at=None,
+        last_used_at=None,
+        revoked_at=None,
+    ):
+        self.id = str(_id) if _id else None
+        self.user_id = str(user_id) if user_id else None
+        self.name = name or "API key"
+        self.key_hash = key_hash
+        self.key_prefix = key_prefix
+        self.scopes = scopes or []
+        self.created_at = created_at or datetime.utcnow()
+        self.last_used_at = last_used_at
+        self.revoked_at = revoked_at
+
+    @staticmethod
+    def _hash_token(token):
+        return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def from_row(row):
+        if not row:
+            return None
+        return ApiKey(
+            user_id=row.user_id,
+            name=row.name,
+            key_hash=row.key_hash,
+            key_prefix=row.key_prefix,
+            scopes=row.scopes or [],
+            _id=row.id,
+            created_at=row.created_at,
+            last_used_at=row.last_used_at,
+            revoked_at=row.revoked_at,
+        )
+
+    @staticmethod
+    def create_for_user(user_id, name="API key", scopes=None):
+        token = "tam_" + secrets.token_urlsafe(32)
+        api_key = ApiKey(
+            user_id=user_id,
+            name=name or "API key",
+            key_hash=ApiKey._hash_token(token),
+            key_prefix=token[:12],
+            scopes=scopes or ["upload"],
+        )
+        engine = current_app.config["DB_ENGINE"]
+        with engine.begin() as conn:
+            api_key.id = str(uuid.uuid4())
+            conn.execute(api_keys.insert().values(
+                id=api_key.id,
+                user_id=api_key.user_id,
+                name=api_key.name,
+                key_hash=api_key.key_hash,
+                key_prefix=api_key.key_prefix,
+                scopes=api_key.scopes,
+                created_at=api_key.created_at,
+                last_used_at=None,
+                revoked_at=None,
+            ))
+        return api_key, token
+
+    @staticmethod
+    def list_for_user(user_id):
+        engine = current_app.config["DB_ENGINE"]
+        with engine.begin() as conn:
+            rows = conn.execute(
+                select(api_keys)
+                .where(api_keys.c.user_id == str(user_id))
+                .order_by(api_keys.c.created_at.desc())
+            ).mappings().all()
+        return [ApiKey.from_row(row) for row in rows]
+
+    @staticmethod
+    def verify_token(token, required_scope="upload"):
+        if not token:
+            return None
+        token_hash = ApiKey._hash_token(token)
+        engine = current_app.config["DB_ENGINE"]
+        with engine.begin() as conn:
+            row = conn.execute(
+                select(api_keys).where(
+                    and_(
+                        api_keys.c.key_hash == token_hash,
+                        api_keys.c.revoked_at.is_(None),
+                    )
+                )
+            ).mappings().first()
+            api_key = ApiKey.from_row(row)
+            if not api_key:
+                return None
+            if required_scope and required_scope not in (api_key.scopes or []):
+                return None
+            conn.execute(
+                update(api_keys)
+                .where(api_keys.c.id == api_key.id)
+                .values(last_used_at=datetime.utcnow())
+            )
+        return api_key
+
+    @staticmethod
+    def revoke_for_user(key_id, user_id):
+        engine = current_app.config["DB_ENGINE"]
+        with engine.begin() as conn:
+            result = conn.execute(
+                update(api_keys)
+                .where(and_(api_keys.c.id == str(key_id), api_keys.c.user_id == str(user_id)))
+                .values(revoked_at=datetime.utcnow())
+            )
+        return result.rowcount > 0
 
 
 class Model3D:
