@@ -270,6 +270,9 @@ def upload():
             from app.conversion import enqueue
             enqueue(model, enabled=current_app.config.get('ENABLE_CONVERSION', True))
             model.save()
+            # Auto-generate a game-optimized variant for GLB/GLTF uploads.
+            from app.api import _maybe_autostart_game_optimization
+            _maybe_autostart_game_optimization(model)
 
             flash(f'Model "{name}" uploaded successfully!', 'success')
             return redirect(url_for('main.model_detail', model_id=model.id))
