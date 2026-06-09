@@ -1730,6 +1730,118 @@ def _maybe_autostart_game_optimization(model):
         print(f"Auto game-optimize enqueue skipped: {e}")
 
 
+# --- Admin: backfill game-optimized variants for all GLB/GLTF models --------
+# Single shared background job (one at a time across the whole app). Progress is
+# kept in memory so a status endpoint / page can poll it.
+_BACKFILL_LOCK = threading.Lock()
+_backfill_state = {
+    'running': False,
+    'total': 0,
+    'done': 0,
+    'failed': 0,
+    'skipped': 0,
+    'current': None,
+    'started_at': None,
+    'finished_at': None,
+    'last_error': None,
+}
+
+
+def _admin_token_ok():
+    """Admin actions accept a dedicated ADMIN_TASK_TOKEN (preferred) or any
+    configured service token, via Authorization: Bearer or a ?token= query
+    param (so it can be triggered straight from a browser URL)."""
+    admin_token = os.environ.get('ADMIN_TASK_TOKEN')
+    valid = _configured_bearer_tokens()
+    if admin_token:
+        valid = [admin_token] + valid
+    if not valid:
+        return False
+    provided = _bearer_token() or (request.args.get('token') or '').strip()
+    if not provided:
+        return False
+    return any(hmac.compare_digest(provided, t) for t in valid)
+
+
+def _run_backfill_optimization(app):
+    with app.app_context():
+        try:
+            import shutil
+            if not shutil.which('gltfpack'):
+                with _BACKFILL_LOCK:
+                    _backfill_state['running'] = False
+                    _backfill_state['last_error'] = 'gltfpack is not installed on the server.'
+                    _backfill_state['finished_at'] = datetime.utcnow().isoformat()
+                return
+
+            ids = Model3D.optimizable_ids()
+            have = ModelVariant.model_ids_with_kind('game', ids)
+            todo = [mid for mid in ids if mid not in have]
+            with _BACKFILL_LOCK:
+                _backfill_state['total'] = len(todo)
+                _backfill_state['skipped'] = len(ids) - len(todo)
+
+            for mid in todo:
+                model = Model3D.get_by_id(mid)
+                if not model:
+                    with _BACKFILL_LOCK:
+                        _backfill_state['failed'] += 1
+                    continue
+                with _BACKFILL_LOCK:
+                    _backfill_state['current'] = model.name or mid
+                try:
+                    _run_game_optimizer(model, model.user_id, dict(GAME_OPTIMIZE_DEFAULTS))
+                    with _BACKFILL_LOCK:
+                        _backfill_state['done'] += 1
+                except Exception as e:
+                    print(f"Backfill optimize failed for {mid}: {str(e)[:200]}", flush=True)
+                    with _BACKFILL_LOCK:
+                        _backfill_state['failed'] += 1
+                        _backfill_state['last_error'] = f"{model.name or mid}: {str(e)[:200]}"
+        except Exception as e:
+            print(f"Backfill runner crashed: {e}", flush=True)
+            with _BACKFILL_LOCK:
+                _backfill_state['last_error'] = str(e)[:300]
+        finally:
+            with _BACKFILL_LOCK:
+                _backfill_state['running'] = False
+                _backfill_state['current'] = None
+                _backfill_state['finished_at'] = datetime.utcnow().isoformat()
+
+
+@api_bp.route('/admin/optimize-all', methods=['POST', 'GET'])
+def admin_optimize_all():
+    """Start the background backfill that game-optimizes every GLB/GLTF model
+    without a variant. Token-gated (ADMIN_TASK_TOKEN or a service token).
+    Idempotent: returns the current job if one is already running."""
+    if not _admin_token_ok():
+        return jsonify({'error': 'Unauthorized'}), 401
+    with _BACKFILL_LOCK:
+        if _backfill_state['running']:
+            return jsonify({'status': 'already_running', **_backfill_state})
+        # reset + mark running before spawning the worker
+        _backfill_state.update({
+            'running': True, 'total': 0, 'done': 0, 'failed': 0, 'skipped': 0,
+            'current': None, 'started_at': datetime.utcnow().isoformat(),
+            'finished_at': None, 'last_error': None,
+        })
+    thread = threading.Thread(
+        target=_run_backfill_optimization,
+        args=(current_app._get_current_object(),),
+        name='optimize-backfill', daemon=True,
+    )
+    thread.start()
+    return jsonify({'status': 'started', **_backfill_state})
+
+
+@api_bp.route('/admin/optimize-all/status', methods=['GET'])
+def admin_optimize_all_status():
+    if not _admin_token_ok():
+        return jsonify({'error': 'Unauthorized'}), 401
+    with _BACKFILL_LOCK:
+        return jsonify(dict(_backfill_state))
+
+
 @api_bp.route('/model/<model_id>/optimize-game', methods=['POST'])
 def optimize_model_for_game(model_id):
     """Queue a game-optimized GLB copy without replacing the source asset."""

@@ -1,0 +1,112 @@
+{% extends "base.html" %}
+{% block title %}Optimize Backfill - Admin{% endblock %}
+{% block content %}
+<div class="max-w-2xl mx-auto px-4 py-10">
+    <h1 class="text-2xl font-bold text-gray-900 mb-2">Game-optimize backfill</h1>
+    <p class="text-gray-600 mb-6">
+        Generates a small game-optimized variant for every GLB/GLTF model that
+        doesn't already have one. Runs in the background on the server, one
+        model at a time. Safe to close this tab — it keeps running; reopen to
+        check progress. Re-running skips already-optimized models.
+    </p>
+
+    <div id="needs-token" class="hidden bg-yellow-50 border border-yellow-200 text-yellow-800 rounded-lg p-4 mb-6">
+        Add your admin token to the URL: <code>?token=YOUR_TOKEN</code>
+    </div>
+
+    <div class="flex items-center gap-3 mb-6">
+        <button id="run-btn"
+                class="bg-teal-600 text-white px-5 py-2.5 rounded-lg font-semibold hover:bg-teal-700 disabled:opacity-50">
+            <i class="fas fa-gamepad mr-2"></i>Run backfill
+        </button>
+        <button id="refresh-btn"
+                class="bg-gray-200 text-gray-700 px-4 py-2.5 rounded-lg hover:bg-gray-300">
+            <i class="fas fa-sync mr-1"></i>Refresh
+        </button>
+        <span id="run-state" class="text-sm text-gray-500"></span>
+    </div>
+
+    <!-- Progress -->
+    <div id="progress-wrap" class="hidden bg-white rounded-xl card-shadow p-6">
+        <div class="flex justify-between text-sm text-gray-600 mb-2">
+            <span id="progress-label">Idle</span>
+            <span id="progress-counts"></span>
+        </div>
+        <div class="w-full bg-gray-200 rounded-full h-3 overflow-hidden">
+            <div id="progress-bar" class="bg-teal-500 h-3 rounded-full transition-all" style="width:0%"></div>
+        </div>
+        <p id="progress-current" class="text-xs text-gray-500 mt-3"></p>
+        <p id="progress-error" class="text-xs text-red-600 mt-2"></p>
+    </div>
+</div>
+
+<script>
+(function () {
+    const TOKEN = {{ token | tojson }};
+    const runBtn = document.getElementById('run-btn');
+    const refreshBtn = document.getElementById('refresh-btn');
+    const runState = document.getElementById('run-state');
+    const wrap = document.getElementById('progress-wrap');
+    const label = document.getElementById('progress-label');
+    const counts = document.getElementById('progress-counts');
+    const bar = document.getElementById('progress-bar');
+    const current = document.getElementById('progress-current');
+    const errEl = document.getElementById('progress-error');
+    let pollTimer = null;
+
+    if (!TOKEN) {
+        document.getElementById('needs-token').classList.remove('hidden');
+        runBtn.disabled = true;
+    }
+
+    const q = (path) => `${path}${path.includes('?') ? '&' : '?'}token=${encodeURIComponent(TOKEN)}`;
+
+    function render(s) {
+        wrap.classList.remove('hidden');
+        const total = s.total || 0;
+        const processed = (s.done || 0) + (s.failed || 0);
+        const pct = total ? Math.round((processed / total) * 100) : (s.running ? 0 : 100);
+        bar.style.width = pct + '%';
+        label.textContent = s.running ? 'Optimizing…' : (s.finished_at ? 'Finished' : 'Idle');
+        counts.textContent = total
+            ? `${processed}/${total} (${s.done||0} ok, ${s.failed||0} failed, ${s.skipped||0} skipped)`
+            : (s.running ? 'starting…' : '');
+        current.textContent = s.current ? `Current: ${s.current}` : '';
+        errEl.textContent = s.last_error ? `Last error: ${s.last_error}` : '';
+        runBtn.disabled = !TOKEN || s.running;
+        runState.textContent = s.running ? 'Running…' : '';
+        if (s.running && !pollTimer) startPolling();
+        if (!s.running && pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    }
+
+    async function fetchStatus() {
+        try {
+            const r = await fetch(q('/api/admin/optimize-all/status'), { headers: { 'Accept': 'application/json' } });
+            if (r.status === 401) { runState.textContent = 'Unauthorized — check token.'; return; }
+            render(await r.json());
+        } catch (e) { /* ignore transient */ }
+    }
+    function startPolling() {
+        if (pollTimer) return;
+        pollTimer = setInterval(fetchStatus, 2000);
+    }
+
+    runBtn.addEventListener('click', async () => {
+        runBtn.disabled = true;
+        runState.textContent = 'Starting…';
+        try {
+            const r = await fetch(q('/api/admin/optimize-all'), { method: 'POST', headers: { 'Accept': 'application/json' } });
+            if (r.status === 401) { runState.textContent = 'Unauthorized — check token.'; runBtn.disabled = false; return; }
+            render(await r.json());
+            startPolling();
+        } catch (e) {
+            runState.textContent = 'Failed to start: ' + e.message;
+            runBtn.disabled = false;
+        }
+    });
+    refreshBtn.addEventListener('click', fetchStatus);
+
+    if (TOKEN) fetchStatus();  // show current state on load
+})();
+</script>
+{% endblock %}
