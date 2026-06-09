@@ -211,6 +211,15 @@ class DatabaseFileStore:
             raise FileNotFoundError(file_id)
         return StoredFile(row)
 
+    def get_range(self, file_id, start, end):
+        """Return (chunk_bytes, total_size, content_type) for an inclusive
+        byte range [start, end]. Bytes live in Postgres, so we slice in memory."""
+        stored = self.get(file_id)
+        data = stored.read() or b""
+        total = len(data)
+        chunk = data[start:end + 1]
+        return chunk, total, stored.content_type
+
     def delete(self, file_id):
         with self.engine.begin() as conn:
             conn.execute(asset_files.delete().where(asset_files.c.id == str(file_id)))
@@ -284,6 +293,37 @@ class S3FileStore:
             return StoredFile(row)
         response = self.client.get_object(Bucket=row.bucket or self.bucket, Key=row.object_key)
         return StoredFile(row, data=response["Body"].read())
+
+    def get_range(self, file_id, start, end):
+        """Return (chunk_bytes, total_size, content_type) for an inclusive byte
+        range. For S3/MinIO objects the Range is pushed to get_object so only the
+        requested bytes leave storage; DB-backed rows fall back to in-memory slice."""
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                select(asset_files).where(asset_files.c.id == str(file_id))
+            ).mappings().first()
+        if not row:
+            raise FileNotFoundError(file_id)
+        if row.storage_backend != "s3":
+            data = (row.data or b"")
+            total = len(data)
+            return data[start:end + 1], total, row.content_type
+        response = self.client.get_object(
+            Bucket=row.bucket or self.bucket,
+            Key=row.object_key,
+            Range=f"bytes={start}-{end}",
+        )
+        chunk = response["Body"].read()
+        # Content-Range looks like "bytes 0-1023/4096"; pull the total from it,
+        # falling back to the stored size column.
+        total = row.size or 0
+        content_range = response.get("ContentRange") or ""
+        if "/" in content_range:
+            try:
+                total = int(content_range.rsplit("/", 1)[1])
+            except (ValueError, IndexError):
+                pass
+        return chunk, total, row.content_type
 
     def delete(self, file_id):
         with self.engine.begin() as conn:

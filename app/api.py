@@ -603,12 +603,42 @@ def update_model(model_id):
         return jsonify({'error': 'Update failed. Please try again.'}), 500
 
 
+def _encode_thumbnail_webp(png_bytes):
+    """Transcode captured PNG thumbnail bytes to WebP once, at upload time.
+
+    Returns (bytes, content_type, filename_ext). Falls back to the original PNG
+    if Pillow is unavailable or the image can't be decoded, so a missing
+    optional dependency never breaks thumbnail upload."""
+    try:
+        from PIL import Image
+    except Exception:
+        return png_bytes, 'image/png', 'png'
+    try:
+        with Image.open(io.BytesIO(png_bytes)) as img:
+            # Flatten any alpha onto white (previews already render on white) so
+            # the WebP isn't unexpectedly transparent, then encode.
+            if img.mode in ('RGBA', 'LA', 'P'):
+                img = img.convert('RGBA')
+                background = Image.new('RGB', img.size, (255, 255, 255))
+                background.paste(img, mask=img.split()[-1])
+                img = background
+            else:
+                img = img.convert('RGB')
+            out = io.BytesIO()
+            img.save(out, format='WEBP', quality=82, method=4)
+            return out.getvalue(), 'image/webp', 'webp'
+    except Exception as e:
+        print(f"Thumbnail WebP encode failed, storing PNG: {e}")
+        return png_bytes, 'image/png', 'png'
+
+
 @api_bp.route('/model/<model_id>/thumbnail', methods=['POST'])
 def upload_thumbnail(model_id):
-    """Store a client-captured PNG thumbnail for a model (owner only).
+    """Store a client-captured thumbnail for a model (owner only).
 
     Accepts JSON {"image": "data:image/png;base64,...."} or a raw base64
-    string. Replaces any existing thumbnail.
+    string. The PNG is transcoded to WebP once here and stored as WebP;
+    replaces any existing thumbnail.
     """
     import base64
 
@@ -646,10 +676,11 @@ def upload_thumbnail(model_id):
             except Exception as e:
                 print(f"Thumbnail cleanup warning: {e}")
 
+        thumb_bytes, thumb_ct, thumb_ext = _encode_thumbnail_webp(png_bytes)
         new_id = fs.put(
-            png_bytes,
-            filename=f"thumb_{model_id}.png",
-            content_type='image/png',
+            thumb_bytes,
+            filename=f"thumb_{model_id}.{thumb_ext}",
+            content_type=thumb_ct,
             metadata={'model_id': model_id, 'kind': 'thumbnail'}
         )
         model.thumbnail_file_id = str(new_id)
@@ -664,7 +695,8 @@ def upload_thumbnail(model_id):
 
 @api_bp.route('/model/<model_id>/thumbnail', methods=['GET'])
 def get_thumbnail(model_id):
-    """Serve a model's PNG thumbnail. 404 if none (frontend shows a fallback)."""
+    """Serve a model's thumbnail (WebP for new uploads, PNG for older ones).
+    404 if none (frontend shows a fallback)."""
     try:
         model = Model3D.get_by_id(model_id)
         if not model or not model.thumbnail_file_id:
@@ -674,15 +706,27 @@ def get_thumbnail(model_id):
         if not _can_access_model(model):
             return jsonify({'error': 'Access denied'}), 403
 
+        # The thumbnail file id is immutable for a given image (regenerating the
+        # default view creates a NEW file id), so it is a safe, strong ETag and
+        # lets us cache aggressively while still busting on regeneration.
+        etag = f'"thumb-{model.thumbnail_file_id}"'
+        if request.if_none_match and etag in request.if_none_match:
+            resp = make_response('', 304)
+            resp.headers['ETag'] = etag
+            resp.headers['Cache-Control'] = 'public, max-age=31536000, immutable'
+            return resp
+
         fs = current_app.config['FILE_STORE']
         grid_out = fs.get(model.thumbnail_file_id)
-        png_bytes = grid_out.read()
+        img_bytes = grid_out.read()
 
-        response = make_response(png_bytes)
-        response.headers['Content-Type'] = 'image/png'
-        response.headers['Content-Length'] = str(len(png_bytes))
-        # Short cache; thumbnail can change when the default view is re-saved
-        response.headers['Cache-Control'] = 'public, max-age=300'
+        response = make_response(img_bytes)
+        response.headers['Content-Type'] = getattr(grid_out, 'content_type', None) or 'image/webp'
+        response.headers['Content-Length'] = str(len(img_bytes))
+        response.headers['ETag'] = etag
+        # Immutable: a changed thumbnail has a different file id (and ETag), so
+        # browsers can cache for a long time and revalidate cheaply via ETag.
+        response.headers['Cache-Control'] = 'public, max-age=31536000, immutable'
         return response
 
     except Exception as e:
@@ -761,7 +805,8 @@ def upload_preview(model_id):
 
 @api_bp.route('/model/<model_id>/preview', methods=['GET'])
 def get_preview(model_id):
-    """Serve a model's looping preview video. 404 if none."""
+    """Serve a model's looping preview video. Supports HTTP Range requests so
+    browsers can stream/seek without downloading the whole clip. 404 if none."""
     try:
         model = Model3D.get_by_id(model_id)
         if not model or not model.preview_file_id:
@@ -771,19 +816,123 @@ def get_preview(model_id):
             if not current_user.is_authenticated or model.user_id != current_user.id:
                 return jsonify({'error': 'Access denied'}), 403
 
+        file_id = model.preview_file_id
+        etag = f'"preview-{file_id}"'
+        cache_control = 'public, max-age=31536000, immutable'
+
+        # Cheap revalidation: a new preview gets a new file id (and ETag).
+        if request.if_none_match and etag in request.if_none_match:
+            resp = make_response('', 304)
+            resp.headers['ETag'] = etag
+            resp.headers['Cache-Control'] = cache_control
+            resp.headers['Accept-Ranges'] = 'bytes'
+            return resp
+
         fs = current_app.config['FILE_STORE']
-        grid_out = fs.get(model.preview_file_id)
+        range_header = request.headers.get('Range')
+
+        if range_header and range_header.startswith('bytes=') and hasattr(fs, 'get_range'):
+            # Parse a single "bytes=start-end" range (end optional).
+            spec = range_header.split('=', 1)[1].split(',')[0].strip()
+            start_s, _, end_s = spec.partition('-')
+            try:
+                # Need the total size first; get_range returns it.
+                start = int(start_s) if start_s else 0
+                provisional_end = int(end_s) if end_s else None
+                # Fetch a probe range to learn the total, then clamp.
+                probe_end = provisional_end if provisional_end is not None else start
+                _, total, content_type = fs.get_range(file_id, start, probe_end)
+                if total <= 0:
+                    raise ValueError('empty')
+                end = provisional_end if provisional_end is not None else total - 1
+                end = min(end, total - 1)
+                if start > end or start >= total:
+                    resp = make_response('', 416)
+                    resp.headers['Content-Range'] = f'bytes */{total}'
+                    resp.headers['Accept-Ranges'] = 'bytes'
+                    return resp
+                chunk, total, content_type = fs.get_range(file_id, start, end)
+                resp = make_response(chunk, 206)
+                resp.headers['Content-Type'] = content_type or 'video/webm'
+                resp.headers['Content-Length'] = str(len(chunk))
+                resp.headers['Content-Range'] = f'bytes {start}-{end}/{total}'
+                resp.headers['Accept-Ranges'] = 'bytes'
+                resp.headers['ETag'] = etag
+                resp.headers['Cache-Control'] = cache_control
+                return resp
+            except Exception as e:
+                print(f"Preview range fetch fell back to full body: {e}")
+                # Fall through to full-body response below.
+
+        grid_out = fs.get(file_id)
         video_bytes = grid_out.read()
 
         response = make_response(video_bytes)
         response.headers['Content-Type'] = getattr(grid_out, 'content_type', None) or 'video/webm'
         response.headers['Content-Length'] = str(len(video_bytes))
-        response.headers['Cache-Control'] = 'public, max-age=300'
+        response.headers['Accept-Ranges'] = 'bytes'
+        response.headers['ETag'] = etag
+        response.headers['Cache-Control'] = cache_control
         return response
 
     except Exception as e:
         print(f"API preview fetch error: {e}")
         return jsonify({'error': 'Preview fetch failed'}), 404
+
+
+def _serialize_browse_card(model):
+    """Compact payload the browse gallery card needs (lazy-loaded client-side)."""
+    return {
+        'id': model.id,
+        'name': model.name or 'Untitled',
+        'file_format': model.file_format,
+        'conversion_status': model.conversion_status,
+        'download_count': model.download_count,
+        'owner_username': getattr(model, 'owner_username', None) or 'Unknown',
+        'tags': model.tags or [],
+        'has_preview': bool(model.preview_file_id),
+        'has_thumbnail': bool(model.thumbnail_file_id),
+        'preview_url': url_for('api.get_preview', model_id=model.id) if model.preview_file_id else None,
+        'thumbnail_url': url_for('api.get_thumbnail', model_id=model.id) if model.thumbnail_file_id else None,
+        'detail_url': url_for('main.model_detail', model_id=model.id),
+    }
+
+
+@api_bp.route('/models', methods=['GET'])
+def list_public_models():
+    """Paginated JSON list of public models for the browse gallery's infinite
+    scroll. Mirrors the /browse query params (search, sort, tag, page)."""
+    try:
+        search = (request.args.get('search') or '').strip()
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('per_page', 24, type=int)
+        per_page = max(1, min(per_page, 60))
+        sort = request.args.get('sort', 'newest')
+        tags = Model3D.normalize_tags(request.args.getlist('tag'))
+
+        models_list, total = Model3D.get_public_models(
+            page=page, per_page=per_page,
+            search=search or None, sort=sort,
+            tag=tags or None)
+
+        for model in models_list:
+            user = User.get_by_id(model.user_id)
+            model.owner_username = user.username if user else 'Unknown'
+
+        pages = (total + per_page - 1) // per_page if per_page else 0
+        return jsonify({
+            'models': [_serialize_browse_card(m) for m in models_list],
+            'page': page,
+            'per_page': per_page,
+            'total': total,
+            'pages': pages,
+            'has_next': page < pages,
+        })
+    except Exception as e:
+        print(f"API list public models error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': 'Could not list models', 'models': [], 'has_next': False}), 500
 
 
 @api_bp.route('/model/<model_id>', methods=['DELETE'])

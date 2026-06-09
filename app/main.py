@@ -115,9 +115,12 @@ def browse():
         # Support multiple ?tag= values (AND-matched).
         tags = Model3D.normalize_tags(request.args.getlist('tag'))
 
-        # Get public models with pagination
+        # Get public models with pagination. Page size matches the /api/models
+        # endpoint used by the browse page's infinite scroll so page 1 (rendered
+        # server-side) and later pages (fetched via JSON) stay consistent.
+        per_page = 24
         models, total = Model3D.get_public_models(
-            page=page, per_page=12,
+            page=page, per_page=per_page,
             search=search if search else None,
             sort=sort, tag=tags if tags else None)
 
@@ -126,7 +129,7 @@ def browse():
             user = User.get_by_id(model.user_id)
             model.owner_username = user.username if user else 'Unknown'
 
-        pagination = Pagination(models, total, page, 12)
+        pagination = Pagination(models, total, page, per_page)
         all_tags = Model3D.get_public_tags()
         # Only load the (heavy) VRM viewer module if a VRM card is on the page.
         has_vrm = any(m.file_format == 'vrm' for m in models)
@@ -135,7 +138,7 @@ def browse():
         print(f"Browse error: {e}")
         import traceback
         traceback.print_exc()
-        pagination = Pagination([], 0, 1, 12)
+        pagination = Pagination([], 0, 1, 24)
         search = ''
         sort = 'newest'
         tags = []
