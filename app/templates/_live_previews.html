@@ -1,0 +1,142 @@
+<!-- Reusable live-3D preview machinery for gallery cards (browse + landing).
+     Exposes window.LivePreviews with:
+       observeMediaIn(root)  - lazy-load <img>/<video> (.lazy-media) on view
+       observeLiveIn(root)   - mount a live rotating AssetThreeViewer on each
+                               .card-media[data-viewable="1"] when on screen,
+                               disposed when off screen (frees the WebGL context)
+     Cards opt in via data-* attributes set server-side:
+       data-viewable="1" data-view-src="..." [data-camera-orbit] [data-default-animation]
+     No MediaRecorder capture here -- recording the canvas black-screened some GPUs. -->
+<style>
+    .lazy-media, .card-media canvas { pointer-events: none; }
+    .card-media canvas { width: 100% !important; height: 100% !important; object-fit: cover; }
+    .lazy-media { width: 100%; height: 100%; object-fit: cover; }
+</style>
+<script>
+(function () {
+    if (window.LivePreviews) return;
+
+    // Lazy-load thumbnails/videos; pause videos when off screen.
+    const mediaObserver = new IntersectionObserver((entries) => {
+        for (const entry of entries) {
+            const el = entry.target;
+            if (entry.isIntersecting) {
+                if (el.tagName === 'IMG' && el.dataset.imgSrc && !el.src) {
+                    el.src = el.dataset.imgSrc;
+                } else if (el.tagName === 'VIDEO') {
+                    if (el.dataset.previewSrc && !el.dataset.loaded) {
+                        el.src = el.dataset.previewSrc;
+                        el.dataset.loaded = '1';
+                    }
+                    const p = el.play();
+                    if (p && p.catch) p.catch(() => {});
+                }
+            } else if (el.tagName === 'VIDEO') {
+                el.pause();
+            }
+        }
+    }, { rootMargin: '200px 0px' });
+
+    function observeMediaIn(root) {
+        (root || document).querySelectorAll('.lazy-media').forEach((el) => mediaObserver.observe(el));
+    }
+
+    // Live rotating viewers. Cap matches the browser's ~16 WebGL-context limit;
+    // off-screen cards dispose (freeing a slot). See browse history for the
+    // lifecycle/race reasoning.
+    const MAX_LIVE_VIEWERS = 16;
+    const liveActive = new Map();   // card -> viewer api (or pending token)
+    const liveWanted = new Set();
+
+    function liveEligible(card) {
+        return card && card.dataset.viewable === '1' && !card.dataset.liveDone;
+    }
+
+    async function mountLive(card) {
+        if (!window.AssetThreeViewer || liveActive.has(card)) return;
+        const viewUrl = card.dataset.viewSrc;
+        if (!viewUrl) return;
+
+        let host = card.querySelector('.live-host');
+        if (!host) {
+            host = document.createElement('div');
+            host.className = 'live-host absolute inset-0';
+            card.appendChild(host);
+        }
+        if (!host.clientWidth || !host.clientHeight) return;  // not laid out yet; retry later
+
+        const token = {};
+        liveActive.set(card, token);
+        try {
+            const api = await window.AssetThreeViewer.create(host, viewUrl, {
+                card: true,
+                autoRotate: true,
+                autoRotateSpeed: 3.5,
+                framePadding: 1.0,
+                cameraOrbit: card.dataset.cameraOrbit || undefined,
+                defaultAnimation: card.dataset.defaultAnimation || undefined,
+                onError: () => { /* keep the thumbnail/icon underneath */ },
+            });
+            if (liveActive.get(card) !== token || !liveWanted.has(card)) {
+                if (api) try { api.dispose(); } catch (e) {}
+                const h = card.querySelector('.live-host');
+                if (h) h.remove();
+                if (liveActive.get(card) === token) liveActive.delete(card);
+                return;
+            }
+            if (!api) { liveActive.delete(card); return; }
+            liveActive.set(card, api);
+        } catch (e) {
+            if (liveActive.get(card) === token) liveActive.delete(card);
+        }
+    }
+
+    function unmountLive(card) {
+        const entry = liveActive.get(card);
+        if (entry === undefined) return;
+        liveActive.delete(card);
+        if (entry && typeof entry.dispose === 'function') {
+            try { entry.dispose(); } catch (e) {}
+            const host = card.querySelector('.live-host');
+            if (host) host.remove();
+        }
+    }
+
+    function distanceToViewportCenter(card) {
+        const rect = card.getBoundingClientRect();
+        return Math.abs((rect.top + rect.height / 2) - window.innerHeight / 2);
+    }
+    function pumpLiveQueue() {
+        if (liveActive.size >= MAX_LIVE_VIEWERS) return;
+        const candidates = Array.from(liveWanted)
+            .filter((card) => !liveActive.has(card) && liveEligible(card))
+            .sort((a, b) => distanceToViewportCenter(a) - distanceToViewportCenter(b));
+        for (const card of candidates) {
+            if (liveActive.size >= MAX_LIVE_VIEWERS) break;
+            mountLive(card);
+        }
+    }
+
+    const liveObserver = new IntersectionObserver((entries) => {
+        for (const entry of entries) {
+            const card = entry.target;
+            const ratio = entry.intersectionRatio;
+            if (entry.isIntersecting && ratio >= 0.15 && liveEligible(card)) {
+                liveWanted.add(card);
+            } else if (!entry.isIntersecting || ratio < 0.05) {
+                liveWanted.delete(card);
+                unmountLive(card);
+            }
+        }
+        pumpLiveQueue();
+    }, { rootMargin: '0px', threshold: [0, 0.05, 0.15, 0.4, 0.7] });
+
+    function observeLiveIn(root) {
+        (root || document).querySelectorAll('.card-media[data-viewable="1"]').forEach((card) => {
+            if (liveEligible(card)) liveObserver.observe(card);
+        });
+    }
+
+    window.LivePreviews = { observeMediaIn, observeLiveIn };
+})();
+</script>
