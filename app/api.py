@@ -713,7 +713,10 @@ def update_model(model_id):
             model.default_animation = clip or None
 
         if 'default_vrma_id' in data:
-            # VRMA asset id to auto-apply on a VRM; empty clears it.
+            # VRMA asset id to auto-apply on a VRM. The literal 'none' is an
+            # EXPLICIT "no animation (T-pose)" choice and is preserved so the
+            # global default (hip-hop dance) does NOT override it. Empty/null
+            # means "never set" -> the global default applies.
             vid = (data.get('default_vrma_id') or '').strip()
             model.default_vrma_id = vid or None
 
@@ -870,10 +873,27 @@ def get_thumbnail(model_id):
         return jsonify({'error': 'Thumbnail fetch failed'}), 404
 
 
+def _pick_default_vrma(items):
+    """Choose the VRMA that VRMs auto-play when they have no per-model default.
+    Matched by name so it works without hardcoding an asset id; configurable via
+    DEFAULT_VRMA_NAME (default: a hip-hop dance clip). Returns the item or None."""
+    if not items:
+        return None
+    raw = os.environ.get('DEFAULT_VRMA_NAME', 'hiphop,hip hop,hip-hop,dance')
+    needles = [n.strip().lower() for n in raw.split(',') if n.strip()]
+    for needle in needles:
+        for item in items:
+            if needle in (item.get('name') or '').lower():
+                return item
+    return None
+
+
 @api_bp.route('/vrma')
 def list_vrma():
     """List VRMA animation assets available to apply on a VRM avatar:
-    the current user's own VRMA assets plus all public ones."""
+    the current user's own VRMA assets plus all public ones. Also flags a
+    default animation (hip-hop dance by name) that VRMs without their own saved
+    default will auto-play."""
     try:
         user_id = current_user.id if current_user.is_authenticated else None
         items = []
@@ -891,10 +911,17 @@ def list_vrma():
                 'view_url': url_for('api.export_model', model_id=model.id) + '?format=vrma',
                 'source': 'generated',
             })
-        return jsonify({'animations': items})
+        default = _pick_default_vrma(items)
+        for item in items:
+            item['is_default'] = bool(default and item['id'] == default['id'])
+        return jsonify({
+            'animations': items,
+            'default_id': default['id'] if default else None,
+            'default_url': default['view_url'] if default else None,
+        })
     except Exception as e:
         print(f"API list vrma error: {e}")
-        return jsonify({'animations': []})
+        return jsonify({'animations': [], 'default_id': None, 'default_url': None})
 
 
 @api_bp.route('/model/<model_id>/preview', methods=['POST'])
