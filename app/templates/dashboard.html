@@ -273,6 +273,13 @@
                                     <i class="fas fa-film"></i>
                                 </a>
                                 {% endif %}
+                                {% if model.file_format in ['glb', 'gltf'] %}
+                                <button type="button" onclick="optimizeModel('{{ model.id }}', this)"
+                                        class="row-action text-teal-600 hover:text-teal-900"
+                                        title="Optimize for game (creates a smaller copy)">
+                                    <i class="fas fa-gamepad"></i>
+                                </button>
+                                {% endif %}
                                 <a href="{{ url_for('api.download_model', model_id=model.id) }}"
                                    class="row-action text-green-600 hover:text-green-900" title="Download">
                                     <i class="fas fa-download"></i>
@@ -408,6 +415,67 @@ async function deleteModel(modelId) {
     } catch (error) {
         alert('Error deleting model: ' + error.message);
     }
+}
+
+// ---------------------------------------------------------------------------
+// One-click game optimization. Queues a job with the same defaults the model
+// detail panel pre-selects (1024px textures, 75% mesh, meshopt), polls the
+// returned status_url, then reloads so the new optimized copy shows in the list.
+// ---------------------------------------------------------------------------
+async function optimizeModel(modelId, btn) {
+    const icon = btn.querySelector('i');
+    const originalClass = icon ? icon.className : '';
+    const restore = () => {
+        btn.disabled = false;
+        btn.classList.remove('opacity-60', 'cursor-not-allowed');
+        if (icon) icon.className = originalClass;
+    };
+    btn.disabled = true;
+    btn.classList.add('opacity-60', 'cursor-not-allowed');
+    if (icon) icon.className = 'fas fa-spinner fa-spin';
+    btn.title = 'Optimizing... this can take a few minutes';
+
+    try {
+        const response = await fetch(`/api/model/${modelId}/optimize-game`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            body: JSON.stringify({
+                texture_limit: 1024,
+                simplify_ratio: 0.75,
+                compression_mode: 'meshopt'
+            })
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            throw new Error(data.error || `Optimization failed (HTTP ${response.status}).`);
+        }
+        if (response.status === 202 || data.queued) {
+            await pollOptimizeJob(data.status_url, modelId);
+        }
+        location.reload();
+    } catch (error) {
+        restore();
+        btn.title = 'Optimize for game (creates a smaller copy)';
+        alert('Error optimizing model: ' + error.message);
+    }
+}
+
+async function pollOptimizeJob(statusUrl, modelId) {
+    const url = statusUrl || `/api/model/${modelId}/optimize-game`;
+    for (let attempt = 0; attempt < 240; attempt += 1) {
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        const response = await fetch(url, { headers: { 'Accept': 'application/json' } });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            throw new Error(data.error || 'Could not check optimization status.');
+        }
+        const job = data.job || {};
+        if (job.status === 'done') return;
+        if (job.status === 'failed') {
+            throw new Error(job.error || 'Game optimization failed.');
+        }
+    }
+    throw new Error('Optimization is still running. Refresh in a few minutes to see the result.');
 }
 
 // ---------------------------------------------------------------------------
