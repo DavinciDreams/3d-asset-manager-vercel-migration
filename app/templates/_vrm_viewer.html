@@ -16,6 +16,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
 import { VRMAnimationLoaderPlugin, createVRMAnimationClip } from '@pixiv/three-vrm-animation';
 
@@ -42,14 +43,25 @@ async function init(containerId, vrmUrl, options = {}) {
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
     renderer.setSize(width, height);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    // Match the brightness/look of the GLB viewer (neutral tone mapping + IBL).
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = THREE.NeutralToneMapping;
+    renderer.toneMappingExposure = 1;
     container.appendChild(renderer.domElement);
 
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.target.set(0, 1.0, 0);
     controls.update();
 
-    scene.add(new THREE.AmbientLight(0xffffff, 0.6));
-    const dir = new THREE.DirectionalLight(0xffffff, 1.2);
+    // Built-in RoomEnvironment as an IBL source for any PBR parts of the avatar.
+    // Only assigned to scene.environment (not .background) so the canvas stays
+    // transparent (alpha: true).
+    const pmrem = new THREE.PMREMGenerator(renderer);
+    const envTexture = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+    scene.environment = envTexture;
+
+    scene.add(new THREE.AmbientLight(0xffffff, 1.0));
+    const dir = new THREE.DirectionalLight(0xffffff, 1.5);
     dir.position.set(1, 2, 1.5);
     scene.add(dir);
 
@@ -150,6 +162,9 @@ async function init(containerId, vrmUrl, options = {}) {
             disposed = true;
             if (mixer) mixer.stopAllAction();
             if (vrm) VRMUtils.deepDispose(vrm.scene);
+            scene.environment = null;
+            envTexture.dispose();
+            pmrem.dispose();
             renderer.dispose();
         }
     };
