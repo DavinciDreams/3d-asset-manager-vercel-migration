@@ -447,7 +447,7 @@ async function optimizeModel(modelId, btn) {
             headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
             body: JSON.stringify({
                 texture_limit: 1024,
-                simplify_ratio: 0.75,
+                simplify_ratio: 0.85,
                 compression_mode: 'meshopt'
             })
         });
