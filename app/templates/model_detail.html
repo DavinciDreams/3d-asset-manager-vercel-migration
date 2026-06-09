@@ -368,7 +368,7 @@ function loadDetailModel(modelId) {
 
     try {
         const handleDetailLoad = () => {
-            if (IS_OWNER && !HAS_THUMBNAIL) {
+            if (IS_OWNER && (!HAS_THUMBNAIL || FORCE_REGEN)) {
                 setTimeout(() => captureThumbnail(false), 800);
             }
             if (IS_OWNER && (!HAS_PREVIEW || FORCE_REGEN) && !SAVED_CAMERA_ORBIT) {

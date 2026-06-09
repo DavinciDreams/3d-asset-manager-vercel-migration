@@ -67,10 +67,12 @@
                 const width = container.clientWidth || 640;
                 const height = container.clientHeight || 420;
                 const scene = new THREE.Scene();
+                scene.background = new THREE.Color(0xffffff);
                 const camera = new THREE.PerspectiveCamera(45, width / height, 0.01, 1000);
-                const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
+                const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, preserveDrawingBuffer: true });
                 renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
                 renderer.setSize(width, height, false);
+                renderer.setClearColor(0xffffff, 1);
                 renderer.outputColorSpace = THREE.SRGBColorSpace;
                 renderer.toneMapping = THREE.ACESFilmicToneMapping;
                 renderer.toneMappingExposure = 1;
