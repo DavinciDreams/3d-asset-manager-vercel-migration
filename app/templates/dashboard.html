@@ -419,8 +419,10 @@ async function deleteModel(modelId) {
 
 // ---------------------------------------------------------------------------
 // One-click game optimization. Queues a job with the same defaults the model
-// detail panel pre-selects (1024px textures, 75% mesh, meshopt), polls the
-// returned status_url, then reloads so the new optimized copy shows in the list.
+// detail panel pre-selects (1024px textures, 75% mesh, meshopt) and polls the
+// returned status_url. The optimized GLB is attached to the SAME model as a
+// 'game' variant (viewable via the toggle on the detail page) -- no new row is
+// created, so we just restore the icon and confirm on success.
 // ---------------------------------------------------------------------------
 async function optimizeModel(modelId, btn) {
     const icon = btn.querySelector('i');
@@ -452,7 +454,13 @@ async function optimizeModel(modelId, btn) {
         if (response.status === 202 || data.queued) {
             await pollOptimizeJob(data.status_url, modelId);
         }
-        location.reload();
+        // The optimized GLB is now attached to this model (no new row), so
+        // briefly show a success check on the icon instead of reloading.
+        btn.disabled = false;
+        btn.classList.remove('opacity-60', 'cursor-not-allowed');
+        if (icon) icon.className = 'fas fa-check text-green-600';
+        btn.title = 'Game-optimized version ready (view it on the model page)';
+        setTimeout(() => { if (icon) icon.className = originalClass; }, 4000);
     } catch (error) {
         restore();
         btn.title = 'Optimize for game (creates a smaller copy)';

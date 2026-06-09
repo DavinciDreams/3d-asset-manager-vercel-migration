@@ -3,6 +3,12 @@
 {% block title %}Browse Models - 3D Asset Manager{% endblock %}
 
 {% block content %}
+<style>
+    /* The preview media is decorative and sits inside the card's <a>. Without
+       this, a playing <video> can swallow the click so the link never fires
+       (page just scrolls to top). Let clicks fall through to the anchor. */
+    #gallery-grid .lazy-media { pointer-events: none; }
+</style>
 <div class="container mx-auto px-4 py-8">
     <div class="flex flex-wrap justify-between items-center gap-4 mb-6">
         <h1 class="text-3xl font-bold text-gray-800">Browse 3D Models</h1>
@@ -264,7 +270,7 @@
                     if (params.sort) usp.set('sort', params.sort);
                     params.tags.forEach((t) => usp.append('tag', t));
 
-                    const res = await fetch(`/api/models?${usp.toString()}`, { headers: { 'Accept': 'application/json' } });
+                    const res = await fetch(`/api/models/browse?${usp.toString()}`, { headers: { 'Accept': 'application/json' } });
                     if (!res.ok) throw new Error(`HTTP ${res.status}`);
                     const data = await res.json();
 

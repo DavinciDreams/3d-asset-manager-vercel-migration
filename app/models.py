@@ -5,10 +5,19 @@ from datetime import datetime
 
 from flask import current_app
 from flask_login import UserMixin
-from sqlalchemy import and_, desc, func, or_, select, true, update
+from sqlalchemy import and_, delete, desc, func, insert, or_, select, true, update
 from werkzeug.security import check_password_hash, generate_password_hash
 
-from app.db import api_keys, asset_files, bundles, count_rows, models, users, world_states
+from app.db import (
+    api_keys,
+    asset_files,
+    bundles,
+    count_rows,
+    model_variants,
+    models,
+    users,
+    world_states,
+)
 
 
 class User(UserMixin):
@@ -858,3 +867,114 @@ class WorldState:
         with engine.begin() as conn:
             conn.execute(update(world_states).where(world_states.c.world_id == self.world_id).values(**values))
         return WorldState.get(self.world_id)
+
+
+class ModelVariant:
+    """A derived file attached to a source model: the game-optimized GLB today,
+    LOD levels later. Identified by (model_id, kind, level)."""
+
+    def __init__(self, row=None, **kwargs):
+        data = dict(row) if row is not None else kwargs
+        self.id = str(data.get("id")) if data.get("id") else None
+        self.model_id = str(data["model_id"]) if data.get("model_id") else None
+        self.kind = data.get("kind")
+        self.level = data.get("level")
+        self.file_id = str(data["file_id"]) if data.get("file_id") else None
+        self.file_format = data.get("file_format") or "glb"
+        self.size = data.get("size") or 0
+        self.settings = data.get("settings") or {}
+        self.status = data.get("status") or "ready"
+        self.created_at = data.get("created_at")
+        self.updated_at = data.get("updated_at")
+
+    def to_api(self):
+        return {
+            "id": self.id,
+            "model_id": self.model_id,
+            "kind": self.kind,
+            "level": self.level,
+            "file_format": self.file_format,
+            "size": self.size,
+            "settings": self.settings,
+            "status": self.status,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+    def read_data(self):
+        fs = current_app.config["FILE_STORE"]
+        try:
+            if self.file_id:
+                return fs.get(self.file_id).read()
+        except Exception as e:
+            print(f"Error reading variant file: {e}")
+        return None
+
+    @staticmethod
+    def get(model_id, kind, level=None):
+        engine = current_app.config["DB_ENGINE"]
+        where = and_(
+            model_variants.c.model_id == str(model_id),
+            model_variants.c.kind == kind,
+            model_variants.c.level.is_(None) if level is None else (model_variants.c.level == level),
+        )
+        with engine.begin() as conn:
+            row = conn.execute(select(model_variants).where(where)).mappings().first()
+        return ModelVariant(row) if row else None
+
+    @staticmethod
+    def list_for_model(model_id):
+        engine = current_app.config["DB_ENGINE"]
+        with engine.begin() as conn:
+            rows = conn.execute(
+                select(model_variants)
+                .where(model_variants.c.model_id == str(model_id))
+                .order_by(model_variants.c.kind, model_variants.c.level)
+            ).mappings().all()
+        return [ModelVariant(row) for row in rows]
+
+    @staticmethod
+    def upsert(model_id, kind, file_id, *, level=None, file_format="glb",
+               size=0, settings=None, status="ready"):
+        """Create or replace the variant for (model_id, kind, level). Returns the
+        ModelVariant and the previous file_id (if any) so callers can clean up
+        the now-orphaned blob after the pointer is swapped."""
+        engine = current_app.config["DB_ENGINE"]
+        now = datetime.utcnow()
+        existing = ModelVariant.get(model_id, kind, level)
+        old_file_id = existing.file_id if existing else None
+        values = {
+            "model_id": str(model_id),
+            "kind": kind,
+            "level": level,
+            "file_id": str(file_id) if file_id else None,
+            "file_format": file_format,
+            "size": size or 0,
+            "settings": settings or {},
+            "status": status,
+            "updated_at": now,
+        }
+        with engine.begin() as conn:
+            if existing:
+                conn.execute(
+                    update(model_variants)
+                    .where(model_variants.c.id == existing.id)
+                    .values(**values)
+                )
+                variant_id = existing.id
+            else:
+                variant_id = str(uuid.uuid4())
+                conn.execute(insert(model_variants).values(
+                    id=variant_id, created_at=now, **values))
+        return ModelVariant.get(model_id, kind, level), old_file_id
+
+    @staticmethod
+    def delete_for(model_id, kind, level=None):
+        engine = current_app.config["DB_ENGINE"]
+        where = and_(
+            model_variants.c.model_id == str(model_id),
+            model_variants.c.kind == kind,
+            model_variants.c.level.is_(None) if level is None else (model_variants.c.level == level),
+        )
+        with engine.begin() as conn:
+            conn.execute(delete(model_variants).where(where))
