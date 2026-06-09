@@ -351,7 +351,8 @@
 <script>
 let detailViewer = null;
 
-// ?regen=1 forces (re)capture of the preview even if one already exists.
+// ?regen=1 forces (re)capture of media. Normal page loads stay passive because
+// automatic canvas capture can overwhelm some browser/GPU combinations.
 const FORCE_REGEN = new URLSearchParams(window.location.search).get('regen') === '1';
 // Saved default view angle for this model (empty string if none set yet).
 const SAVED_CAMERA_ORBIT = {{ model.camera_orbit | tojson }};
@@ -368,10 +369,10 @@ function loadDetailModel(modelId) {
 
     try {
         const handleDetailLoad = () => {
-            if (IS_OWNER && (!HAS_THUMBNAIL || FORCE_REGEN)) {
+            if (IS_OWNER && FORCE_REGEN) {
                 setTimeout(() => captureThumbnail(false), 800);
             }
-            if (IS_OWNER && (!HAS_PREVIEW || FORCE_REGEN) && !SAVED_CAMERA_ORBIT) {
+            if (IS_OWNER && FORCE_REGEN && !SAVED_CAMERA_ORBIT) {
                 setTimeout(() => captureModelViewerPreview(), 1200);
             }
             setupAnimationControls();
@@ -836,13 +837,11 @@ document.addEventListener('DOMContentLoaded', function() {
                 // Apply the owner's saved default animation, if the picker is ready.
                 maybeApplyDefault();
                 {% if current_user.is_authenticated and current_user.id == model.user_id %}
-                if ({{ (model.thumbnail_file_id is none) | tojson }} || FORCE_REGEN) {
-                    // Auto-capture a thumbnail on first load (owner) or on regen.
+                if (FORCE_REGEN) {
+                    // Capture media only when explicitly requested.
                     setTimeout(captureVrmThumbnail, 1000);
                 }
-                // Auto-capture a rotating preview video (owner): if none yet,
-                // or when ?regen=1 forces it.
-                if ({{ (model.preview_file_id is none) | tojson }} || FORCE_REGEN) {
+                if (FORCE_REGEN) {
                     setTimeout(captureVrmPreview, 1500);
                 }
                 {% endif %}
