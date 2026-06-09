@@ -1052,6 +1052,7 @@ def _serialize_browse_card(model):
         'view_url': view_url,
         'has_game_optimized': bool(game_variant and game_variant.file_id),
         'camera_orbit': model.camera_orbit or None,
+        'default_animation': model.default_animation or None,
     }
 
 
@@ -1336,6 +1337,9 @@ def _store_one_upload(file, base_name, description, is_public, tags, allowed_ext
     from app.conversion import enqueue
     enqueue(model, enabled=current_app.config.get('ENABLE_CONVERSION', True))
     model.save()
+    # Auto-generate a game-optimized variant for GLB/GLTF uploads so every
+    # asset gets a small, performant browse preview/download by default.
+    _maybe_autostart_game_optimization(model)
     return model, None
 
 
@@ -1644,6 +1648,59 @@ def _start_game_optimization_thread(app, job_id):
     thread.start()
 
 
+GAME_OPTIMIZE_DEFAULTS = {
+    'texture_limit': 1024,
+    'simplify_ratio': 0.75,
+    'compression_mode': 'meshopt',
+}
+
+
+def _enqueue_game_optimization(model_id, owner_id, settings):
+    """Create a queued optimization job and start its worker thread. Returns the
+    job id. Shared by the explicit endpoint and the optimize-on-upload path."""
+    job_id = str(uuid.uuid4())
+    now = datetime.utcnow()
+    with current_app.config['DB_ENGINE'].begin() as conn:
+        conn.execute(optimization_jobs.insert().values(
+            id=job_id,
+            source_model_id=str(model_id),
+            owner_id=owner_id,
+            status='queued',
+            settings=settings,
+            result={},
+            result_model_id=None,
+            error=None,
+            created_at=now,
+            updated_at=now,
+            started_at=None,
+            finished_at=None,
+        ))
+    _start_game_optimization_thread(current_app._get_current_object(), job_id)
+    return job_id
+
+
+def _maybe_autostart_game_optimization(model):
+    """Auto-queue a game-optimized variant right after upload for GLB/GLTF
+    assets (the only formats gltfpack supports), so every uploaded model gets a
+    small, performant preview/download without manual action. Best-effort: any
+    failure is swallowed so it never blocks the upload response. Skipped when
+    gltfpack is unavailable or auto-optimize is disabled via env."""
+    try:
+        import shutil
+        if os.environ.get('AUTO_GAME_OPTIMIZE', '1').lower() in ('0', 'false', 'no', 'off'):
+            return
+        if (model.file_format or '').lower() not in ('glb', 'gltf'):
+            return
+        if not shutil.which('gltfpack'):
+            return
+        # Don't double-optimize if a variant somehow already exists.
+        if ModelVariant.get(model.id, 'game'):
+            return
+        _enqueue_game_optimization(model.id, model.user_id, dict(GAME_OPTIMIZE_DEFAULTS))
+    except Exception as e:
+        print(f"Auto game-optimize enqueue skipped: {e}")
+
+
 @api_bp.route('/model/<model_id>/optimize-game', methods=['POST'])
 def optimize_model_for_game(model_id):
     """Queue a game-optimized GLB copy without replacing the source asset."""
@@ -1673,25 +1730,7 @@ def optimize_model_for_game(model_id):
             return jsonify({'error': str(e)}), 400
 
         owner_id = principal.id if principal else model.user_id
-        job_id = str(uuid.uuid4())
-        now = datetime.utcnow()
-        with current_app.config['DB_ENGINE'].begin() as conn:
-            conn.execute(optimization_jobs.insert().values(
-                id=job_id,
-                source_model_id=model.id,
-                owner_id=owner_id,
-                status='queued',
-                settings=settings,
-                result={},
-                result_model_id=None,
-                error=None,
-                created_at=now,
-                updated_at=now,
-                started_at=None,
-                finished_at=None,
-            ))
-
-        _start_game_optimization_thread(current_app._get_current_object(), job_id)
+        job_id = _enqueue_game_optimization(model.id, owner_id, settings)
         job = _get_optimization_job(job_id)
         return jsonify({
             'success': True,

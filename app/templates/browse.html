@@ -107,6 +107,7 @@
                    data-is-owner="{{ '1' if is_owner else '0' }}"
                    {% if viewable %}data-view-src="{% if model.has_game_optimized %}{{ url_for('api.get_game_optimized', model_id=model.id) }}{% else %}{{ url_for('api.view_model', model_id=model.id) }}?viewer=2{% endif %}"{% endif %}
                    {% if model.camera_orbit %}data-camera-orbit="{{ model.camera_orbit }}"{% endif %}
+                   {% if model.default_animation %}data-default-animation="{{ model.default_animation }}"{% endif %}
                    {% if model.thumbnail_file_id %}data-thumb-src="{{ url_for('api.get_thumbnail', model_id=model.id) }}"{% endif %}>
                     {% if viewable %}
                         {# Viewable models ALWAYS use the live rotating 3D viewer
@@ -292,6 +293,7 @@
                         autoRotateSpeed: 3.5,  // browse cards spin noticeably faster than the detail viewer
                         framePadding: 1.0,     // tighter fill so models aren't tiny in the card
                         cameraOrbit: card.dataset.cameraOrbit || undefined,  // start from the owner's saved view if set
+                        defaultAnimation: card.dataset.defaultAnimation || undefined,  // play the owner's chosen clip
                         onError: () => { /* keep the thumbnail/icon underneath */ },
                     });
                     // If the slot was released (scrolled away / superseded) while
@@ -437,6 +439,7 @@
                     `data-is-owner="${m.is_owner ? '1' : '0'}"` +
                     `${viewable ? ` data-view-src="${esc(m.view_url)}"` : ''}` +
                     `${m.camera_orbit ? ` data-camera-orbit="${esc(m.camera_orbit)}"` : ''}` +
+                    `${m.default_animation ? ` data-default-animation="${esc(m.default_animation)}"` : ''}` +
                     `${m.thumbnail_url ? ` data-thumb-src="${esc(m.thumbnail_url)}"` : ''}`;
 
                 return `<div class="model-card bg-white rounded-lg card-shadow hover-scale overflow-hidden flex flex-col">

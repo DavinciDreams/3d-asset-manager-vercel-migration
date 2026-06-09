@@ -225,9 +225,13 @@
                         clips.forEach((clip) => {
                             actionsByName[clip.name] = mixer.clipAction(clip);
                         });
-                        // Auto-play the first clip so animated models move by
-                        // default (the detail controls may switch it after).
-                        if (clips.length) playClip(clips[0].name);
+                        // Play the owner's saved default clip if it exists,
+                        // otherwise the first clip (the detail controls may
+                        // switch it after). This keeps the chosen default on
+                        // the browse cards too.
+                        const wanted = options.defaultAnimation;
+                        const startClip = (wanted && actionsByName[wanted]) ? wanted : clips[0].name;
+                        playClip(startClip);
                     }
                     // NOTE: options.onLoad is deferred until after the api object
                     // is assigned to container.__threeViewer below, so callers'
