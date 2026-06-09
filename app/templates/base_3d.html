@@ -23,6 +23,7 @@
         import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js';
         import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
         import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
+        import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 
         const DRACO_PATH = 'https://www.gstatic.com/draco/versioned/decoders/1.5.7/';
         const BASIS_PATH = 'https://cdn.jsdelivr.net/npm/three@0.184.0/examples/jsm/libs/basis/';
@@ -45,13 +46,25 @@
             if (box.isEmpty()) return;
             const center = box.getCenter(new THREE.Vector3());
             const size = box.getSize(new THREE.Vector3());
-            const maxDim = Math.max(size.x, size.y, size.z) || 1;
-            const fov = camera.fov * Math.PI / 180;
-            const distance = Math.abs(maxDim / Math.sin(fov / 2)) * 0.75;
-            camera.aspect = width / height;
-            camera.near = Math.max(distance / 100, 0.01);
+            const aspect = width / height;
+            camera.aspect = aspect;
+
+            // Fit the bounding sphere so the model fills the frame in both
+            // dimensions, accounting for narrow (portrait) aspect ratios.
+            const radius = size.length() / 2;
+            const vFov = camera.fov * Math.PI / 180;
+            const hFov = 2 * Math.atan(Math.tan(vFov / 2) * aspect);
+            const fitFov = Math.min(vFov, hFov);
+            const padding = 1.15; // ~15% breathing room around the model
+            const distance = (radius / Math.sin(fitFov / 2)) * padding;
+
+            camera.near = Math.max(distance / 100, 0.001);
             camera.far = distance * 100;
-            camera.position.set(center.x + distance, center.y + maxDim * 0.35, center.z + distance);
+
+            // Classic 3/4 viewing angle, but aimed straight at the true center
+            // so the model is centered (no vertical offset / cropping).
+            const dir = new THREE.Vector3(1, 0.45, 1).normalize();
+            camera.position.copy(center).addScaledVector(dir, distance);
             camera.lookAt(center);
             camera.updateProjectionMatrix();
             controls.target.copy(center);
@@ -74,13 +87,21 @@
                 renderer.setSize(width, height, false);
                 renderer.setClearColor(0xffffff, 1);
                 renderer.outputColorSpace = THREE.SRGBColorSpace;
-                renderer.toneMapping = THREE.ACESFilmicToneMapping;
+                // Neutral tone mapping + image-based lighting to match the
+                // brightness/look of the <model-viewer> web component.
+                renderer.toneMapping = THREE.NeutralToneMapping;
                 renderer.toneMappingExposure = 1;
                 renderer.domElement.className = options.large ? 'model-viewer-large' : (options.card ? 'model-viewer-card' : 'model-viewer');
                 container.appendChild(renderer.domElement);
 
-                scene.add(new THREE.HemisphereLight(0xffffff, 0x777788, 1.8));
-                const key = new THREE.DirectionalLight(0xffffff, 2.2);
+                // Built-in RoomEnvironment as an IBL source so PBR materials
+                // (metal/rough) get ambient reflections instead of looking flat.
+                const pmrem = new THREE.PMREMGenerator(renderer);
+                const envTexture = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+                scene.environment = envTexture;
+
+                scene.add(new THREE.HemisphereLight(0xffffff, 0x777788, 1.2));
+                const key = new THREE.DirectionalLight(0xffffff, 1.5);
                 key.position.set(2, 4, 3);
                 scene.add(key);
 
@@ -198,6 +219,9 @@
                         if (animationId) cancelAnimationFrame(animationId);
                         window.removeEventListener('resize', resize);
                         if (model) disposeObject(model);
+                        scene.environment = null;
+                        envTexture.dispose();
+                        pmrem.dispose();
                         controls.dispose();
                         dracoLoader.dispose();
                         ktx2Loader.dispose();
