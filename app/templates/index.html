@@ -108,17 +108,28 @@
         <h2 class="text-3xl font-bold text-center mb-12">Recent Models</h2>
         <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-8">
             {% for model in recent_models %}
+            {% set viewable = model.viewable_file_id or model.file_format in ['glb', 'gltf'] %}
             <div class="bg-white rounded-xl card-shadow hover-scale overflow-hidden">
-                <!-- Big preview for Recent Models -->
-                <a href="{{ url_for('main.model_detail', model_id=model.id) }}" class="block h-56 relative bg-gray-100">
-                    {% if model.preview_file_id %}
-                        <video class="w-full h-full object-cover" autoplay loop muted playsinline
-                               poster="{% if model.thumbnail_file_id %}{{ url_for('api.get_thumbnail', model_id=model.id) }}{% endif %}">
-                            <source src="{{ url_for('api.get_preview', model_id=model.id) }}" type="video/webm">
-                        </video>
-                    {% elif model.thumbnail_file_id %}
-                        <img src="{{ url_for('api.get_thumbnail', model_id=model.id) }}"
-                             alt="{{ model.name }}" class="w-full h-full object-cover">
+                <!-- Big preview for Recent Models: live rotating 3D when viewable
+                     (prefers the small optimized variant), else thumbnail/icon. -->
+                <a href="{{ url_for('main.model_detail', model_id=model.id) }}"
+                   class="block h-56 relative bg-gray-100 card-media"
+                   data-model-id="{{ model.id }}"
+                   data-viewable="{{ '1' if viewable else '0' }}"
+                   {% if viewable %}data-view-src="{% if model.has_game_optimized %}{{ url_for('api.get_game_optimized', model_id=model.id) }}{% else %}{{ url_for('api.view_model', model_id=model.id) }}?viewer=2{% endif %}"{% endif %}
+                   {% if model.camera_orbit %}data-camera-orbit="{{ model.camera_orbit }}"{% endif %}
+                   {% if model.default_animation %}data-default-animation="{{ model.default_animation }}"{% endif %}>
+                    {% if model.thumbnail_file_id %}
+                        <img alt="{{ model.name }}" class="w-full h-full object-cover lazy-media"
+                             loading="lazy"
+                             data-img-src="{{ url_for('api.get_thumbnail', model_id=model.id) }}"
+                             onerror="this.style.display='none';this.nextElementSibling.style.display='flex';">
+                        <div class="absolute inset-0 hidden items-center justify-center text-gray-300">
+                            <i class="fas fa-cube text-5xl"></i>
+                        </div>
+                    {% elif not viewable and model.preview_file_id %}
+                        <video class="w-full h-full object-cover lazy-media" loop muted playsinline preload="none"
+                               data-preview-src="{{ url_for('api.get_preview', model_id=model.id) }}"></video>
                     {% else %}
                         <div class="absolute inset-0 flex items-center justify-center text-gray-300">
                             <i class="fas {% if model.file_format == 'vrm' %}fa-user{% elif model.file_format == 'vrma' %}fa-person-running{% else %}fa-cube{% endif %} text-5xl"></i>
@@ -159,34 +170,16 @@
     </div>
 </section>
 
+{% include "_live_previews.html" %}
 <script>
-const loadedRecentViewers = new Set();
-
-function loadRecentModel(modelId) {
-    if (loadedRecentViewers.has(modelId)) return;
-    
-    loadedRecentViewers.add(modelId);
-    const container = document.getElementById(`viewer-recent-${modelId}`);
-    
-    try {
-        createModelViewer(`viewer-recent-${modelId}`, modelId, {
-            width: container.clientWidth,
-            height: container.clientHeight
-        });
-    } catch (error) {
-        console.error('Failed to load recent model:', error);
-        container.innerHTML = '<div class="viewer-error"><div class="text-2xl">⚠️</div><div class="text-xs">Preview unavailable</div></div>';
-    }
-}
-
-// Auto-load all recent models on page load
+// Wire the Recent Models cards into the shared live-3D preview system:
+// viewable cards mount a rotating viewer when on screen; others lazy-load
+// their thumbnail.
 document.addEventListener('DOMContentLoaded', function() {
-    const recentViewers = document.querySelectorAll('[id^="viewer-recent-"]');
-    recentViewers.forEach((viewer, index) => {
-        const modelId = viewer.id.replace('viewer-recent-', '');
-        // Stagger loading to avoid overwhelming the server
-        setTimeout(() => loadRecentModel(modelId), 1000 + (index * 500));
-    });
+    if (window.LivePreviews) {
+        window.LivePreviews.observeMediaIn(document);
+        window.LivePreviews.observeLiveIn(document);
+    }
 });
 </script>
 {% endif %}

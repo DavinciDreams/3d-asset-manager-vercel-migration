@@ -39,12 +39,15 @@ def index():
         
         # Get recent public models
         recent_models, total_public = Model3D.get_public_models(page=1, per_page=6)
-        
-        
-        # Add owner username to each model
+
+
+        # Add owner username + game-optimized flag (landing cards prefer the
+        # smaller optimized variant for the live preview).
         for model in recent_models:
             user = User.get_by_id(model.user_id)
             model.owner_username = user.username if user else 'Unknown'
+            variant = ModelVariant.get(model.id, 'game')
+            model.has_game_optimized = bool(variant and variant.file_id)
 
         # Get statistics
         stats = Model3D.get_stats()
