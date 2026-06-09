@@ -266,6 +266,9 @@
                                         class="row-action text-blue-600 hover:text-blue-900" title="Edit">
                                     <i class="fas fa-pen"></i>
                                 </button>
+                                {# Rotating-preview (re)generate icon hidden: client-side MediaRecorder
+                                   capture can black out the page on some GPUs (CAPTURE_ENABLED=false
+                                   in model_detail.html). Restore alongside that kill switch.
                                 {% if model.file_format != 'vrma' %}
                                 <a href="{{ url_for('main.model_detail', model_id=model.id) }}?regen=1"
                                    class="row-action text-purple-600 hover:text-purple-900"
@@ -273,6 +276,7 @@
                                     <i class="fas fa-film"></i>
                                 </a>
                                 {% endif %}
+                                #}
                                 {% if model.file_format in ['glb', 'gltf'] %}
                                 <button type="button" onclick="optimizeModel('{{ model.id }}', this)"
                                         class="row-action text-teal-600 hover:text-teal-900"

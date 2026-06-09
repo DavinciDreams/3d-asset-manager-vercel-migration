@@ -371,6 +371,11 @@ let detailViewer = null;
 // ?regen=1 forces (re)capture of media. Normal page loads stay passive because
 // automatic canvas capture can overwhelm some browser/GPU combinations.
 const FORCE_REGEN = new URLSearchParams(window.location.search).get('regen') === '1';
+// KILL SWITCH: client-side MediaRecorder canvas capture (preview video +
+// thumbnail) can crash the GPU/compositor and black out the WHOLE page with no
+// JS error on some browser/GPU combos. Disabled everywhere until a safe
+// capture path exists. Flip to true (and redeploy) to re-enable.
+const CAPTURE_ENABLED = false;
 // Saved default view angle for this model (empty string if none set yet).
 const SAVED_CAMERA_ORBIT = {{ model.camera_orbit | tojson }};
 // Whether this model already has a stored thumbnail.
@@ -399,7 +404,7 @@ function loadDetailModel(modelId, variant) {
         const handleDetailLoad = () => {
             // Only (re)capture media from the ORIGINAL — the optimized variant
             // should never overwrite the model's thumbnail/preview.
-            if (variant === 'original') {
+            if (CAPTURE_ENABLED && variant === 'original') {
                 if (IS_OWNER && FORCE_REGEN) {
                     setTimeout(() => captureThumbnail(false), 800);
                 }
@@ -677,6 +682,7 @@ async function captureThumbnail(notify) {
 
 // Record a rotating preview video from the model-viewer canvas (shadow DOM).
 async function captureModelViewerPreview() {
+    if (!CAPTURE_ENABLED) return;  // MediaRecorder capture disabled (black-screen guard)
     const viewer = getActiveDetailViewerApi();
     if (!viewer || !window.capturePreview) return;
     const canvas = viewer.canvas;
@@ -913,11 +919,11 @@ document.addEventListener('DOMContentLoaded', function() {
                 // Apply the owner's saved default animation, if the picker is ready.
                 maybeApplyDefault();
                 {% if current_user.is_authenticated and current_user.id == model.user_id %}
-                if (FORCE_REGEN) {
+                if (CAPTURE_ENABLED && FORCE_REGEN) {
                     // Capture media only when explicitly requested.
                     setTimeout(captureVrmThumbnail, 1000);
                 }
-                if (FORCE_REGEN) {
+                if (CAPTURE_ENABLED && FORCE_REGEN) {
                     setTimeout(captureVrmPreview, 1500);
                 }
                 {% endif %}
@@ -989,6 +995,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
     // Record a ~4s rotating preview of the avatar and upload it.
     window.captureVrmPreview = async function () {
+        if (!CAPTURE_ENABLED) return;  // MediaRecorder capture disabled (black-screen guard)
         if (!controller || !window.capturePreview) return;
         // If a default animation is set, make sure it's playing in the clip.
         if (pendingDefaultUrl) { await controller.applyAnimation(pendingDefaultUrl); pendingDefaultUrl = null; }

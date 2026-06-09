@@ -12,7 +12,6 @@
     /* The live 3D viewer canvas should fill the square card media area. */
     #gallery-grid .card-media canvas { width: 100% !important; height: 100% !important; object-fit: cover; }
 </style>
-{% include "_preview_capture.html" %}
 <div class="container mx-auto px-4 py-8">
     <div class="flex flex-wrap justify-between items-center gap-4 mb-6">
         <h1 class="text-3xl font-bold text-gray-800">Browse 3D Models</h1>
@@ -206,14 +205,12 @@
             // --- Live 3D previews for cards without a cached video ----------
             // Cards that are viewable but have no preview video mount a live,
             // rotating AssetThreeViewer when on screen (so browse looks alive),
-            // capped to a few at once for performance. For the owner, we capture
-            // a short WebM the first time so subsequent loads use the cheap
-            // <video>. Animated models animate in both the live view and capture
-            // (AssetThreeViewer auto-plays embedded clips).
+            // capped to a few at once for performance. Animated models animate
+            // (AssetThreeViewer auto-plays embedded clips). No MediaRecorder
+            // capture here -- that caused full-page black-outs on some GPUs.
             const MAX_LIVE_VIEWERS = 4;
             const liveActive = new Map();   // card element -> viewer api (or 'pending')
             const liveWanted = new Set();   // cards currently in view wanting a live viewer
-            const liveCaptured = new Set(); // model ids we've already tried to capture
 
             function liveEligible(card) {
                 return card
@@ -225,7 +222,6 @@
             async function mountLive(card) {
                 if (!window.AssetThreeViewer || liveActive.has(card)) return;
                 liveActive.set(card, 'pending');
-                const modelId = card.dataset.modelId;
                 const viewUrl = card.dataset.viewSrc;
                 if (!viewUrl) { liveActive.delete(card); return; }
 
@@ -247,17 +243,11 @@
                     if (!liveWanted.has(card)) { api.dispose(); host.remove(); liveActive.delete(card); return; }
                     liveActive.set(card, api);
 
-                    // Owner-only: capture a rotating (and animated) WebM once.
-                    if (card.dataset.isOwner === '1' && window.capturePreview
-                        && modelId && !liveCaptured.has(modelId)) {
-                        liveCaptured.add(modelId);
-                        const canvas = api.canvas;
-                        if (canvas) {
-                            window.capturePreview(canvas, modelId, { durationMs: 4000 })
-                                .then((ok) => { if (ok) card.dataset.liveDone = '1'; })
-                                .catch(() => {});
-                        }
-                    }
+                    // NOTE: automatic MediaRecorder capture was intentionally
+                    // removed here -- recording the canvas stream during browse
+                    // could black out the whole page on some browser/GPU combos.
+                    // Browse shows live rotating 3D only; previews are generated
+                    // explicitly (detail page ?regen=1), never automatically.
                 } catch (e) {
                     liveActive.delete(card);
                 }
