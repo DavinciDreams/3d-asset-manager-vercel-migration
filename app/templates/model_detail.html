@@ -709,45 +709,79 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
     if (gameOptRun && gameOptStatus) {
+        async function parseGameOptimizeResponse(response) {
+            const contentType = response.headers.get('content-type') || '';
+            if (contentType.includes('application/json')) {
+                return await response.json();
+            }
+            const bodyText = (await response.text()).trim();
+            const isHtml = bodyText.startsWith('<!DOCTYPE') || bodyText.startsWith('<html');
+            return {
+                error: isHtml
+                    ? `Server returned HTTP ${response.status} while optimizing. The asset is still safe; try again after the optimizer service is fixed.`
+                    : bodyText || `HTTP ${response.status}`
+            };
+        }
+
+        function showGameOptimizeSuccess(data) {
+            const mb = value => (value / 1024 / 1024).toFixed(2);
+            const savings = Math.max(0, data.savings_ratio || 0) * 100;
+            gameOptStatus.innerHTML =
+                `Created ${mb(data.optimized_size)} MB copy from ${mb(data.original_size)} MB ` +
+                `(${savings.toFixed(1)}% smaller). ` +
+                `<a class="font-semibold text-teal-700 hover:text-teal-900" href="/model/${data.model.id}">Open optimized asset</a>`;
+        }
+
+        async function pollGameOptimizeJob(statusUrl) {
+            for (let attempt = 0; attempt < 240; attempt += 1) {
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                const response = await fetch(statusUrl, { headers: { 'Accept': 'application/json' } });
+                const data = await parseGameOptimizeResponse(response);
+                if (!response.ok) {
+                    throw new Error(data.error || 'Could not check optimization status.');
+                }
+                const job = data.job || {};
+                if (job.status === 'done') {
+                    showGameOptimizeSuccess(job);
+                    return;
+                }
+                if (job.status === 'failed') {
+                    throw new Error(job.error || 'Game optimization failed.');
+                }
+                gameOptStatus.textContent = job.status === 'running'
+                    ? 'Optimizing... large assets can take a few minutes.'
+                    : 'Optimization queued...';
+            }
+            throw new Error('Optimization is still running. Refresh this page in a few minutes.');
+        }
+
         gameOptRun.addEventListener('click', async () => {
             const textureLimit = Number(document.getElementById('game-opt-texture').value);
             const simplifyRatio = Number(document.getElementById('game-opt-simplify').value);
             const compressionMode = document.getElementById('game-opt-compression').value;
             gameOptRun.disabled = true;
             gameOptRun.classList.add('opacity-70', 'cursor-not-allowed');
-            gameOptStatus.textContent = 'Optimizing... this can take a minute on large tree assets.';
+            gameOptStatus.textContent = 'Queueing optimization...';
             try {
                 const response = await fetch('/api/model/{{ model.id }}/optimize-game', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
                     body: JSON.stringify({
                         texture_limit: textureLimit,
                         simplify_ratio: simplifyRatio,
                         compression_mode: compressionMode
                     })
                 });
-                const contentType = response.headers.get('content-type') || '';
-                let data;
-                if (contentType.includes('application/json')) {
-                    data = await response.json();
-                } else {
-                    const bodyText = (await response.text()).trim();
-                    const isHtml = bodyText.startsWith('<!DOCTYPE') || bodyText.startsWith('<html');
-                    data = {
-                        error: isHtml
-                            ? `Server returned HTTP ${response.status} while optimizing. The asset is still safe; try again after the optimizer service is fixed.`
-                            : bodyText || `HTTP ${response.status}`
-                    };
-                }
+                const data = await parseGameOptimizeResponse(response);
                 if (!response.ok) {
                     throw new Error(data.error || 'Game optimization failed.');
                 }
-                const mb = value => (value / 1024 / 1024).toFixed(2);
-                const savings = Math.max(0, data.savings_ratio || 0) * 100;
-                gameOptStatus.innerHTML =
-                    `Created ${mb(data.optimized_size)} MB copy from ${mb(data.original_size)} MB ` +
-                    `(${savings.toFixed(1)}% smaller). ` +
-                    `<a class="font-semibold text-teal-700 hover:text-teal-900" href="/model/${data.model.id}">Open optimized asset</a>`;
+                if (response.status === 202 || data.queued) {
+                    gameOptStatus.textContent = 'Optimization queued...';
+                    await pollGameOptimizeJob(data.status_url);
+                } else {
+                    showGameOptimizeSuccess(data);
+                }
             } catch (error) {
                 gameOptStatus.textContent = error.message;
             } finally {

@@ -615,8 +615,8 @@ def get_openapi_spec(base_url=''):
                 'parameters': [{'name': 'model_id', 'in': 'path', 'required': True, 'schema': {'type': 'string'}}],
                 'post': {
                     'tags': ['Workflows'],
-                    'summary': 'Create a game-optimized GLB copy',
-                    'description': 'Uses gltfpack to create a smaller GLB copy. Choose meshopt for the smallest file or fallback for broader compatibility. The source asset is not replaced.',
+                    'summary': 'Queue a game-optimized GLB copy',
+                    'description': 'Queues gltfpack optimization in the background. Choose meshopt for the smallest file or fallback for broader compatibility. The source asset is not replaced.',
                     'security': [{'sessionCookie': []}, {'bearerAuth': []}],
                     'requestBody': {
                         'content': {
@@ -647,14 +647,29 @@ def get_openapi_spec(base_url=''):
                         }
                     },
                     'responses': {
-                        '201': {'description': 'Optimized copy created', 'content': {'application/json': {'schema': {'type': 'object'}}}},
+                        '202': {'description': 'Optimization job queued', 'content': {'application/json': {'schema': {'type': 'object'}}}},
                         '400': _error_response('Unsupported format or invalid settings'),
                         '401': _error_response('Authentication required'),
                         '403': _error_response('Access denied'),
                         '404': _error_response('Model or source file not found'),
-                        '502': _error_response('Optimization failed'),
-                        '503': _error_response('Optimizer unavailable'),
-                        '504': _error_response('Optimization timed out'),
+                        '500': _error_response('Optimization could not be queued'),
+                    },
+                },
+            },
+            '/model/{model_id}/optimize-game/{job_id}': {
+                'parameters': [
+                    {'name': 'model_id', 'in': 'path', 'required': True, 'schema': {'type': 'string'}},
+                    {'name': 'job_id', 'in': 'path', 'required': True, 'schema': {'type': 'string'}},
+                ],
+                'get': {
+                    'tags': ['Workflows'],
+                    'summary': 'Get game optimization job status',
+                    'security': [{'sessionCookie': []}, {'bearerAuth': []}],
+                    'responses': {
+                        '200': {'description': 'Optimization job status', 'content': {'application/json': {'schema': {'type': 'object'}}}},
+                        '403': _error_response('Access denied'),
+                        '404': _error_response('Model or optimization job not found'),
+                        '500': _error_response('Optimization status failed'),
                     },
                 },
             },

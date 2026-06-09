@@ -132,6 +132,23 @@ bundles = Table(
     Column("updated_at", DateTime, nullable=False, default=datetime.utcnow),
 )
 
+optimization_jobs = Table(
+    "optimization_jobs",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("source_model_id", String(36), ForeignKey("models.id"), nullable=False, index=True),
+    Column("owner_id", String(36), ForeignKey("users.id"), index=True),
+    Column("status", String(40), nullable=False, default="queued", index=True),
+    Column("settings", _json_type(), nullable=False, default=dict),
+    Column("result", _json_type(), nullable=False, default=dict),
+    Column("result_model_id", String(36), ForeignKey("models.id")),
+    Column("error", Text),
+    Column("created_at", DateTime, nullable=False, default=datetime.utcnow),
+    Column("updated_at", DateTime, nullable=False, default=datetime.utcnow),
+    Column("started_at", DateTime),
+    Column("finished_at", DateTime),
+)
+
 world_states = Table(
     "world_states",
     metadata,
@@ -306,6 +323,7 @@ def init_database(engine):
     _ensure_asset_file_columns(engine)
     _ensure_model_columns(engine)
     _ensure_bundle_table(engine)
+    _ensure_optimization_job_table(engine)
 
 
 def _ensure_asset_file_columns(engine):
@@ -362,6 +380,11 @@ def _ensure_bundle_table(engine):
     # explicit hook makes startup migrations symmetrical with models/files.
     if not inspect(engine).has_table("bundles"):
         bundles.create(engine, checkfirst=True)
+
+
+def _ensure_optimization_job_table(engine):
+    if not inspect(engine).has_table("optimization_jobs"):
+        optimization_jobs.create(engine, checkfirst=True)
 
 
 @contextmanager

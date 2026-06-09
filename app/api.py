@@ -2,14 +2,16 @@ from datetime import datetime
 from flask import Blueprint, jsonify, request, current_app, make_response, url_for
 from flask_login import current_user, login_required
 from werkzeug.exceptions import HTTPException
-from sqlalchemy import select
-from app.db import asset_files
+from sqlalchemy import select, update
+from app.db import asset_files, optimization_jobs
 from app.models import ApiKey, AssetBundle, Model3D, User, WorldState
 from app.openapi import get_openapi_spec
 import hmac
 import io
 import json
 import os
+import threading
+import uuid
 import zipfile
 
 api_bp = Blueprint('api', __name__)
@@ -36,6 +38,12 @@ def _can_access_model(model):
     if model.is_public:
         return True
     return current_user.is_authenticated and model.user_id == current_user.id
+
+
+def _can_access_model_as(model, principal=None, service=False):
+    if service or _can_access_model(model):
+        return True
+    return bool(principal and model.user_id == principal.id)
 
 
 def _authorized_service_token():
@@ -1006,93 +1014,110 @@ def _optimize_game_float(data, key, default):
     return value
 
 
-@api_bp.route('/model/<model_id>/optimize-game', methods=['POST'])
-def optimize_model_for_game(model_id):
-    """Create a game-optimized GLB copy without replacing the source asset."""
+def _optimization_job_to_api(row):
+    if not row:
+        return None
+    result = row.result or {}
+    return {
+        'id': row.id,
+        'source_model_id': row.source_model_id,
+        'status': row.status,
+        'settings': row.settings or {},
+        'result': result,
+        'result_model_id': row.result_model_id,
+        'model': result.get('model'),
+        'original_size': result.get('original_size'),
+        'optimized_size': result.get('optimized_size'),
+        'savings_ratio': result.get('savings_ratio'),
+        'error': row.error,
+        'created_at': row.created_at.isoformat() if row.created_at else None,
+        'updated_at': row.updated_at.isoformat() if row.updated_at else None,
+        'started_at': row.started_at.isoformat() if row.started_at else None,
+        'finished_at': row.finished_at.isoformat() if row.finished_at else None,
+    }
+
+
+def _get_optimization_job(job_id):
+    engine = current_app.config['DB_ENGINE']
+    with engine.begin() as conn:
+        return conn.execute(
+            select(optimization_jobs).where(optimization_jobs.c.id == str(job_id))
+        ).mappings().first()
+
+
+def _patch_optimization_job(app, job_id, **fields):
+    fields['updated_at'] = datetime.utcnow()
+    with app.config['DB_ENGINE'].begin() as conn:
+        conn.execute(
+            update(optimization_jobs)
+            .where(optimization_jobs.c.id == str(job_id))
+            .values(**fields)
+        )
+
+
+def _run_game_optimizer(model, owner_id, settings):
     import shutil
     import subprocess
     import tempfile
 
+    gltfpack_bin = shutil.which('gltfpack')
+    if not gltfpack_bin:
+        raise RuntimeError('Game optimization is unavailable because gltfpack is not installed.')
+
+    texture_limit = settings['texture_limit']
+    simplify_ratio = settings['simplify_ratio']
+    compression_mode = settings['compression_mode']
+
+    src_bytes, src_fmt = model.get_viewable_data()
+    src_fmt = (src_fmt or model.file_format or '').lower()
+    if not src_bytes:
+        raise FileNotFoundError('Source file not found')
+    if src_fmt not in ('glb', 'gltf'):
+        raise ValueError('Game optimization currently supports GLB/GLTF assets.')
+
+    workdir = tempfile.mkdtemp(prefix='game_optimize_')
     try:
-        model = Model3D.get_by_id(model_id)
-        if not model:
-            return jsonify({'error': 'Model not found'}), 404
-        if not _can_access_model(model):
-            return jsonify({'error': 'Access denied'}), 403
+        in_path = os.path.join(workdir, f'input.{src_fmt}')
+        out_path = os.path.join(workdir, 'game.glb')
+        report_path = os.path.join(workdir, 'report.json')
+        with open(in_path, 'wb') as f:
+            f.write(src_bytes)
 
-        principal, service = _api_principal()
-        if not (principal or service):
-            return jsonify({'error': 'Authentication required'}), 401
+        cmd = [
+            gltfpack_bin,
+            '-i', in_path,
+            '-o', out_path,
+            '-cc' if compression_mode == 'meshopt' else '-cf',
+            '-si', f'{simplify_ratio:g}',
+            '-r', report_path,
+        ]
+        if texture_limit:
+            cmd.extend(['-tl', str(texture_limit)])
 
-        gltfpack_bin = shutil.which('gltfpack')
-        if not gltfpack_bin:
-            return jsonify({'error': 'Game optimization is unavailable because gltfpack is not installed.'}), 503
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=False,
+        )
+        if result.returncode != 0:
+            msg = (result.stderr or result.stdout or 'gltfpack failed.').strip()
+            raise RuntimeError(msg[-1000:] or 'gltfpack failed.')
 
-        data = _payload()
-        try:
-            texture_limit = _optimize_game_int(data, 'texture_limit', 1024, allowed=(0, 1024, 2048, 4096))
-            simplify_ratio = _optimize_game_float(data, 'simplify_ratio', 0.75)
-            compression_mode = (data.get('compression_mode') or 'meshopt').strip().lower()
-            if compression_mode not in ('meshopt', 'fallback'):
-                return jsonify({'error': 'compression_mode must be meshopt or fallback.'}), 400
-        except ValueError as e:
-            return jsonify({'error': str(e)}), 400
+        with open(out_path, 'rb') as f:
+            out_bytes = f.read()
 
-        src_bytes, src_fmt = model.get_viewable_data()
-        src_fmt = (src_fmt or model.file_format or '').lower()
-        if not src_bytes:
-            return jsonify({'error': 'Source file not found'}), 404
-        if src_fmt not in ('glb', 'gltf'):
-            return jsonify({'error': 'Game optimization currently supports GLB/GLTF assets.'}), 400
-
-        workdir = tempfile.mkdtemp(prefix='game_optimize_')
-        try:
-            in_path = os.path.join(workdir, f'input.{src_fmt}')
-            out_path = os.path.join(workdir, 'game.glb')
-            report_path = os.path.join(workdir, 'report.json')
-            with open(in_path, 'wb') as f:
-                f.write(src_bytes)
-
-            cmd = [
-                gltfpack_bin,
-                '-i', in_path,
-                '-o', out_path,
-                '-cc' if compression_mode == 'meshopt' else '-cf',
-                '-si', f'{simplify_ratio:g}',
-                '-r', report_path,
-            ]
-            if texture_limit:
-                cmd.extend(['-tl', str(texture_limit)])
-
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=120,
-                check=False,
-            )
-            if result.returncode != 0:
-                msg = (result.stderr or result.stdout or 'gltfpack failed.').strip()
-                print(f"Game optimization failed for {model.id}: {msg}")
-                return jsonify({'error': 'Game optimization failed.', 'details': msg[-1000:]}), 502
-
-            with open(out_path, 'rb') as f:
-                out_bytes = f.read()
-
-            report = {}
-            if os.path.exists(report_path):
-                try:
-                    with open(report_path, 'r', encoding='utf-8') as f:
-                        report = json.load(f)
-                except Exception as e:
-                    print(f"Could not read gltfpack report: {e}")
-        except subprocess.TimeoutExpired:
-            return jsonify({'error': 'Game optimization timed out.'}), 504
-        finally:
-            shutil.rmtree(workdir, ignore_errors=True)
+        report = {}
+        if os.path.exists(report_path):
+            try:
+                with open(report_path, 'r', encoding='utf-8') as f:
+                    report = json.load(f)
+            except Exception as e:
+                print(f"Could not read gltfpack report: {e}")
 
         fs = current_app.config['FILE_STORE']
-        optimized_name = (data.get('name') or f'{model.name or _safe_stem(model)} (Game Optimized)').strip()
+        optimized_name = (settings.get('name') or f'{model.name or _safe_stem(model)} (Game Optimized)').strip()
         optimized_filename = f'{_safe_stem(model)}-game.glb'
         metadata = {
             'kind': 'game_optimized',
@@ -1111,7 +1136,6 @@ def optimize_model_for_game(model_id):
             metadata=metadata,
         )
 
-        owner_id = principal.id if principal else model.user_id
         description = (model.description or '').strip()
         suffix = f'Game optimized from model {model.id}. Texture cap {texture_limit or "none"}px, mesh ratio {simplify_ratio:g}.'
         optimized = Model3D(
@@ -1134,7 +1158,7 @@ def optimize_model_for_game(model_id):
         original_size = len(src_bytes)
         optimized_size = len(out_bytes)
         savings_ratio = 0 if original_size <= 0 else 1 - (optimized_size / original_size)
-        return jsonify({
+        return {
             'success': True,
             'model': _serialize_model(optimized),
             'source_model_id': model.id,
@@ -1147,12 +1171,131 @@ def optimize_model_for_game(model_id):
                 'compression': 'gltfpack -cc' if compression_mode == 'meshopt' else 'gltfpack -cf',
             },
             'report': report,
-        }), 201
+        }
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def _process_game_optimization_job(app, job_id):
+    with app.app_context():
+        try:
+            job = _get_optimization_job(job_id)
+            if not job:
+                return
+            _patch_optimization_job(app, job_id, status='running', started_at=datetime.utcnow(), error=None)
+            model = Model3D.get_by_id(job.source_model_id)
+            if not model:
+                raise FileNotFoundError('Model not found')
+            result = _run_game_optimizer(model, job.owner_id or model.user_id, job.settings or {})
+            _patch_optimization_job(
+                app,
+                job_id,
+                status='done',
+                result=result,
+                result_model_id=(result.get('model') or {}).get('id'),
+                finished_at=datetime.utcnow(),
+                error=None,
+            )
+        except Exception as e:
+            msg = str(e)[:1000] or 'Game optimization failed'
+            print(f"Game optimization job {job_id} failed: {msg}", flush=True)
+            _patch_optimization_job(
+                app,
+                job_id,
+                status='failed',
+                error=msg,
+                finished_at=datetime.utcnow(),
+            )
+
+
+def _start_game_optimization_thread(app, job_id):
+    thread = threading.Thread(
+        target=_process_game_optimization_job,
+        args=(app, job_id),
+        name=f'game-optimizer-{job_id[:8]}',
+        daemon=True,
+    )
+    thread.start()
+
+
+@api_bp.route('/model/<model_id>/optimize-game', methods=['POST'])
+def optimize_model_for_game(model_id):
+    """Queue a game-optimized GLB copy without replacing the source asset."""
+    try:
+        model = Model3D.get_by_id(model_id)
+        if not model:
+            return jsonify({'error': 'Model not found'}), 404
+
+        principal, service = _api_principal()
+        if not (principal or service):
+            return jsonify({'error': 'Authentication required'}), 401
+        if not _can_access_model_as(model, principal, service):
+            return jsonify({'error': 'Access denied'}), 403
+
+        data = _payload()
+        try:
+            settings = {
+                'texture_limit': _optimize_game_int(data, 'texture_limit', 1024, allowed=(0, 1024, 2048, 4096)),
+                'simplify_ratio': _optimize_game_float(data, 'simplify_ratio', 0.75),
+                'compression_mode': (data.get('compression_mode') or 'meshopt').strip().lower(),
+            }
+            if settings['compression_mode'] not in ('meshopt', 'fallback'):
+                return jsonify({'error': 'compression_mode must be meshopt or fallback.'}), 400
+            if data.get('name'):
+                settings['name'] = str(data.get('name')).strip()
+        except ValueError as e:
+            return jsonify({'error': str(e)}), 400
+
+        owner_id = principal.id if principal else model.user_id
+        job_id = str(uuid.uuid4())
+        now = datetime.utcnow()
+        with current_app.config['DB_ENGINE'].begin() as conn:
+            conn.execute(optimization_jobs.insert().values(
+                id=job_id,
+                source_model_id=model.id,
+                owner_id=owner_id,
+                status='queued',
+                settings=settings,
+                result={},
+                result_model_id=None,
+                error=None,
+                created_at=now,
+                updated_at=now,
+                started_at=None,
+                finished_at=None,
+            ))
+
+        _start_game_optimization_thread(current_app._get_current_object(), job_id)
+        job = _get_optimization_job(job_id)
+        return jsonify({
+            'success': True,
+            'queued': True,
+            'job': _optimization_job_to_api(job),
+            'status_url': url_for('api.game_optimization_status', model_id=model.id, job_id=job_id),
+        }), 202
     except Exception as e:
-        print(f"API game optimization error: {e}")
+        print(f"API game optimization enqueue error: {e}")
         import traceback
         traceback.print_exc()
-        return jsonify({'error': 'Game optimization failed'}), 500
+        return jsonify({'error': 'Game optimization could not be queued'}), 500
+
+
+@api_bp.route('/model/<model_id>/optimize-game/<job_id>', methods=['GET'])
+def game_optimization_status(model_id, job_id):
+    try:
+        job = _get_optimization_job(job_id)
+        if not job or str(job.source_model_id) != str(model_id):
+            return jsonify({'error': 'Optimization job not found'}), 404
+        model = Model3D.get_by_id(model_id)
+        if not model:
+            return jsonify({'error': 'Model not found'}), 404
+        principal, service = _api_principal()
+        if not (_can_access_model_as(model, principal, service) or (principal and job.owner_id == principal.id)):
+            return jsonify({'error': 'Access denied'}), 403
+        return jsonify({'success': True, 'job': _optimization_job_to_api(job)})
+    except Exception as e:
+        print(f"API game optimization status error: {e}")
+        return jsonify({'error': 'Optimization status failed'}), 500
 
 
 @api_bp.route('/upload', methods=['POST'])
