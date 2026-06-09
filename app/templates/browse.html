@@ -11,6 +11,22 @@
     #gallery-grid .card-media canvas { pointer-events: none; }
     /* The live 3D viewer canvas should fill the square card media area. */
     #gallery-grid .card-media canvas { width: 100% !important; height: 100% !important; object-fit: cover; }
+
+    /* Keep the preview a TRUE square. The card is a flex column inside a CSS
+       grid whose rows stretch to the tallest card; without flex:none the
+       aspect-square media box absorbs that extra height and renders portrait.
+       Pin it square and let the info block take the remaining space. */
+    #gallery-grid .card-media {
+        aspect-ratio: 1 / 1;
+        flex: none;
+        width: 100%;
+        height: auto;
+        overflow: hidden;
+    }
+    /* Don't let grid rows stretch cards to equal height -- align to top so each
+       card is its natural height and the square media stays square. */
+    #gallery-grid { align-items: start; }
+    #gallery-grid .lazy-media { width: 100%; height: 100%; object-fit: cover; }
 </style>
 <div class="container mx-auto px-4 py-8">
     <div class="flex flex-wrap justify-between items-center gap-4 mb-6">
@@ -203,12 +219,16 @@
             }
 
             // --- Live 3D previews for cards without a cached video ----------
-            // Cards that are viewable but have no preview video mount a live,
-            // rotating AssetThreeViewer when on screen (so browse looks alive),
-            // capped to a few at once for performance. Animated models animate
-            // (AssetThreeViewer auto-plays embedded clips). No MediaRecorder
-            // capture here -- that caused full-page black-outs on some GPUs.
-            const MAX_LIVE_VIEWERS = 4;
+            // Every viewable card that is on (or near) screen mounts a live,
+            // rotating AssetThreeViewer, so browse looks like the original
+            // "everything is spinning in a 3D viewer". Off-screen cards are
+            // disposed, which frees their WebGL context. The cap matches the
+            // browser's hard WebGL-context limit (~16) so a fast scroll can't
+            // blow past it and silently kill contexts; with disposal-on-exit
+            // the live count tracks what's actually visible. Animated models
+            // animate (AssetThreeViewer auto-plays embedded clips). No
+            // MediaRecorder capture here -- that black-screened some GPUs.
+            const MAX_LIVE_VIEWERS = 16;
             const liveActive = new Map();   // card element -> viewer api (or 'pending')
             const liveWanted = new Set();   // cards currently in view wanting a live viewer
 
@@ -225,13 +245,19 @@
                 const viewUrl = card.dataset.viewSrc;
                 if (!viewUrl) { liveActive.delete(card); return; }
 
-                // Host element for the canvas, overlaid on the card media.
+                // Host element for the canvas, overlaid on the (square) card
+                // media. absolute inset-0 inside the aspect-ratio:1/1 .card-media
+                // makes it a reliable square; the viewer reads its clientW/H.
                 let host = card.querySelector('.live-host');
                 if (!host) {
                     host = document.createElement('div');
                     host.className = 'live-host absolute inset-0';
                     card.appendChild(host);
                 }
+                // Guard against a 0-height read (viewer would fall back to a
+                // non-square default): if the card hasn't laid out, skip and let
+                // a later observer tick retry.
+                if (!host.clientWidth || !host.clientHeight) { liveActive.delete(card); return; }
                 try {
                     const api = await window.AssetThreeViewer.create(host, viewUrl, {
                         card: true,
@@ -284,7 +310,7 @@
                     }
                 }
                 pumpLiveQueue();
-            }, { rootMargin: '100px 0px' });
+            }, { rootMargin: '300px 0px' });
 
             function observeLiveIn(root) {
                 root.querySelectorAll('.card-media[data-viewable="1"]').forEach((card) => {
