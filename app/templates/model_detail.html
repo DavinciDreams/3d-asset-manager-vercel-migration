@@ -382,15 +382,9 @@ function loadDetailModel(modelId) {
             name: '{{ model.name }}',
             description: '{{ model.description }}',
             format: '{{ model.file_format }}',
+            cameraOrbit: SAVED_CAMERA_ORBIT,
             onLoad: handleDetailLoad,
         });
-
-        // Apply the owner's saved default view, if any. Turn off auto-rotate
-        // so the model opens at the saved angle instead of spinning past it.
-        if (detailViewer && SAVED_CAMERA_ORBIT) {
-            detailViewer.removeAttribute('auto-rotate');
-            detailViewer.setAttribute('camera-orbit', SAVED_CAMERA_ORBIT);
-        }
 
         console.log('Detail model viewer created successfully');
     } catch (error) {

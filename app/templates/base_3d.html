@@ -827,10 +827,54 @@
             
             // Clear any existing content
             container.innerHTML = '';
+            const modelUrl = `/api/view/${modelId}?viewer=2`;
+
+            if (options.preferThree && window.AssetThreeViewer && !options.disableThreeFallback) {
+                const addThreeOverlay = () => {
+                    if (options.showInfo) {
+                        const infoDiv = document.createElement('div');
+                        infoDiv.className = 'model-viewer-info';
+                        infoDiv.innerHTML = `
+                            <div class="text-xs">
+                                <i class="fas fa-cube mr-1"></i>
+                                3D Model
+                            </div>
+                        `;
+                        container.appendChild(infoDiv);
+                    }
+                    if (options.showControls) {
+                        const controlsDiv = document.createElement('div');
+                        controlsDiv.className = 'model-viewer-controls';
+                        controlsDiv.innerHTML = `
+                            <button class="model-viewer-btn" onclick="resetCamera('${containerId}')">
+                                <i class="fas fa-home text-xs"></i> Reset
+                            </button>
+                            <button class="model-viewer-btn" onclick="toggleAutoRotate('${containerId}')">
+                                <i class="fas fa-sync text-xs"></i> Rotate
+                            </button>
+                        `;
+                        container.appendChild(controlsDiv);
+                    }
+                };
+                window.AssetThreeViewer.create(container, modelUrl, {
+                    large: options.large,
+                    card: options.card,
+                    autoRotate: true,
+                    cameraOrbit: options.cameraOrbit,
+                    onLoad: () => {
+                        addThreeOverlay();
+                        if (options.onLoad) options.onLoad();
+                    },
+                    onError: options.onError
+                }).catch((error) => {
+                    console.error('Three.js GLB viewer failed:', error);
+                    showModelViewerError(container);
+                });
+                return null;
+            }
             
             // Create model-viewer element
             const modelViewer = document.createElement('model-viewer');
-            const modelUrl = `/api/view/${modelId}?viewer=2`;
             
             // Set basic attributes
             modelViewer.setAttribute('src', modelUrl);
@@ -963,6 +1007,8 @@
                 large: true,
                 showInfo: true,
                 showControls: true,
+                preferThree: true,
+                cameraOrbit: modelData.cameraOrbit,
                 alt: modelData.name || 'A 3D model',
                 onLoad: () => {
                     console.log('Detailed model viewer loaded');
