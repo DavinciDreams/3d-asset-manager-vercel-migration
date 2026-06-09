@@ -8,13 +8,21 @@
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     <!-- Model Viewer for 3D model rendering -->
     <script type="module" src="https://ajax.googleapis.com/ajax/libs/model-viewer/4.0.0/model-viewer.min.js"></script>
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.184.0/build/three.module.js",
+            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.184.0/examples/jsm/"
+        }
+    }
+    </script>
     <script type="module">
-        import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.184.0/build/three.module.js';
-        import { GLTFLoader } from 'https://cdn.jsdelivr.net/npm/three@0.184.0/examples/jsm/loaders/GLTFLoader.js';
-        import { DRACOLoader } from 'https://cdn.jsdelivr.net/npm/three@0.184.0/examples/jsm/loaders/DRACOLoader.js';
-        import { KTX2Loader } from 'https://cdn.jsdelivr.net/npm/three@0.184.0/examples/jsm/loaders/KTX2Loader.js';
-        import { OrbitControls } from 'https://cdn.jsdelivr.net/npm/three@0.184.0/examples/jsm/controls/OrbitControls.js';
-        import { MeshoptDecoder } from 'https://cdn.jsdelivr.net/npm/three@0.184.0/examples/jsm/libs/meshopt_decoder.module.js';
+        import * as THREE from 'three';
+        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+        import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
+        import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 
         const DRACO_PATH = 'https://www.gstatic.com/draco/versioned/decoders/1.5.7/';
         const BASIS_PATH = 'https://cdn.jsdelivr.net/npm/three@0.184.0/examples/jsm/libs/basis/';
