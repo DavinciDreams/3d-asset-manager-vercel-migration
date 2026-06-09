@@ -478,9 +478,16 @@ function resetDetailCamera() {
     }
 }
 
+// Returns an object exposing the animation API the controls use
+// (availableAnimations, animationName, play/pause, paused). Works for both the
+// <model-viewer> web component and the Three.js viewer (AssetThreeViewer),
+// which now also supports glTF animations.
 function getDetailViewer() {
     const container = document.getElementById('viewer-detail-{{ model.id }}');
-    return container?.querySelector('model-viewer') || null;
+    if (!container) return null;
+    // Three.js viewer (default for GLB/Draco/meshopt) exposes the same surface.
+    if (container.__threeViewer) return container.__threeViewer;
+    return container.querySelector('model-viewer') || null;
 }
 
 function getActiveDetailViewerApi() {
