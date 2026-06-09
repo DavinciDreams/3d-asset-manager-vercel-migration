@@ -29,8 +29,8 @@ services:
       ASSIMP_BIN: ${ASSIMP_BIN:-assimp}
       NODE_BIN: ${NODE_BIN:-node}
       FBX2VRMA_DIR: ${FBX2VRMA_DIR:-/app/tools}
-    expose:
-      - "8000"
+    ports:
+      - "8088:8000"        # publish container 8000 on host 8088
     restart: unless-stopped
 
   postgres:
