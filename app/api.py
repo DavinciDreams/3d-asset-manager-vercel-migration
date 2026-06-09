@@ -519,6 +519,57 @@ def conversion_status(model_id):
         return jsonify({'error': 'Status lookup failed'}), 500
 
 
+def _media_summary(model):
+    """All media URLs + presence flags for a model in one place: still image
+    (thumbnail), rotating preview video, the renderable model file, and the
+    game-optimized variant. URLs are only included when the asset exists."""
+    fmt = (model.file_format or '').lower()
+    viewable = bool(model.viewable_file_id) or fmt in ('glb', 'gltf', 'vrm')
+    go = _game_optimized_fields(model)
+    return {
+        'id': model.id,
+        'name': model.name,
+        'file_format': model.file_format,
+        'conversion_status': model.conversion_status,
+        'image': {
+            'has': bool(model.thumbnail_file_id),
+            'url': url_for('api.get_thumbnail', model_id=model.id) if model.thumbnail_file_id else None,
+            'content_type': 'image/webp',
+        },
+        'video': {
+            'has': bool(model.preview_file_id),
+            'url': url_for('api.get_preview', model_id=model.id) if model.preview_file_id else None,
+            'content_type': 'video/webm',
+            'supports_range': True,
+        },
+        'model': {
+            'viewable': viewable,
+            'view_url': url_for('api.view_model', model_id=model.id) if viewable else None,
+            'download_url': url_for('api.download_model', model_id=model.id),
+            'file_format': model.file_format,
+        },
+        'game_optimized': go['game_optimized'],
+        'has_game_optimized': go['has_game_optimized'],
+    }
+
+
+@api_bp.route('/model/<model_id>/media')
+def get_media_summary(model_id):
+    """One call returning every media URL for a model: thumbnail image,
+    rotating preview video, the renderable model file, and the game-optimized
+    variant (if any), each with a presence flag."""
+    try:
+        model = Model3D.get_by_id(model_id)
+        if not model:
+            return jsonify({'error': 'Model not found'}), 404
+        if not _can_access_model(model):
+            return jsonify({'error': 'Access denied'}), 403
+        return jsonify(_media_summary(model))
+    except Exception as e:
+        print(f"API media summary error: {e}")
+        return jsonify({'error': 'Media summary failed'}), 500
+
+
 _EXPORT_MESH_FORMATS = {'glb', 'gltf', 'obj', 'stl', 'ply', 'fbx', 'dae', '3ds'}
 
 
