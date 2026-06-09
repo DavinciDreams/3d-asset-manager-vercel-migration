@@ -5,16 +5,16 @@
 {% block content %}
 <style>
     .dashboard-thumb {
-        width: 64px;
-        height: 64px;
+        width: 96px;
+        height: 96px;
         border-radius: 8px;
         background: linear-gradient(135deg, #f3f4f6 0%, #e5e7eb 100%);
         border: 1px solid #e5e7eb;
         overflow: hidden;
     }
     .dashboard-thumb-fallback {
-        width: 64px;
-        height: 64px;
+        width: 96px;
+        height: 96px;
         border-radius: 8px;
         background: linear-gradient(135deg, #f3f4f6 0%, #e5e7eb 100%);
         border: 1px solid #e5e7eb;
@@ -22,6 +22,10 @@
         align-items: center;
         justify-content: center;
     }
+    /* Constrain the Model/title column so long titles wrap instead of
+       stretching the row; let the thumbnail column stay snug. */
+    .col-model { width: 22%; }
+    .col-model .model-title { overflow-wrap: anywhere; }
     /* Compact icon action buttons in the table */
     .row-action {
         display: inline-flex;
@@ -192,7 +196,7 @@
                                 {% elif model.thumbnail_file_id %}
                                 <img src="{{ url_for('api.get_thumbnail', model_id=model.id) }}"
                                      alt="{{ model.name }}"
-                                     class="dashboard-thumb object-contain"
+                                     class="dashboard-thumb object-cover"
                                      onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
                                 <div class="dashboard-thumb-fallback" style="display:none;">
                                     <i class="fas fa-cube text-2xl text-indigo-300"></i>
@@ -204,11 +208,11 @@
                                 {% endif %}
                             </a>
                         </td>
-                        <td class="px-3 py-4">
+                        <td class="px-3 py-4 col-model">
                             <div class="flex items-center">
                                 <i class="fas fa-cube text-indigo-600 mr-3 hidden sm:block"></i>
-                                <div>
-                                    <div class="text-sm font-medium text-gray-900">
+                                <div class="min-w-0">
+                                    <div class="text-sm font-medium text-gray-900 model-title">
                                         {{ model.name }}
                                         {% if model.conversion_status in ['pending', 'processing'] %}
                                         <span class="ml-1 px-2 py-0.5 text-xs font-medium bg-yellow-100 text-yellow-800 rounded-full">
