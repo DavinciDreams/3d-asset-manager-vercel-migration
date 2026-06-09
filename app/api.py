@@ -967,6 +967,11 @@ def get_preview(model_id):
 
 def _serialize_browse_card(model):
     """Compact payload the browse gallery card needs (lazy-loaded client-side)."""
+    is_owner = current_user.is_authenticated and current_user.id == model.user_id
+    # Live preview is possible for renderable mesh formats (the Three.js viewer
+    # handles GLB/GLTF incl. Draco/meshopt). VRM/VRMA use other viewers, so we
+    # leave those to their thumbnail/icon on browse.
+    viewable = bool(model.viewable_file_id) or (model.file_format or '').lower() in ('glb', 'gltf')
     return {
         'id': model.id,
         'name': model.name or 'Untitled',
@@ -980,6 +985,10 @@ def _serialize_browse_card(model):
         'preview_url': url_for('api.get_preview', model_id=model.id) if model.preview_file_id else None,
         'thumbnail_url': url_for('api.get_thumbnail', model_id=model.id) if model.thumbnail_file_id else None,
         'detail_url': url_for('main.model_detail', model_id=model.id),
+        # For browse live-3D fallback when there's no cached preview yet.
+        'is_owner': bool(is_owner),
+        'viewable': viewable,
+        'view_url': url_for('api.view_model', model_id=model.id) + '?viewer=2' if viewable else None,
     }
 
 
