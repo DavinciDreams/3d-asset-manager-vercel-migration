@@ -1023,6 +1023,16 @@ def _serialize_browse_card(model):
     # handles GLB/GLTF incl. Draco/meshopt). VRM/VRMA use other viewers, so we
     # leave those to their thumbnail/icon on browse.
     viewable = bool(model.viewable_file_id) or (model.file_format or '').lower() in ('glb', 'gltf')
+    # Prefer the game-optimized variant for the live browse preview when one
+    # exists -- it's far smaller (e.g. 5MB vs 85MB) so cards load fast and the
+    # gallery stays performant. Falls back to the full model otherwise.
+    game_variant = ModelVariant.get(model.id, 'game') if viewable else None
+    if game_variant and game_variant.file_id:
+        view_url = url_for('api.get_game_optimized', model_id=model.id)
+    elif viewable:
+        view_url = url_for('api.view_model', model_id=model.id) + '?viewer=2'
+    else:
+        view_url = None
     return {
         'id': model.id,
         'name': model.name or 'Untitled',
@@ -1039,7 +1049,8 @@ def _serialize_browse_card(model):
         # For browse live-3D fallback when there's no cached preview yet.
         'is_owner': bool(is_owner),
         'viewable': viewable,
-        'view_url': url_for('api.view_model', model_id=model.id) + '?viewer=2' if viewable else None,
+        'view_url': view_url,
+        'has_game_optimized': bool(game_variant and game_variant.file_id),
         'camera_orbit': model.camera_orbit or None,
     }
 

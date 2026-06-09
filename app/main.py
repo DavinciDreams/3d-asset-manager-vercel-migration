@@ -124,10 +124,13 @@ def browse():
             search=search if search else None,
             sort=sort, tag=tags if tags else None)
 
-        # Add owner username to each model
+        # Add owner username + whether a game-optimized variant exists (browse
+        # prefers that smaller file for the live preview) to each model.
         for model in models:
             user = User.get_by_id(model.user_id)
             model.owner_username = user.username if user else 'Unknown'
+            variant = ModelVariant.get(model.id, 'game')
+            model.has_game_optimized = bool(variant and variant.file_id)
 
         pagination = Pagination(models, total, page, per_page)
         all_tags = Model3D.get_public_tags()
