@@ -41,7 +41,7 @@
             });
         }
 
-        function frameObject(camera, controls, object, width, height) {
+        function frameObject(camera, controls, object, width, height, padding) {
             const box = new THREE.Box3().setFromObject(object);
             if (box.isEmpty()) return;
             const center = box.getCenter(new THREE.Vector3());
@@ -55,8 +55,9 @@
             const vFov = camera.fov * Math.PI / 180;
             const hFov = 2 * Math.atan(Math.tan(vFov / 2) * aspect);
             const fitFov = Math.min(vFov, hFov);
-            const padding = 1.15; // ~15% breathing room around the model
-            const distance = (radius / Math.sin(fitFov / 2)) * padding;
+            // padding = breathing room around the model (1.0 = edge-to-edge).
+            const pad = padding || 1.15;
+            const distance = (radius / Math.sin(fitFov / 2)) * pad;
 
             camera.near = Math.max(distance / 100, 0.001);
             camera.far = distance * 100;
@@ -108,7 +109,7 @@
                 const controls = new OrbitControls(camera, renderer.domElement);
                 controls.enableDamping = true;
                 controls.autoRotate = options.autoRotate !== false;
-                controls.autoRotateSpeed = 1.2;
+                controls.autoRotateSpeed = options.autoRotateSpeed || 1.2;
 
                 const parseCameraOrbit = (orbit) => {
                     if (!orbit || typeof orbit !== 'string') return null;
@@ -127,7 +128,7 @@
                     return { theta, phi, radius };
                 };
 
-                const setCameraOrbit = (orbit) => {
+                const setCameraOrbit = (orbit, opts = {}) => {
                     const parsed = typeof orbit === 'string' ? parseCameraOrbit(orbit) : orbit;
                     if (!parsed) return false;
                     const spherical = new THREE.Spherical(parsed.radius, parsed.phi, parsed.theta);
@@ -135,7 +136,10 @@
                     camera.position.copy(controls.target).add(offset);
                     camera.lookAt(controls.target);
                     camera.updateProjectionMatrix();
-                    controls.autoRotate = false;
+                    // By default applying a saved view stops auto-rotate (detail
+                    // page holds the saved angle). keepAutoRotate lets browse use
+                    // the saved view only as the STARTING angle, then keep spinning.
+                    if (!opts.keepAutoRotate) controls.autoRotate = false;
                     controls.update();
                     renderer.render(scene, camera);
                     return true;
@@ -205,8 +209,13 @@
                     const gltf = await loader.loadAsync(modelUrl);
                     model = gltf.scene;
                     scene.add(model);
-                    frameObject(camera, controls, model, width, height);
-                    if (options.cameraOrbit) setCameraOrbit(options.cameraOrbit);
+                    frameObject(camera, controls, model, width, height, options.framePadding);
+                    if (options.cameraOrbit) {
+                        // When auto-rotating (browse cards), use the saved view as
+                        // the starting angle but keep spinning; otherwise (detail)
+                        // hold the saved angle.
+                        setCameraOrbit(options.cameraOrbit, { keepAutoRotate: controls.autoRotate });
+                    }
 
                     // Wire up embedded animations, if any.
                     if (gltf.animations && gltf.animations.length) {
@@ -245,7 +254,7 @@
 
                 const api = {
                     reset() {
-                        if (model) frameObject(camera, controls, model, container.clientWidth || width, container.clientHeight || height);
+                        if (model) frameObject(camera, controls, model, container.clientWidth || width, container.clientHeight || height, options.framePadding);
                     },
                     toggleAutoRotate() {
                         controls.autoRotate = !controls.autoRotate;
@@ -301,6 +310,16 @@
                         dracoLoader.dispose();
                         ktx2Loader.dispose();
                         renderer.dispose();
+                        // renderer.dispose() frees Three resources but does NOT
+                        // immediately release the WebGL context -- it lingers
+                        // until GC. On a page that mounts/disposes many viewers
+                        // (the browse gallery), lingering contexts pile up and
+                        // hit the browser's ~16-context cap, after which new
+                        // viewers fail to render. Force the context loss so the
+                        // GPU slot is reclaimed right away.
+                        try { renderer.forceContextLoss(); } catch (e) {}
+                        const gl = renderer.domElement;
+                        if (gl && gl.parentNode) gl.parentNode.removeChild(gl);
                     }
                 };
                 container.__threeViewer = api;

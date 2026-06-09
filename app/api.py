@@ -1040,6 +1040,7 @@ def _serialize_browse_card(model):
         'is_owner': bool(is_owner),
         'viewable': viewable,
         'view_url': url_for('api.view_model', model_id=model.id) + '?viewer=2' if viewable else None,
+        'camera_orbit': model.camera_orbit or None,
     }
 
 

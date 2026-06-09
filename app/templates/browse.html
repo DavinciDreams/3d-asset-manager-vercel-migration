@@ -106,6 +106,7 @@
                    data-viewable="{{ '1' if viewable else '0' }}"
                    data-is-owner="{{ '1' if is_owner else '0' }}"
                    {% if viewable %}data-view-src="{{ url_for('api.view_model', model_id=model.id) }}?viewer=2"{% endif %}
+                   {% if model.camera_orbit %}data-camera-orbit="{{ model.camera_orbit }}"{% endif %}
                    {% if model.thumbnail_file_id %}data-thumb-src="{{ url_for('api.get_thumbnail', model_id=model.id) }}"{% endif %}>
                     {% if model.preview_file_id %}
                         {# Has a cached rotating preview -> cheap <video>, played by the observer when visible. #}
@@ -241,9 +242,8 @@
 
             async function mountLive(card) {
                 if (!window.AssetThreeViewer || liveActive.has(card)) return;
-                liveActive.set(card, 'pending');
                 const viewUrl = card.dataset.viewSrc;
-                if (!viewUrl) { liveActive.delete(card); return; }
+                if (!viewUrl) return;
 
                 // Host element for the canvas, overlaid on the (square) card
                 // media. absolute inset-0 inside the aspect-ratio:1/1 .card-media
@@ -256,37 +256,52 @@
                 }
                 // Guard against a 0-height read (viewer would fall back to a
                 // non-square default): if the card hasn't laid out, skip and let
-                // a later observer tick retry.
-                if (!host.clientWidth || !host.clientHeight) { liveActive.delete(card); return; }
+                // a later observer tick retry (do NOT occupy a slot).
+                if (!host.clientWidth || !host.clientHeight) return;
+
+                // Reserve a slot with a token. unmountLive() can be called while
+                // we're still awaiting create(); we detect that by checking the
+                // token is still the current entry, and tear down either here or
+                // there -- never leaving a stale entry or an orphaned context.
+                const token = {};
+                liveActive.set(card, token);
                 try {
                     const api = await window.AssetThreeViewer.create(host, viewUrl, {
                         card: true,
                         autoRotate: true,
+                        autoRotateSpeed: 3.5,  // browse cards spin noticeably faster than the detail viewer
+                        framePadding: 1.0,     // tighter fill so models aren't tiny in the card
+                        cameraOrbit: card.dataset.cameraOrbit || undefined,  // start from the owner's saved view if set
                         onError: () => { /* keep the thumbnail/icon underneath */ },
                     });
+                    // If the slot was released (scrolled away / superseded) while
+                    // loading, dispose immediately and don't claim it.
+                    if (liveActive.get(card) !== token || !liveWanted.has(card)) {
+                        if (api) try { api.dispose(); } catch (e) {}
+                        const h = card.querySelector('.live-host');
+                        if (h) h.remove();
+                        if (liveActive.get(card) === token) liveActive.delete(card);
+                        return;
+                    }
                     if (!api) { liveActive.delete(card); return; }
-                    // If the card scrolled away while loading, tear down now.
-                    if (!liveWanted.has(card)) { api.dispose(); host.remove(); liveActive.delete(card); return; }
                     liveActive.set(card, api);
-
-                    // NOTE: automatic MediaRecorder capture was intentionally
-                    // removed here -- recording the canvas stream during browse
-                    // could black out the whole page on some browser/GPU combos.
-                    // Browse shows live rotating 3D only; previews are generated
-                    // explicitly (detail page ?regen=1), never automatically.
                 } catch (e) {
-                    liveActive.delete(card);
+                    if (liveActive.get(card) === token) liveActive.delete(card);
                 }
             }
 
             function unmountLive(card) {
-                const api = liveActive.get(card);
-                if (api && api !== 'pending') {
-                    try { api.dispose(); } catch (e) {}
+                const entry = liveActive.get(card);
+                if (entry === undefined) return;
+                // Always release the slot. If a real viewer api is present,
+                // dispose it; if it's still a pending token, the in-flight
+                // mountLive will see the slot was released and clean up itself.
+                liveActive.delete(card);
+                if (entry && typeof entry.dispose === 'function') {
+                    try { entry.dispose(); } catch (e) {}
                     const host = card.querySelector('.live-host');
                     if (host) host.remove();
                 }
-                liveActive.delete(card);
             }
 
             // Promote wanted cards into free live-viewer slots, closest to the
@@ -308,24 +323,25 @@
                 }
             }
 
-            // Only treat a card as "wanted" once it is genuinely on screen
-            // (not in a pre-load band) so cards don't start spinning while
-            // almost off-screen. A card must be at least ~35% visible to mount,
-            // and is dropped once it falls below ~10% (hysteresis avoids
-            // flicker at the edges).
+            // Treat a card as "wanted" as soon as a reasonable chunk is on
+            // screen so a full few rows spin (incl. partially-visible top/bottom
+            // rows), but not while it's essentially off-screen. Mount at >=15%
+            // visible, drop below 5% (hysteresis avoids edge flicker). Slot
+            // allocation (pumpLiveQueue) still prioritizes the most-centered
+            // cards, so the focused rows always win.
             const liveObserver = new IntersectionObserver((entries) => {
                 for (const entry of entries) {
                     const card = entry.target;
                     const ratio = entry.intersectionRatio;
-                    if (entry.isIntersecting && ratio >= 0.35 && liveEligible(card)) {
+                    if (entry.isIntersecting && ratio >= 0.15 && liveEligible(card)) {
                         liveWanted.add(card);
-                    } else if (!entry.isIntersecting || ratio < 0.1) {
+                    } else if (!entry.isIntersecting || ratio < 0.05) {
                         liveWanted.delete(card);
                         unmountLive(card);
                     }
                 }
                 pumpLiveQueue();
-            }, { rootMargin: '0px', threshold: [0, 0.1, 0.35, 0.6] });
+            }, { rootMargin: '0px', threshold: [0, 0.05, 0.15, 0.4, 0.7] });
 
             function observeLiveIn(root) {
                 root.querySelectorAll('.card-media[data-viewable="1"]').forEach((card) => {
@@ -391,6 +407,7 @@
                     `data-model-id="${esc(m.id)}" data-viewable="${viewable ? '1' : '0'}" ` +
                     `data-is-owner="${m.is_owner ? '1' : '0'}"` +
                     `${viewable ? ` data-view-src="${esc(m.view_url)}"` : ''}` +
+                    `${m.camera_orbit ? ` data-camera-orbit="${esc(m.camera_orbit)}"` : ''}` +
                     `${m.thumbnail_url ? ` data-thumb-src="${esc(m.thumbnail_url)}"` : ''}`;
 
                 return `<div class="model-card bg-white rounded-lg card-shadow hover-scale overflow-hidden flex flex-col">
