@@ -87,6 +87,47 @@
                 controls.autoRotate = options.autoRotate !== false;
                 controls.autoRotateSpeed = 1.2;
 
+                const parseCameraOrbit = (orbit) => {
+                    if (!orbit || typeof orbit !== 'string') return null;
+                    const parts = orbit.trim().split(/\s+/);
+                    if (parts.length < 3) return null;
+                    const parseAngle = (value) => {
+                        if (value.endsWith('rad')) return Number.parseFloat(value);
+                        if (value.endsWith('deg')) return Number.parseFloat(value) * Math.PI / 180;
+                        return Number.parseFloat(value);
+                    };
+                    const parseRadius = (value) => Number.parseFloat(value);
+                    const theta = parseAngle(parts[0]);
+                    const phi = parseAngle(parts[1]);
+                    const radius = parseRadius(parts[2]);
+                    if (![theta, phi, radius].every(Number.isFinite) || radius <= 0) return null;
+                    return { theta, phi, radius };
+                };
+
+                const setCameraOrbit = (orbit) => {
+                    const parsed = typeof orbit === 'string' ? parseCameraOrbit(orbit) : orbit;
+                    if (!parsed) return false;
+                    const spherical = new THREE.Spherical(parsed.radius, parsed.phi, parsed.theta);
+                    const offset = new THREE.Vector3().setFromSpherical(spherical);
+                    camera.position.copy(controls.target).add(offset);
+                    camera.lookAt(controls.target);
+                    camera.updateProjectionMatrix();
+                    controls.autoRotate = false;
+                    controls.update();
+                    renderer.render(scene, camera);
+                    return true;
+                };
+
+                const getCameraOrbit = () => {
+                    const offset = camera.position.clone().sub(controls.target);
+                    const spherical = new THREE.Spherical().setFromVector3(offset);
+                    return {
+                        theta: spherical.theta,
+                        phi: spherical.phi,
+                        radius: spherical.radius,
+                    };
+                };
+
                 const loader = new GLTFLoader();
                 const dracoLoader = new DRACOLoader().setDecoderPath(DRACO_PATH);
                 const ktx2Loader = new KTX2Loader().setTranscoderPath(BASIS_PATH);
@@ -113,6 +154,7 @@
                     model = gltf.scene;
                     scene.add(model);
                     frameObject(camera, controls, model, width, height);
+                    if (options.cameraOrbit) setCameraOrbit(options.cameraOrbit);
                     if (options.onLoad) options.onLoad();
                 } catch (error) {
                     dracoLoader.dispose();
@@ -138,6 +180,15 @@
                     },
                     toggleAutoRotate() {
                         controls.autoRotate = !controls.autoRotate;
+                    },
+                    setAutoRotate(enabled) {
+                        controls.autoRotate = Boolean(enabled);
+                    },
+                    getCameraOrbit,
+                    setCameraOrbit,
+                    toBlob(options = {}) {
+                        renderer.render(scene, camera);
+                        return new Promise((resolve) => renderer.domElement.toBlob(resolve, options.mimeType || 'image/png'));
                     },
                     canvas: renderer.domElement,
                     dispose() {
@@ -814,6 +865,7 @@
                         large: options.large,
                         card: options.card,
                         autoRotate: true,
+                        cameraOrbit: modelViewer.getAttribute('camera-orbit'),
                         onLoad: options.onLoad,
                         onError: options.onError
                     }).catch((error) => {
@@ -914,7 +966,7 @@
                 alt: modelData.name || 'A 3D model',
                 onLoad: () => {
                     console.log('Detailed model viewer loaded');
-                    // Add any post-load customizations here
+                    if (typeof modelData.onLoad === 'function') modelData.onLoad();
                 },
                 onError: (error) => {
                     console.error('Detailed model viewer error:', error);
