@@ -5,16 +5,16 @@
 {% block content %}
 <style>
     .dashboard-thumb {
-        width: 96px;
-        height: 96px;
+        width: 64px;
+        height: 64px;
         border-radius: 8px;
         background: linear-gradient(135deg, #f3f4f6 0%, #e5e7eb 100%);
         border: 1px solid #e5e7eb;
         overflow: hidden;
     }
     .dashboard-thumb-fallback {
-        width: 96px;
-        height: 96px;
+        width: 64px;
+        height: 64px;
         border-radius: 8px;
         background: linear-gradient(135deg, #f3f4f6 0%, #e5e7eb 100%);
         border: 1px solid #e5e7eb;
@@ -22,6 +22,17 @@
         align-items: center;
         justify-content: center;
     }
+    /* Compact icon action buttons in the table */
+    .row-action {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 32px;
+        height: 32px;
+        border-radius: 6px;
+        transition: background-color .15s, color .15s;
+    }
+    .row-action:hover { background-color: #f3f4f6; }
 </style>
 <!-- Existing tags for quick-edit autocomplete -->
 <script id="tag-suggestions" type="application/json">{{ (all_tags or []) | tojson }}</script>
@@ -120,23 +131,58 @@
         </div>
 
         {% if user_models %}
+        <!-- Bulk action bar (shown when one or more rows are selected) -->
+        <div id="bulk-bar" class="hidden items-center gap-3 px-6 py-3 bg-indigo-50 border-b border-indigo-100 flex-wrap">
+            <span id="bulk-count" class="text-sm font-medium text-indigo-800">0 selected</span>
+            <div class="flex flex-wrap items-center gap-2">
+                <button type="button" onclick="bulkAddTags()"
+                        class="inline-flex items-center bg-white border border-indigo-200 text-indigo-700 px-3 py-1.5 rounded text-sm hover:bg-indigo-100">
+                    <i class="fas fa-tag mr-1.5"></i>Add tags
+                </button>
+                <button type="button" onclick="bulkSetVisibility(true)"
+                        class="inline-flex items-center bg-white border border-gray-200 text-gray-700 px-3 py-1.5 rounded text-sm hover:bg-gray-100">
+                    <i class="fas fa-globe mr-1.5"></i>Make public
+                </button>
+                <button type="button" onclick="bulkSetVisibility(false)"
+                        class="inline-flex items-center bg-white border border-gray-200 text-gray-700 px-3 py-1.5 rounded text-sm hover:bg-gray-100">
+                    <i class="fas fa-lock mr-1.5"></i>Make private
+                </button>
+                <button type="button" onclick="bulkDelete()"
+                        class="inline-flex items-center bg-red-600 text-white px-3 py-1.5 rounded text-sm hover:bg-red-700">
+                    <i class="fas fa-trash mr-1.5"></i>Delete
+                </button>
+            </div>
+            <button type="button" onclick="clearSelection()"
+                    class="ml-auto text-sm text-gray-500 hover:text-gray-700">Clear</button>
+        </div>
+
         <div class="overflow-x-auto">
             <table class="w-full">
                 <thead class="bg-gray-50">
                     <tr>
-                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Preview</th>
-                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Model</th>
-                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Size</th>
-                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Downloads</th>
-                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
-                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Uploaded</th>
-                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                        <th class="px-3 py-3 w-10 text-left">
+                            <input type="checkbox" id="select-all" onclick="toggleSelectAll(this)"
+                                   class="h-4 w-4 text-indigo-600 border-gray-300 rounded cursor-pointer"
+                                   title="Select all">
+                        </th>
+                        <th class="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Preview</th>
+                        <th class="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Model</th>
+                        <th class="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Size</th>
+                        <th class="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider hidden lg:table-cell">DLs</th>
+                        <th class="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                        <th class="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider hidden lg:table-cell">Uploaded</th>
+                        <th class="px-3 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
                     </tr>
                 </thead>
                 <tbody class="bg-white divide-y divide-gray-200">
                     {% for model in user_models %}
-                    <tr class="hover:bg-gray-50">
-                        <td class="px-6 py-4">
+                    <tr class="hover:bg-gray-50 model-row" data-model-id="{{ model.id }}"
+                        data-model-name="{{ model.name }}" data-model-tags="{{ model.tags | join(',') }}">
+                        <td class="px-3 py-4 align-top">
+                            <input type="checkbox" class="row-check h-4 w-4 text-indigo-600 border-gray-300 rounded cursor-pointer mt-1"
+                                   value="{{ model.id }}" onclick="onRowCheck()">
+                        </td>
+                        <td class="px-3 py-4">
                             <a href="{{ url_for('main.model_detail', model_id=model.id) }}" class="block dashboard-thumb">
                                 {% if model.preview_file_id %}
                                 <video class="dashboard-thumb object-cover" autoplay loop muted playsinline
@@ -158,9 +204,9 @@
                                 {% endif %}
                             </a>
                         </td>
-                        <td class="px-6 py-4 whitespace-nowrap">
+                        <td class="px-3 py-4">
                             <div class="flex items-center">
-                                <i class="fas fa-cube text-indigo-600 mr-3"></i>
+                                <i class="fas fa-cube text-indigo-600 mr-3 hidden sm:block"></i>
                                 <div>
                                     <div class="text-sm font-medium text-gray-900">
                                         {{ model.name }}
@@ -186,13 +232,13 @@
                                 </div>
                             </div>
                         </td>
-                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                        <td class="px-3 py-4 whitespace-nowrap text-sm text-gray-900">
                             {{ model.get_file_size_formatted() }}
                         </td>
-                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                        <td class="px-3 py-4 whitespace-nowrap text-sm text-gray-900 hidden lg:table-cell">
                             {{ model.download_count }}
                         </td>
-                        <td class="px-6 py-4 whitespace-nowrap">
+                        <td class="px-3 py-4 whitespace-nowrap">
                             {% if model.is_public %}
                             <span class="px-2 py-1 text-xs font-medium bg-green-100 text-green-800 rounded-full">
                                 Public
@@ -203,29 +249,40 @@
                             </span>
                             {% endif %}
                         </td>
-                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                        <td class="px-3 py-4 whitespace-nowrap text-sm text-gray-500 hidden lg:table-cell">
                             {{ model.upload_date.strftime('%Y-%m-%d') }}
                         </td>
-                        <td class="px-6 py-4 whitespace-nowrap text-sm font-medium space-x-2">
-                            <a href="{{ url_for('main.model_detail', model_id=model.id) }}"
-                               class="text-indigo-600 hover:text-indigo-900">View</a>
-                            <button type="button" onclick="toggleQuickEdit('{{ model.id }}')"
-                                    class="text-blue-600 hover:text-blue-900">Edit</button>
-                            {% if model.file_format != 'vrma' %}
-                            <a href="{{ url_for('main.model_detail', model_id=model.id) }}?regen=1"
-                               class="text-purple-600 hover:text-purple-900"
-                               title="Open the model and (re)generate its rotating preview">
-                                {% if model.preview_file_id %}Regen{% else %}Gen{% endif %} preview</a>
-                            {% endif %}
-                            <a href="{{ url_for('api.download_model', model_id=model.id) }}"
-                               class="text-green-600 hover:text-green-900">Download</a>
-                            <button onclick="deleteModel('{{ model.id }}')"
-                                    class="text-red-600 hover:text-red-900">Delete</button>
+                        <td class="px-3 py-4 whitespace-nowrap text-right">
+                            <div class="inline-flex items-center gap-0.5">
+                                <a href="{{ url_for('main.model_detail', model_id=model.id) }}"
+                                   class="row-action text-indigo-600 hover:text-indigo-900" title="View">
+                                    <i class="fas fa-eye"></i>
+                                </a>
+                                <button type="button" onclick="toggleQuickEdit('{{ model.id }}')"
+                                        class="row-action text-blue-600 hover:text-blue-900" title="Edit">
+                                    <i class="fas fa-pen"></i>
+                                </button>
+                                {% if model.file_format != 'vrma' %}
+                                <a href="{{ url_for('main.model_detail', model_id=model.id) }}?regen=1"
+                                   class="row-action text-purple-600 hover:text-purple-900"
+                                   title="{% if model.preview_file_id %}Regenerate{% else %}Generate{% endif %} rotating preview">
+                                    <i class="fas fa-film"></i>
+                                </a>
+                                {% endif %}
+                                <a href="{{ url_for('api.download_model', model_id=model.id) }}"
+                                   class="row-action text-green-600 hover:text-green-900" title="Download">
+                                    <i class="fas fa-download"></i>
+                                </a>
+                                <button onclick="deleteModel('{{ model.id }}')"
+                                        class="row-action text-red-600 hover:text-red-900" title="Delete">
+                                    <i class="fas fa-trash"></i>
+                                </button>
+                            </div>
                         </td>
                     </tr>
                     <!-- Inline quick-edit row (hidden until "Edit" is clicked) -->
                     <tr id="quick-edit-{{ model.id }}" class="hidden bg-blue-50">
-                        <td colspan="7" class="px-6 py-4">
+                        <td colspan="8" class="px-6 py-4">
                             <form onsubmit="return saveQuickEdit(event, '{{ model.id }}')" class="space-y-3">
                                 <div class="grid md:grid-cols-2 gap-3">
                                     <div>
@@ -332,12 +389,12 @@ async function deleteModel(modelId) {
     if (!confirm('Are you sure you want to delete this model?')) {
         return;
     }
-    
+
     try {
         const response = await fetch(`/api/model/${modelId}`, {
             method: 'DELETE'
         });
-        
+
         if (response.ok) {
             location.reload();
         } else {
@@ -347,6 +404,115 @@ async function deleteModel(modelId) {
     } catch (error) {
         alert('Error deleting model: ' + error.message);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Bulk selection + actions
+// Each bulk action loops the existing per-model API (PUT/DELETE), so no new
+// backend endpoint is required. Tag "add" merges with each row's current tags
+// (read from data-model-tags) and PUTs the full, deduped list.
+// ---------------------------------------------------------------------------
+function rowChecks() {
+    return Array.from(document.querySelectorAll('.row-check'));
+}
+function selectedIds() {
+    return rowChecks().filter(c => c.checked).map(c => c.value);
+}
+
+function onRowCheck() {
+    const checks = rowChecks();
+    const selected = checks.filter(c => c.checked);
+    const bar = document.getElementById('bulk-bar');
+    const count = document.getElementById('bulk-count');
+    const selectAll = document.getElementById('select-all');
+
+    if (selected.length > 0) {
+        bar.classList.remove('hidden');
+        bar.classList.add('flex');
+        count.textContent = `${selected.length} selected`;
+    } else {
+        bar.classList.add('hidden');
+        bar.classList.remove('flex');
+    }
+    // Reflect partial/all state on the header checkbox.
+    if (selectAll) {
+        selectAll.checked = selected.length === checks.length && checks.length > 0;
+        selectAll.indeterminate = selected.length > 0 && selected.length < checks.length;
+    }
+}
+
+function toggleSelectAll(master) {
+    rowChecks().forEach(c => { c.checked = master.checked; });
+    onRowCheck();
+}
+
+function clearSelection() {
+    rowChecks().forEach(c => { c.checked = false; });
+    const master = document.getElementById('select-all');
+    if (master) { master.checked = false; master.indeterminate = false; }
+    onRowCheck();
+}
+
+// Run an async op over each selected model, then reload. Returns on first batch.
+async function runBulk(ids, opFn, verb) {
+    let ok = 0, failed = 0;
+    for (const id of ids) {
+        try {
+            const res = await opFn(id);
+            if (res) ok++; else failed++;
+        } catch (e) {
+            failed++;
+        }
+    }
+    if (failed > 0) {
+        alert(`${verb}: ${ok} succeeded, ${failed} failed.`);
+    }
+    location.reload();
+}
+
+async function bulkDelete() {
+    const ids = selectedIds();
+    if (!ids.length) return;
+    if (!confirm(`Delete ${ids.length} model(s)? This cannot be undone.`)) return;
+    await runBulk(ids, async (id) => {
+        const r = await fetch(`/api/model/${id}`, { method: 'DELETE' });
+        return r.ok;
+    }, 'Delete');
+}
+
+async function bulkSetVisibility(isPublic) {
+    const ids = selectedIds();
+    if (!ids.length) return;
+    await runBulk(ids, async (id) => {
+        const r = await fetch(`/api/model/${id}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ is_public: isPublic })
+        });
+        return r.ok;
+    }, isPublic ? 'Make public' : 'Make private');
+}
+
+async function bulkAddTags() {
+    const ids = selectedIds();
+    if (!ids.length) return;
+    const input = prompt('Add tag(s) to the selected models (comma-separated):', '');
+    if (input === null) return;
+    const newTags = input.split(',').map(t => t.trim().toLowerCase()).filter(Boolean);
+    if (!newTags.length) return;
+
+    await runBulk(ids, async (id) => {
+        const row = document.querySelector(`tr.model-row[data-model-id="${id}"]`);
+        const existing = (row && row.getAttribute('data-model-tags') || '')
+            .split(',').map(t => t.trim().toLowerCase()).filter(Boolean);
+        const merged = Array.from(new Set([...existing, ...newTags]));
+        const r = await fetch(`/api/model/${id}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tags: merged.join(', ') })
+        });
+        return r.ok;
+    }, 'Add tags');
 }
 </script>
 {% endblock %}
