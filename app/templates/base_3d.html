@@ -163,6 +163,17 @@
                 let model = null;
                 let disposed = false;
                 let animationId = null;
+
+                // glTF animation playback (mixer is created after load if the
+                // file has clips). Exposed via the api so the detail-page
+                // animation controls work for non-VRM GLB/GLTF models.
+                const clock = new THREE.Clock();
+                let mixer = null;
+                let clips = [];
+                let actionsByName = {};
+                let currentClipName = null;
+                let animPaused = false;
+
                 const resize = () => {
                     if (disposed) return;
                     const nextWidth = container.clientWidth || width;
@@ -172,13 +183,46 @@
                     camera.updateProjectionMatrix();
                 };
 
+                const playClip = (name, { loop = true } = {}) => {
+                    if (!mixer) return false;
+                    const action = actionsByName[name];
+                    if (!action) return false;
+                    if (currentClipName && actionsByName[currentClipName] && currentClipName !== name) {
+                        actionsByName[currentClipName].fadeOut(0.2);
+                    }
+                    action.reset();
+                    action.setLoop(loop ? THREE.LoopRepeat : THREE.LoopOnce, Infinity);
+                    action.clampWhenFinished = !loop;
+                    action.fadeIn(0.2);
+                    action.paused = false;
+                    action.play();
+                    currentClipName = name;
+                    animPaused = false;
+                    return true;
+                };
+
                 try {
                     const gltf = await loader.loadAsync(modelUrl);
                     model = gltf.scene;
                     scene.add(model);
                     frameObject(camera, controls, model, width, height);
                     if (options.cameraOrbit) setCameraOrbit(options.cameraOrbit);
-                    if (options.onLoad) options.onLoad();
+
+                    // Wire up embedded animations, if any.
+                    if (gltf.animations && gltf.animations.length) {
+                        mixer = new THREE.AnimationMixer(model);
+                        clips = gltf.animations.slice();
+                        actionsByName = {};
+                        clips.forEach((clip) => {
+                            actionsByName[clip.name] = mixer.clipAction(clip);
+                        });
+                        // Auto-play the first clip so animated models move by
+                        // default (the detail controls may switch it after).
+                        if (clips.length) playClip(clips[0].name);
+                    }
+                    // NOTE: options.onLoad is deferred until after the api object
+                    // is assigned to container.__threeViewer below, so callers'
+                    // onLoad (e.g. animation-control setup) can find the viewer.
                 } catch (error) {
                     dracoLoader.dispose();
                     ktx2Loader.dispose();
@@ -190,6 +234,8 @@
 
                 const animate = () => {
                     if (disposed) return;
+                    const delta = clock.getDelta();
+                    if (mixer && !animPaused) mixer.update(delta);
                     controls.update();
                     renderer.render(scene, camera);
                     animationId = requestAnimationFrame(animate);
@@ -209,6 +255,30 @@
                     },
                     getCameraOrbit,
                     setCameraOrbit,
+                    // --- glTF animation controls -----------------------------
+                    get availableAnimations() {
+                        return clips.map((clip) => clip.name);
+                    },
+                    get animationName() {
+                        return currentClipName;
+                    },
+                    set animationName(name) {
+                        if (name && actionsByName[name]) playClip(name);
+                    },
+                    get paused() {
+                        return !mixer || animPaused;
+                    },
+                    play() {
+                        if (!mixer) return;
+                        if (!currentClipName && clips.length) {
+                            playClip(clips[0].name);
+                        } else {
+                            animPaused = false;
+                        }
+                    },
+                    pause() {
+                        animPaused = true;
+                    },
                     toBlob(options = {}) {
                         renderer.render(scene, camera);
                         return new Promise((resolve) => renderer.domElement.toBlob(resolve, options.mimeType || 'image/png'));
@@ -218,6 +288,11 @@
                         disposed = true;
                         if (animationId) cancelAnimationFrame(animationId);
                         window.removeEventListener('resize', resize);
+                        if (mixer) {
+                            mixer.stopAllAction();
+                            mixer.uncacheRoot(model);
+                            mixer = null;
+                        }
                         if (model) disposeObject(model);
                         scene.environment = null;
                         envTexture.dispose();
@@ -229,6 +304,9 @@
                     }
                 };
                 container.__threeViewer = api;
+                // Fire onLoad now that the viewer api is discoverable via
+                // container.__threeViewer (animation controls rely on this).
+                if (options.onLoad) options.onLoad();
                 return api;
             }
         };
