@@ -616,7 +616,7 @@ def get_openapi_spec(base_url=''):
                 'post': {
                     'tags': ['Workflows'],
                     'summary': 'Queue a game-optimized GLB copy',
-                    'description': 'Queues gltfpack optimization in the background. Choose meshopt for the smallest file or fallback for broader compatibility. The source asset is not replaced.',
+                    'description': 'Queues gltfpack optimization in the background. Choose meshopt for the smallest file or fallback for a self-contained file without mesh compression. The source asset is not replaced.',
                     'security': [{'sessionCookie': []}, {'bearerAuth': []}],
                     'requestBody': {
                         'content': {

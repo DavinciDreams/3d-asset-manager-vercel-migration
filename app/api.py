@@ -1088,10 +1088,11 @@ def _run_game_optimizer(model, owner_id, settings):
             gltfpack_bin,
             '-i', in_path,
             '-o', out_path,
-            '-cc' if compression_mode == 'meshopt' else '-cf',
             '-si', f'{simplify_ratio:g}',
             '-r', report_path,
         ]
+        if compression_mode == 'meshopt':
+            cmd.append('-cc')
         if texture_limit:
             cmd.extend(['-tc', '-tl', str(texture_limit)])
 
@@ -1177,7 +1178,7 @@ def _run_game_optimizer(model, owner_id, settings):
             'settings': {
                 'texture_limit': texture_limit,
                 'simplify_ratio': simplify_ratio,
-                'compression': 'gltfpack -cc' if compression_mode == 'meshopt' else 'gltfpack -cf',
+                'compression': 'gltfpack -cc' if compression_mode == 'meshopt' else 'gltfpack without mesh compression',
                 'texture_compression': texture_note,
             },
             'report': report,
