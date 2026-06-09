@@ -1018,3 +1018,24 @@ class ModelVariant:
         )
         with engine.begin() as conn:
             conn.execute(delete(model_variants).where(where))
+
+    @staticmethod
+    def model_ids_with_kind(kind, model_ids=None):
+        """Return a set of model_ids that have a variant of `kind` (with a
+        file). Optionally restrict to `model_ids`. One query -- use this for
+        list views to avoid a per-model lookup (N+1)."""
+        engine = current_app.config["DB_ENGINE"]
+        where = and_(
+            model_variants.c.kind == kind,
+            model_variants.c.file_id.isnot(None),
+        )
+        if model_ids is not None:
+            ids = [str(m) for m in model_ids]
+            if not ids:
+                return set()
+            where = and_(where, model_variants.c.model_id.in_(ids))
+        with engine.begin() as conn:
+            rows = conn.execute(
+                select(model_variants.c.model_id).where(where)
+            ).all()
+        return {str(r.model_id) for r in rows}

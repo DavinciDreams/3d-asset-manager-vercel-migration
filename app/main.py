@@ -6,6 +6,17 @@ import io
 
 main_bp = Blueprint('main', __name__)
 
+# Rows per page for the dashboard table's infinite scroll.
+DASHBOARD_PER_PAGE = 30
+
+
+def _enrich_dashboard_models(user_models):
+    """Attach has_game_optimized to each model (one batched variant query) so
+    dashboard previews can prefer the smaller optimized file."""
+    optimized_ids = ModelVariant.model_ids_with_kind('game', [m.id for m in user_models])
+    for model in user_models:
+        model.has_game_optimized = model.id in optimized_ids
+
 
 class Pagination:
     """Minimal Flask-SQLAlchemy-style pagination object for templates."""
@@ -42,12 +53,12 @@ def index():
 
 
         # Add owner username + game-optimized flag (landing cards prefer the
-        # smaller optimized variant for the live preview).
+        # smaller optimized variant for the live preview). Batched variant query.
+        optimized_ids = ModelVariant.model_ids_with_kind('game', [m.id for m in recent_models])
         for model in recent_models:
             user = User.get_by_id(model.user_id)
             model.owner_username = user.username if user else 'Unknown'
-            variant = ModelVariant.get(model.id, 'game')
-            model.has_game_optimized = bool(variant and variant.file_id)
+            model.has_game_optimized = model.id in optimized_ids
 
         # Get statistics
         stats = Model3D.get_stats()
@@ -75,26 +86,29 @@ def dashboard():
     try:
         
         sort = request.args.get('sort', 'newest')
+        page = request.args.get('page', 1, type=int)
         # Support multiple ?tag= values (AND-matched).
         tags = Model3D.normalize_tags(request.args.getlist('tag'))
 
-        # Show all of the user's models on the dashboard (not just the first
-        # page), so the count card and the table agree.
-        user_models, total_user_models = Model3D.get_user_models(
-            current_user.id, page=1, per_page=1000,
+        # Paginate the table (infinite scroll loads more); the headline stat
+        # cards use account-wide aggregates so they don't depend on the page.
+        per_page = DASHBOARD_PER_PAGE
+        user_models, total_filtered = Model3D.get_user_models(
+            current_user.id, page=page, per_page=per_page,
             sort=sort, tag=tags if tags else None)
+        _enrich_dashboard_models(user_models)
 
-        # Calculate user stats from the full set
-        total_downloads = sum(model.download_count for model in user_models)
-        public_models = sum(1 for model in user_models if model.is_public)
+        stats = Model3D.get_user_stats(current_user.id)
         all_tags = Model3D.get_user_tags(current_user.id)
+        has_next = page * per_page < total_filtered
 
         return render_template('dashboard.html',
                              user_models=user_models,
-                             total_models=total_user_models,
-                             total_downloads=total_downloads,
-                             public_models=public_models,
-                             sort=sort, tags=tags, all_tags=all_tags)
+                             total_models=stats['total_models'],
+                             total_downloads=stats['total_downloads'],
+                             public_models=stats['public_models'],
+                             sort=sort, tags=tags, all_tags=all_tags,
+                             page=page, has_next=has_next)
     except Exception as e:
         print(f"Dashboard error: {e}")
         import traceback
@@ -105,7 +119,34 @@ def dashboard():
                              total_downloads=0,
                              public_models=0,
                              sort='newest', tags=[], all_tags=[],
+                             page=1, has_next=False,
                              error=str(e))
+
+
+@main_bp.route('/dashboard/rows')
+@login_required
+def dashboard_rows():
+    """HTML fragment of the next page of the user's model rows, for the
+    dashboard's infinite scroll. Returns the rendered _dashboard_rows.html plus
+    a tiny marker so the client knows whether more pages remain."""
+    try:
+        sort = request.args.get('sort', 'newest')
+        page = request.args.get('page', 1, type=int)
+        tags = Model3D.normalize_tags(request.args.getlist('tag'))
+        per_page = DASHBOARD_PER_PAGE
+        user_models, total_filtered = Model3D.get_user_models(
+            current_user.id, page=page, per_page=per_page,
+            sort=sort, tag=tags if tags else None)
+        _enrich_dashboard_models(user_models)
+        has_next = page * per_page < total_filtered
+        rows_html = render_template('_dashboard_rows.html', user_models=user_models)
+        # Sentinel comment lets the client read has_next without a JSON wrapper
+        # (the fragment is injected straight into <tbody>).
+        return rows_html + ('<!--has_next-->' if has_next else '<!--no_next-->')
+    except Exception as e:
+        print(f"Dashboard rows error: {e}")
+        return '<!--no_next-->'
+
 
 @main_bp.route('/browse')
 def browse():
@@ -128,12 +169,13 @@ def browse():
             sort=sort, tag=tags if tags else None)
 
         # Add owner username + whether a game-optimized variant exists (browse
-        # prefers that smaller file for the live preview) to each model.
+        # prefers that smaller file for the live preview) to each model. One
+        # batched variant query instead of per-model lookups.
+        optimized_ids = ModelVariant.model_ids_with_kind('game', [m.id for m in models])
         for model in models:
             user = User.get_by_id(model.user_id)
             model.owner_username = user.username if user else 'Unknown'
-            variant = ModelVariant.get(model.id, 'game')
-            model.has_game_optimized = bool(variant and variant.file_id)
+            model.has_game_optimized = model.id in optimized_ids
 
         pagination = Pagination(models, total, page, per_page)
         all_tags = Model3D.get_public_tags()

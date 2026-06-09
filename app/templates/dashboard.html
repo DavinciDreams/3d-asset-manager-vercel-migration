@@ -1,8 +1,9 @@
-{% extends "base.html" %}
+{% extends "base_3d.html" %}
 
 {% block title %}Dashboard - 3D Asset Manager{% endblock %}
 
 {% block content %}
+{% include "_live_previews.html" %}
 <style>
     .dashboard-thumb {
         width: 96px;
@@ -11,6 +12,7 @@
         background: linear-gradient(135deg, #f3f4f6 0%, #e5e7eb 100%);
         border: 1px solid #e5e7eb;
         overflow: hidden;
+        position: relative;  /* host for the absolute-positioned live viewer */
     }
     .dashboard-thumb-fallback {
         width: 96px;
@@ -178,165 +180,17 @@
                         <th class="px-3 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
                     </tr>
                 </thead>
-                <tbody class="bg-white divide-y divide-gray-200">
-                    {% for model in user_models %}
-                    <tr class="hover:bg-gray-50 model-row" data-model-id="{{ model.id }}"
-                        data-model-name="{{ model.name }}" data-model-tags="{{ model.tags | join(',') }}">
-                        <td class="px-3 py-4 align-top">
-                            <input type="checkbox" class="row-check h-4 w-4 text-indigo-600 border-gray-300 rounded cursor-pointer mt-1"
-                                   value="{{ model.id }}" onclick="onRowCheck()">
-                        </td>
-                        <td class="px-3 py-4">
-                            <a href="{{ url_for('main.model_detail', model_id=model.id) }}" class="block dashboard-thumb">
-                                {% if model.preview_file_id %}
-                                <video class="dashboard-thumb object-cover" autoplay loop muted playsinline
-                                       poster="{% if model.thumbnail_file_id %}{{ url_for('api.get_thumbnail', model_id=model.id) }}{% endif %}">
-                                    <source src="{{ url_for('api.get_preview', model_id=model.id) }}" type="video/webm">
-                                </video>
-                                {% elif model.thumbnail_file_id %}
-                                <img src="{{ url_for('api.get_thumbnail', model_id=model.id) }}"
-                                     alt="{{ model.name }}"
-                                     class="dashboard-thumb object-cover"
-                                     onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
-                                <div class="dashboard-thumb-fallback" style="display:none;">
-                                    <i class="fas fa-cube text-2xl text-indigo-300"></i>
-                                </div>
-                                {% else %}
-                                <div class="dashboard-thumb-fallback" title="Open the model to generate a preview">
-                                    <i class="fas fa-cube text-2xl text-indigo-300"></i>
-                                </div>
-                                {% endif %}
-                            </a>
-                        </td>
-                        <td class="px-3 py-4 col-model">
-                            <div class="flex items-center">
-                                <i class="fas fa-cube text-indigo-600 mr-3 hidden sm:block"></i>
-                                <div class="min-w-0">
-                                    <div class="text-sm font-medium text-gray-900 model-title">
-                                        {{ model.name }}
-                                        {% if model.conversion_status in ['pending', 'processing'] %}
-                                        <span class="ml-1 px-2 py-0.5 text-xs font-medium bg-yellow-100 text-yellow-800 rounded-full">
-                                            <i class="fas fa-spinner fa-spin mr-1"></i>Processing
-                                        </span>
-                                        {% elif model.conversion_status == 'failed' %}
-                                        <span class="ml-1 px-2 py-0.5 text-xs font-medium bg-red-100 text-red-800 rounded-full"
-                                              title="{{ model.conversion_error or 'Conversion failed' }}">
-                                            <i class="fas fa-exclamation-triangle mr-1"></i>Preview failed
-                                        </span>
-                                        {% endif %}
-                                    </div>
-                                    <div class="text-sm text-gray-500">{{ model.file_extension.upper() }}</div>
-                                    {% if model.tags %}
-                                    <div class="flex flex-wrap gap-1 mt-1">
-                                        {% for t in model.tags %}
-                                        <span class="bg-indigo-50 text-indigo-700 text-xs px-2 py-0.5 rounded">{{ t }}</span>
-                                        {% endfor %}
-                                    </div>
-                                    {% endif %}
-                                </div>
-                            </div>
-                        </td>
-                        <td class="px-3 py-4 whitespace-nowrap text-sm text-gray-900">
-                            {{ model.get_file_size_formatted() }}
-                        </td>
-                        <td class="px-3 py-4 whitespace-nowrap text-sm text-gray-900 hidden lg:table-cell">
-                            {{ model.download_count }}
-                        </td>
-                        <td class="px-3 py-4 whitespace-nowrap">
-                            {% if model.is_public %}
-                            <span class="px-2 py-1 text-xs font-medium bg-green-100 text-green-800 rounded-full">
-                                Public
-                            </span>
-                            {% else %}
-                            <span class="px-2 py-1 text-xs font-medium bg-gray-100 text-gray-800 rounded-full">
-                                Private
-                            </span>
-                            {% endif %}
-                        </td>
-                        <td class="px-3 py-4 whitespace-nowrap text-sm text-gray-500 hidden lg:table-cell">
-                            {{ model.upload_date.strftime('%Y-%m-%d') }}
-                        </td>
-                        <td class="px-3 py-4 whitespace-nowrap text-right">
-                            <div class="inline-flex items-center gap-0.5">
-                                <a href="{{ url_for('main.model_detail', model_id=model.id) }}"
-                                   class="row-action text-indigo-600 hover:text-indigo-900" title="View">
-                                    <i class="fas fa-eye"></i>
-                                </a>
-                                <button type="button" onclick="toggleQuickEdit('{{ model.id }}')"
-                                        class="row-action text-blue-600 hover:text-blue-900" title="Edit">
-                                    <i class="fas fa-pen"></i>
-                                </button>
-                                {# Rotating-preview (re)generate icon hidden: client-side MediaRecorder
-                                   capture can black out the page on some GPUs (CAPTURE_ENABLED=false
-                                   in model_detail.html). Restore alongside that kill switch.
-                                {% if model.file_format != 'vrma' %}
-                                <a href="{{ url_for('main.model_detail', model_id=model.id) }}?regen=1"
-                                   class="row-action text-purple-600 hover:text-purple-900"
-                                   title="{% if model.preview_file_id %}Regenerate{% else %}Generate{% endif %} rotating preview">
-                                    <i class="fas fa-film"></i>
-                                </a>
-                                {% endif %}
-                                #}
-                                {% if model.file_format in ['glb', 'gltf'] %}
-                                <button type="button" onclick="optimizeModel('{{ model.id }}', this)"
-                                        class="row-action text-teal-600 hover:text-teal-900"
-                                        title="Optimize for game (creates a smaller copy)">
-                                    <i class="fas fa-gamepad"></i>
-                                </button>
-                                {% endif %}
-                                <a href="{{ url_for('api.download_model', model_id=model.id) }}"
-                                   class="row-action text-green-600 hover:text-green-900" title="Download">
-                                    <i class="fas fa-download"></i>
-                                </a>
-                                <button onclick="deleteModel('{{ model.id }}')"
-                                        class="row-action text-red-600 hover:text-red-900" title="Delete">
-                                    <i class="fas fa-trash"></i>
-                                </button>
-                            </div>
-                        </td>
-                    </tr>
-                    <!-- Inline quick-edit row (hidden until "Edit" is clicked) -->
-                    <tr id="quick-edit-{{ model.id }}" class="hidden bg-blue-50">
-                        <td colspan="8" class="px-6 py-4">
-                            <form onsubmit="return saveQuickEdit(event, '{{ model.id }}')" class="space-y-3">
-                                <div class="grid md:grid-cols-2 gap-3">
-                                    <div>
-                                        <label class="block text-xs font-semibold text-gray-700 mb-1">Title</label>
-                                        <input type="text" id="qe-name-{{ model.id }}" value="{{ model.name }}" required
-                                               class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-                                    </div>
-                                    <div class="flex items-end">
-                                        <label class="flex items-center text-sm text-gray-700">
-                                            <input type="checkbox" id="qe-public-{{ model.id }}" {% if model.is_public %}checked{% endif %}
-                                                   class="h-4 w-4 text-blue-600 border-gray-300 rounded mr-2">
-                                            Public (visible to everyone)
-                                        </label>
-                                    </div>
-                                </div>
-                                <div>
-                                    <label class="block text-xs font-semibold text-gray-700 mb-1">Description</label>
-                                    <textarea id="qe-desc-{{ model.id }}" rows="2"
-                                              class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">{{ model.description or '' }}</textarea>
-                                </div>
-                                <div class="relative">
-                                    <label class="block text-xs font-semibold text-gray-700 mb-1">Tags (comma-separated)</label>
-                                    <input type="text" id="qe-tags-{{ model.id }}" value="{{ model.tags | join(', ') }}"
-                                           autocomplete="off" data-tag-autocomplete
-                                           placeholder="character, rigged, walk-cycle"
-                                           class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-                                </div>
-                                <div class="flex space-x-2">
-                                    <button type="submit"
-                                            class="bg-green-600 text-white px-4 py-2 rounded text-sm hover:bg-green-700">Save</button>
-                                    <button type="button" onclick="toggleQuickEdit('{{ model.id }}')"
-                                            class="bg-gray-300 text-gray-800 px-4 py-2 rounded text-sm hover:bg-gray-400">Cancel</button>
-                                </div>
-                            </form>
-                        </td>
-                    </tr>
-                    {% endfor %}
+                <tbody id="models-tbody" class="bg-white divide-y divide-gray-200">
+                    {% include "_dashboard_rows.html" %}
                 </tbody>
             </table>
+        </div>
+        <!-- Infinite-scroll sentinel + status for the rows -->
+        <div id="rows-sentinel" class="h-8"></div>
+        <div id="rows-status" class="flex justify-center py-4 text-gray-400 text-sm" aria-live="polite">
+            {% if has_next %}
+            <span id="rows-spinner" class="hidden"><i class="fas fa-spinner fa-spin mr-2"></i>Loading more…</span>
+            {% endif %}
         </div>
         {% else %}
         <div class="p-12 text-center">
@@ -353,6 +207,69 @@
 </div>
 
 <script>
+// Live rotating 3D previews per row + infinite scroll of the rows themselves.
+(function () {
+    const params = {
+        sort: {{ (sort or 'newest') | tojson }},
+        tags: {{ (tags or []) | tojson }},
+    };
+    let page = {{ page or 1 }};
+    let hasNext = {{ 'true' if has_next else 'false' }};
+    let loading = false;
+
+    function observeNew(root) {
+        if (window.LivePreviews) {
+            window.LivePreviews.observeMediaIn(root);
+            window.LivePreviews.observeLiveIn(root);
+        }
+    }
+    document.addEventListener('DOMContentLoaded', () => observeNew(document));
+
+    async function loadMoreRows() {
+        if (loading || !hasNext) return;
+        const tbody = document.getElementById('models-tbody');
+        const spinner = document.getElementById('rows-spinner');
+        const statusEl = document.getElementById('rows-status');
+        if (!tbody) return;
+        loading = true;
+        if (spinner) spinner.classList.remove('hidden');
+        try {
+            const usp = new URLSearchParams();
+            usp.set('page', String(page + 1));
+            if (params.sort) usp.set('sort', params.sort);
+            params.tags.forEach((t) => usp.append('tag', t));
+            const res = await fetch(`/dashboard/rows?${usp.toString()}`, { headers: { 'Accept': 'text/html' } });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const html = await res.text();
+            hasNext = html.includes('<!--has_next-->');
+            // Append the new <tr> rows. Parse within a <table> context so the
+            // browser keeps the row structure intact.
+            const tmpl = document.createElement('template');
+            tmpl.innerHTML = `<table><tbody>${html}</tbody></table>`;
+            const newRows = Array.from(tmpl.content.querySelector('tbody').children);
+            newRows.forEach((r) => tbody.appendChild(r));
+            observeNew(tbody);
+            page += 1;
+            if (!hasNext && statusEl) statusEl.innerHTML = '<span>That’s everything.</span>';
+        } catch (err) {
+            console.error('Failed to load more rows:', err);
+            const statusEl = document.getElementById('rows-status');
+            if (statusEl) statusEl.innerHTML = '<button class="text-indigo-600 hover:underline" onclick="document.getElementById(\'rows-status\').innerHTML=\'\';window.__dashLoadMore&&window.__dashLoadMore()">Couldn’t load more — retry</button>';
+            sentinelObserver.disconnect();
+        } finally {
+            loading = false;
+            if (spinner) spinner.classList.add('hidden');
+        }
+    }
+    window.__dashLoadMore = loadMoreRows;
+
+    const sentinel = document.getElementById('rows-sentinel');
+    const sentinelObserver = new IntersectionObserver((entries) => {
+        if (entries.some((e) => e.isIntersecting)) loadMoreRows();
+    }, { rootMargin: '400px 0px' });
+    if (sentinel && hasNext) sentinelObserver.observe(sentinel);
+})();
+
 // Toggle the inline quick-edit row for a model
 function toggleQuickEdit(modelId) {
     const row = document.getElementById(`quick-edit-${modelId}`);
