@@ -108,14 +108,33 @@
                    {% if viewable %}data-view-src="{{ url_for('api.view_model', model_id=model.id) }}?viewer=2"{% endif %}
                    {% if model.camera_orbit %}data-camera-orbit="{{ model.camera_orbit }}"{% endif %}
                    {% if model.thumbnail_file_id %}data-thumb-src="{{ url_for('api.get_thumbnail', model_id=model.id) }}"{% endif %}>
-                    {% if model.preview_file_id %}
-                        {# Has a cached rotating preview -> cheap <video>, played by the observer when visible. #}
+                    {% if viewable %}
+                        {# Viewable models ALWAYS use the live rotating 3D viewer
+                           (mounted on view), so they spin consistently. The
+                           thumbnail/icon is just the placeholder shown until the
+                           viewer mounts. Cached preview videos are intentionally
+                           NOT used here -- some are stale/frozen from earlier
+                           capture experiments and looked static. #}
+                        {% if model.thumbnail_file_id %}
+                        <img alt="{{ model.name }}" class="w-full h-full object-cover lazy-media"
+                             loading="lazy"
+                             data-img-src="{{ url_for('api.get_thumbnail', model_id=model.id) }}"
+                             onerror="this.style.display='none';this.nextElementSibling.style.display='flex';">
+                        <div class="absolute inset-0 hidden items-center justify-center text-gray-300">
+                            <i class="fas fa-cube text-3xl"></i>
+                        </div>
+                        {% else %}
+                        <div class="absolute inset-0 flex items-center justify-center text-gray-300">
+                            <i class="fas fa-cube text-3xl"></i>
+                        </div>
+                        {% endif %}
+                    {% elif model.preview_file_id %}
+                        {# Non-viewable but has a cached preview -> cheap <video>. #}
                         <video class="w-full h-full object-cover lazy-media" loop muted playsinline
                                preload="none"
                                data-preview-src="{{ url_for('api.get_preview', model_id=model.id) }}"
                                poster="{% if model.thumbnail_file_id %}{{ url_for('api.get_thumbnail', model_id=model.id) }}{% endif %}"></video>
                     {% elif model.thumbnail_file_id %}
-                        {# No preview yet: show thumbnail now; a live 3D viewer mounts on view (and captures for the owner). #}
                         <img alt="{{ model.name }}" class="w-full h-full object-cover lazy-media"
                              loading="lazy"
                              data-img-src="{{ url_for('api.get_thumbnail', model_id=model.id) }}"
@@ -234,10 +253,11 @@
             const liveWanted = new Set();   // cards currently in view wanting a live viewer
 
             function liveEligible(card) {
+                // Every viewable card gets the live rotating viewer (cached
+                // preview videos are not used for viewable models on browse).
                 return card
                     && card.dataset.viewable === '1'
-                    && !card.dataset.liveDone
-                    && !card.querySelector('video[data-preview-src]'); // already has cached preview
+                    && !card.dataset.liveDone;
             }
 
             async function mountLive(card) {
@@ -374,8 +394,17 @@
             }
 
             function cardHtml(m) {
+                const viewableM = m.viewable && m.view_url;
                 let media;
-                if (m.has_preview && m.preview_url) {
+                if (viewableM && m.thumbnail_url) {
+                    // Viewable -> live viewer mounts on view; thumbnail is the placeholder.
+                    media = `<img alt="${esc(m.name)}" class="w-full h-full object-cover lazy-media" loading="lazy"
+                                 data-img-src="${esc(m.thumbnail_url)}"
+                                 onerror="this.style.display='none';this.nextElementSibling.style.display='flex';">
+                             <div class="absolute inset-0 hidden items-center justify-center text-gray-300"><i class="fas fa-cube text-3xl"></i></div>`;
+                } else if (viewableM) {
+                    media = `<div class="absolute inset-0 flex items-center justify-center text-gray-300"><i class="fas fa-cube text-3xl"></i></div>`;
+                } else if (m.has_preview && m.preview_url) {
                     media = `<video class="w-full h-full object-cover lazy-media" loop muted playsinline preload="none"
                                  data-preview-src="${esc(m.preview_url)}"
                                  ${m.thumbnail_url ? `poster="${esc(m.thumbnail_url)}"` : ''}></video>`;
