@@ -6,7 +6,7 @@ from flask_login import UserMixin
 from sqlalchemy import and_, desc, func, or_, select, true, update
 from werkzeug.security import check_password_hash, generate_password_hash
 
-from app.db import asset_files, count_rows, models, users, world_states
+from app.db import asset_files, bundles, count_rows, models, users, world_states
 
 
 class User(UserMixin):
@@ -87,7 +87,11 @@ class Model3D:
                  preview_file_id=None, default_animation=None, default_vrma_id=None,
                  viewable_file_id=None, viewable_format=None,
                  conversion_status=None, conversion_error=None,
-                 conversion_claimed_at=None, vrma_file_id=None):
+                 conversion_claimed_at=None, vrma_file_id=None,
+                 ai_status=None, ai_error=None, ai_description=None,
+                 ai_tags=None, ai_metadata=None, approve_game_ready=False,
+                 approve_asset_store=False, approval_notes=None,
+                 approval_updated_at=None):
         self.name = name
         self.description = description
         self.file_format = file_format
@@ -111,6 +115,15 @@ class Model3D:
         self.conversion_error = conversion_error
         self.conversion_claimed_at = conversion_claimed_at
         self.vrma_file_id = vrma_file_id
+        self.ai_status = ai_status
+        self.ai_error = ai_error
+        self.ai_description = ai_description
+        self.ai_tags = ai_tags or []
+        self.ai_metadata = ai_metadata or {}
+        self.approve_game_ready = bool(approve_game_ready)
+        self.approve_asset_store = bool(approve_asset_store)
+        self.approval_notes = approval_notes
+        self.approval_updated_at = approval_updated_at
 
     def save(self):
         engine = current_app.config["DB_ENGINE"]
@@ -137,6 +150,15 @@ class Model3D:
             "conversion_error": self.conversion_error,
             "conversion_claimed_at": self.conversion_claimed_at,
             "vrma_file_id": self.vrma_file_id,
+            "ai_status": self.ai_status,
+            "ai_error": self.ai_error,
+            "ai_description": self.ai_description,
+            "ai_tags": self.ai_tags or [],
+            "ai_metadata": self.ai_metadata or {},
+            "approve_game_ready": self.approve_game_ready,
+            "approve_asset_store": self.approve_asset_store,
+            "approval_notes": self.approval_notes,
+            "approval_updated_at": self.approval_updated_at,
         }
 
         with engine.begin() as conn:
@@ -254,6 +276,15 @@ class Model3D:
             conversion_error=model_data.get("conversion_error"),
             conversion_claimed_at=model_data.get("conversion_claimed_at"),
             vrma_file_id=model_data.get("vrma_file_id"),
+            ai_status=model_data.get("ai_status"),
+            ai_error=model_data.get("ai_error"),
+            ai_description=model_data.get("ai_description"),
+            ai_tags=model_data.get("ai_tags") or [],
+            ai_metadata=model_data.get("ai_metadata") or {},
+            approve_game_ready=model_data.get("approve_game_ready", False),
+            approve_asset_store=model_data.get("approve_asset_store", False),
+            approval_notes=model_data.get("approval_notes"),
+            approval_updated_at=model_data.get("approval_updated_at"),
         )
 
     @staticmethod
@@ -442,6 +473,129 @@ class Model3D:
             "public_models": public_models,
             "total_downloads": total_downloads,
         }
+
+
+class AssetBundle:
+    def __init__(self, name=None, description=None, owner_id=None, is_public=False,
+                 model_ids=None, tags=None, status="draft", file_id=None,
+                 metadata=None, _id=None, created_at=None, updated_at=None):
+        self.id = str(_id) if _id else None
+        self.name = name
+        self.description = description or ""
+        self.owner_id = owner_id
+        self.is_public = bool(is_public)
+        self.model_ids = model_ids or []
+        self.tags = tags or []
+        self.status = status or "draft"
+        self.file_id = file_id
+        self.metadata = metadata or {}
+        self.created_at = created_at or datetime.utcnow()
+        self.updated_at = updated_at or datetime.utcnow()
+
+    @staticmethod
+    def from_row(row):
+        if not row:
+            return None
+        return AssetBundle(
+            name=row.name,
+            description=row.description,
+            owner_id=row.owner_id,
+            is_public=row.is_public,
+            model_ids=row.model_ids or [],
+            tags=row.tags or [],
+            status=row.status,
+            file_id=row.file_id,
+            metadata=row.metadata or {},
+            _id=row.id,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+        )
+
+    def save(self):
+        engine = current_app.config["DB_ENGINE"]
+        self.updated_at = datetime.utcnow()
+        values = {
+            "name": self.name,
+            "description": self.description or "",
+            "owner_id": self.owner_id,
+            "is_public": self.is_public,
+            "model_ids": self.model_ids or [],
+            "tags": self.tags or [],
+            "status": self.status or "draft",
+            "file_id": self.file_id,
+            "metadata": self.metadata or {},
+            "updated_at": self.updated_at,
+        }
+        with engine.begin() as conn:
+            if self.id:
+                conn.execute(update(bundles).where(bundles.c.id == self.id).values(**values))
+            else:
+                self.id = str(uuid.uuid4())
+                conn.execute(bundles.insert().values(id=self.id, created_at=self.created_at, **values))
+        return self
+
+    def models(self):
+        found = []
+        for model_id in self.model_ids:
+            model = Model3D.get_by_id(model_id)
+            if model:
+                found.append(model)
+        return found
+
+    def to_api(self, include_models=False):
+        data = {
+            "id": self.id,
+            "name": self.name,
+            "description": self.description,
+            "owner": {"id": self.owner_id},
+            "is_public": self.is_public,
+            "model_ids": self.model_ids,
+            "tags": self.tags,
+            "status": self.status,
+            "has_file": bool(self.file_id),
+            "metadata": self.metadata,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+        if include_models:
+            data["models"] = [
+                {
+                    "id": model.id,
+                    "name": model.name,
+                    "file_format": model.file_format,
+                    "approve_game_ready": model.approve_game_ready,
+                    "approve_asset_store": model.approve_asset_store,
+                }
+                for model in self.models()
+            ]
+        return data
+
+    @staticmethod
+    def get(bundle_id):
+        engine = current_app.config["DB_ENGINE"]
+        with engine.begin() as conn:
+            row = conn.execute(select(bundles).where(bundles.c.id == str(bundle_id))).mappings().first()
+        return AssetBundle.from_row(row)
+
+    @staticmethod
+    def list_for_user(user_id=None, page=1, per_page=20, public_only=True):
+        engine = current_app.config["DB_ENGINE"]
+        predicates = []
+        if public_only:
+            predicates.append(bundles.c.is_public.is_(True))
+        elif user_id:
+            predicates.append(or_(bundles.c.is_public.is_(True), bundles.c.owner_id == str(user_id)))
+        where = and_(*predicates) if predicates else true()
+        with engine.begin() as conn:
+            total = count_rows(conn, bundles, where)
+            rows = conn.execute(
+                select(bundles)
+                .where(where)
+                .order_by(desc(bundles.c.updated_at))
+                .offset((page - 1) * per_page)
+                .limit(per_page)
+            ).mappings().all()
+        return [AssetBundle.from_row(row) for row in rows], total
 
 
 class WorldState:

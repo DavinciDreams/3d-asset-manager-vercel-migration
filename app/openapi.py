@@ -25,6 +25,7 @@ def _model_summary_schema():
             'is_public': {'type': 'boolean', 'example': True},
             'upload_date': {'type': 'string', 'format': 'date-time', 'nullable': True},
             'download_count': {'type': 'integer', 'example': 12},
+            'tags': {'type': 'array', 'items': {'type': 'string'}},
             'conversion_status': {
                 'type': 'string',
                 'nullable': True,
@@ -32,6 +33,11 @@ def _model_summary_schema():
             },
             'has_viewable': {'type': 'boolean'},
             'has_vrma': {'type': 'boolean'},
+            'ai_status': {'type': 'string', 'nullable': True, 'enum': ['done', 'failed', None]},
+            'ai_description': {'type': 'string', 'nullable': True},
+            'ai_tags': {'type': 'array', 'items': {'type': 'string'}},
+            'approve_game_ready': {'type': 'boolean'},
+            'approve_asset_store': {'type': 'boolean'},
             'owner': {
                 'type': 'object',
                 'properties': {
@@ -82,9 +88,9 @@ def get_openapi_spec(base_url=''):
             'title': '3D Asset Manager API',
             'description': (
                 'REST API for browsing, uploading, viewing and downloading 3D '
-                'models. Authenticated endpoints use the session cookie set by '
-                'the web login at `/auth/login` (Flask-Login). Call those from a '
-                'logged-in browser session or a client that carries the cookie.'
+                'models. Authenticated endpoints accept either the session cookie '
+                'set by `/auth/login` or `Authorization: Bearer <token>` when '
+                'ASSET_MANAGER_API_TOKEN/API_UPLOAD_TOKEN is configured.'
             ),
             'version': '1.0.0',
         },
@@ -94,6 +100,8 @@ def get_openapi_spec(base_url=''):
             {'name': 'Models', 'description': 'List, view, update and delete models'},
             {'name': 'Files', 'description': 'Download and view model binaries and thumbnails'},
             {'name': 'Upload', 'description': 'Upload new models'},
+            {'name': 'Workflows', 'description': 'Conversion, AI enrichment and approval workflows'},
+            {'name': 'Bundles', 'description': 'Create and download multi-asset bundles'},
         ],
         'components': {
             'securitySchemes': {
@@ -102,7 +110,12 @@ def get_openapi_spec(base_url=''):
                     'in': 'cookie',
                     'name': 'session',
                     'description': 'Flask-Login session cookie obtained via /auth/login.',
-                }
+                },
+                'bearerAuth': {
+                    'type': 'http',
+                    'scheme': 'bearer',
+                    'description': 'Configured API token for uploads and automation.',
+                },
             },
             'schemas': {
                 'Error': {
@@ -129,6 +142,20 @@ def get_openapi_spec(base_url=''):
                         'public_models': {'type': 'integer', 'example': 42},
                         'total_users': {'type': 'integer', 'example': 8},
                         'total_downloads': {'type': 'integer', 'example': 310},
+                    },
+                },
+                'Bundle': {
+                    'type': 'object',
+                    'properties': {
+                        'id': {'type': 'string'},
+                        'name': {'type': 'string'},
+                        'description': {'type': 'string'},
+                        'is_public': {'type': 'boolean'},
+                        'model_ids': {'type': 'array', 'items': {'type': 'string'}},
+                        'tags': {'type': 'array', 'items': {'type': 'string'}},
+                        'status': {'type': 'string', 'example': 'draft'},
+                        'has_file': {'type': 'boolean'},
+                        'metadata': {'type': 'object'},
                     },
                 },
             },
@@ -222,7 +249,7 @@ def get_openapi_spec(base_url=''):
                 'get': {
                     'tags': ['Models'],
                     'summary': "List the current user's models",
-                    'security': [{'sessionCookie': []}],
+                    'security': [{'sessionCookie': []}, {'bearerAuth': []}],
                     'parameters': [
                         {
                             'name': 'page', 'in': 'query',
@@ -563,6 +590,177 @@ def get_openapi_spec(base_url=''):
                         '500': _error_response('Thumbnail upload failed'),
                     },
                 },
+            },
+            '/model/{model_id}/conversion': {
+                'parameters': [{'name': 'model_id', 'in': 'path', 'required': True, 'schema': {'type': 'string'}}],
+                'post': {
+                    'tags': ['Workflows'],
+                    'summary': 'Requeue model conversion',
+                    'security': [{'sessionCookie': []}, {'bearerAuth': []}],
+                    'responses': {
+                        '200': {'description': 'Queued', 'content': {'application/json': {'schema': {'type': 'object'}}}},
+                        '401': _error_response('Authentication required'),
+                        '403': _error_response('Access denied'),
+                        '404': _error_response('Model not found'),
+                        '503': _error_response('Conversion disabled'),
+                    },
+                },
+            },
+            '/model/{model_id}/optimize-game': {
+                'parameters': [{'name': 'model_id', 'in': 'path', 'required': True, 'schema': {'type': 'string'}}],
+                'post': {
+                    'tags': ['Workflows'],
+                    'summary': 'Create a game-optimized GLB copy',
+                    'description': 'Uses gltfpack to create a smaller GLB copy. Choose meshopt for the smallest file or fallback for broader compatibility. The source asset is not replaced.',
+                    'security': [{'sessionCookie': []}, {'bearerAuth': []}],
+                    'requestBody': {
+                        'content': {
+                            'application/json': {
+                                'schema': {
+                                    'type': 'object',
+                                    'properties': {
+                                        'texture_limit': {
+                                            'type': 'integer',
+                                            'default': 1024,
+                                            'enum': [0, 1024, 2048, 4096],
+                                        },
+                                        'simplify_ratio': {
+                                            'type': 'number',
+                                            'default': 0.75,
+                                            'minimum': 0.01,
+                                            'maximum': 1,
+                                        },
+                                        'compression_mode': {
+                                            'type': 'string',
+                                            'default': 'meshopt',
+                                            'enum': ['meshopt', 'fallback'],
+                                        },
+                                        'name': {'type': 'string'},
+                                    },
+                                }
+                            }
+                        }
+                    },
+                    'responses': {
+                        '201': {'description': 'Optimized copy created', 'content': {'application/json': {'schema': {'type': 'object'}}}},
+                        '400': _error_response('Unsupported format or invalid settings'),
+                        '401': _error_response('Authentication required'),
+                        '403': _error_response('Access denied'),
+                        '404': _error_response('Model or source file not found'),
+                        '502': _error_response('Optimization failed'),
+                        '503': _error_response('Optimizer unavailable'),
+                        '504': _error_response('Optimization timed out'),
+                    },
+                },
+            },
+            '/model/{model_id}/ai/autotag': {
+                'parameters': [{'name': 'model_id', 'in': 'path', 'required': True, 'schema': {'type': 'string'}}],
+                'post': {
+                    'tags': ['Workflows'],
+                    'summary': 'AI autotag and describe a model',
+                    'security': [{'sessionCookie': []}, {'bearerAuth': []}],
+                    'requestBody': {
+                        'content': {
+                            'application/json': {
+                                'schema': {
+                                    'type': 'object',
+                                    'properties': {
+                                        'overwrite': {'type': 'boolean', 'default': True},
+                                        'include_description': {'type': 'boolean', 'default': True},
+                                        'context': {'type': 'object'},
+                                    },
+                                }
+                            }
+                        }
+                    },
+                    'responses': {
+                        '200': {'description': 'Enriched', 'content': {'application/json': {'schema': {'type': 'object'}}}},
+                        '401': _error_response('Authentication required'),
+                        '403': _error_response('Access denied'),
+                        '404': _error_response('Model not found'),
+                        '502': _error_response('AI enrichment failed'),
+                    },
+                },
+            },
+            '/model/{model_id}/approval': {
+                'parameters': [{'name': 'model_id', 'in': 'path', 'required': True, 'schema': {'type': 'string'}}],
+                'patch': {
+                    'tags': ['Workflows'],
+                    'summary': 'Approve model for game-ready and asset-store workflows',
+                    'security': [{'sessionCookie': []}, {'bearerAuth': []}],
+                    'requestBody': {
+                        'content': {
+                            'application/json': {
+                                'schema': {
+                                    'type': 'object',
+                                    'properties': {
+                                        'approve_game_ready': {'type': 'boolean'},
+                                        'approve_asset_store': {'type': 'boolean'},
+                                        'approval_notes': {'type': 'string'},
+                                    },
+                                }
+                            }
+                        }
+                    },
+                    'responses': {
+                        '200': {'description': 'Updated', 'content': {'application/json': {'schema': {'type': 'object'}}}},
+                        '401': _error_response('Authentication required'),
+                        '403': _error_response('Access denied'),
+                        '404': _error_response('Model not found'),
+                    },
+                },
+                'put': {
+                    'tags': ['Workflows'],
+                    'summary': 'Approve model for game-ready and asset-store workflows',
+                    'security': [{'sessionCookie': []}, {'bearerAuth': []}],
+                    'responses': {'200': {'description': 'Updated'}},
+                },
+            },
+            '/bundles': {
+                'get': {
+                    'tags': ['Bundles'],
+                    'summary': 'List bundles',
+                    'responses': {'200': {'description': 'Bundles'}},
+                },
+                'post': {
+                    'tags': ['Bundles'],
+                    'summary': 'Create a bundle from model ids',
+                    'security': [{'sessionCookie': []}, {'bearerAuth': []}],
+                    'requestBody': {
+                        'required': True,
+                        'content': {
+                            'application/json': {
+                                'schema': {
+                                    'type': 'object',
+                                    'required': ['model_ids'],
+                                    'properties': {
+                                        'model_ids': {'type': 'array', 'items': {'type': 'string'}},
+                                        'name': {'type': 'string'},
+                                        'description': {'type': 'string'},
+                                        'tags': {'type': 'array', 'items': {'type': 'string'}},
+                                        'is_public': {'type': 'boolean'},
+                                        'status': {'type': 'string', 'default': 'draft'},
+                                        'create_zip': {'type': 'boolean', 'default': True},
+                                    },
+                                }
+                            }
+                        },
+                    },
+                    'responses': {
+                        '201': {'description': 'Bundle created', 'content': {'application/json': {'schema': {'type': 'object'}}}},
+                        '400': _error_response('Invalid request'),
+                        '401': _error_response('Authentication required'),
+                        '403': _error_response('Access denied'),
+                    },
+                },
+            },
+            '/bundles/{bundle_id}': {
+                'parameters': [{'name': 'bundle_id', 'in': 'path', 'required': True, 'schema': {'type': 'string'}}],
+                'get': {'tags': ['Bundles'], 'summary': 'Get bundle details', 'responses': {'200': {'description': 'Bundle'}}},
+            },
+            '/bundles/{bundle_id}/download': {
+                'parameters': [{'name': 'bundle_id', 'in': 'path', 'required': True, 'schema': {'type': 'string'}}],
+                'get': {'tags': ['Bundles'], 'summary': 'Download bundle zip', 'responses': {'200': {'description': 'Bundle zip'}}},
             },
             '/upload': {
                 'post': {

@@ -9,6 +9,7 @@ WORKDIR /app
 # System tools for mesh conversion and FBX animation extraction.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         assimp-utils \
+        gltfpack \
         nodejs \
         npm \
         curl \
