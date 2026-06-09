@@ -582,6 +582,19 @@ class Model3D:
             return []
 
     @staticmethod
+    def optimizable_ids():
+        """All GLB/GLTF model ids (the formats gltfpack can game-optimize),
+        newest first. Used by the admin backfill to find work."""
+        engine = current_app.config["DB_ENGINE"]
+        with engine.begin() as conn:
+            rows = conn.execute(
+                select(models.c.id)
+                .where(models.c.file_format.in_(["glb", "gltf"]))
+                .order_by(models.c.upload_date.desc())
+            ).all()
+        return [str(r.id) for r in rows]
+
+    @staticmethod
     def list_vrma_for_user(user_id=None):
         engine = current_app.config["DB_ENGINE"]
         predicates = [models.c.file_format == "vrma"]

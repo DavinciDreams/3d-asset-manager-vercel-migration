@@ -123,6 +123,15 @@ def dashboard():
                              error=str(e))
 
 
+@main_bp.route('/admin/optimize')
+def admin_optimize_page():
+    """Browser page to trigger + watch the game-optimize backfill. The page
+    itself is not secret; the actions it calls are token-gated. The token is
+    read from ?token= and passed through to the API calls."""
+    token = request.args.get('token', '')
+    return render_template('admin_optimize.html', token=token)
+
+
 @main_bp.route('/dashboard/rows')
 @login_required
 def dashboard_rows():
