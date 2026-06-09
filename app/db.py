@@ -149,6 +149,26 @@ optimization_jobs = Table(
     Column("finished_at", DateTime),
 )
 
+# Derived files that belong to a source model (game-optimized GLB now; LOD
+# levels later). One row per variant; (model_id, kind, level) is unique so a
+# model can hold e.g. a 'game' variant plus a 'lod' chain (level 0/1/2...).
+model_variants = Table(
+    "model_variants",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("model_id", String(36), ForeignKey("models.id"), nullable=False, index=True),
+    Column("kind", String(40), nullable=False),       # 'game', 'lod', ...
+    Column("level", Integer),                          # LOD level; NULL for 'game'
+    Column("file_id", String(36), ForeignKey("asset_files.id")),
+    Column("file_format", String(20), nullable=False, default="glb"),
+    Column("size", Integer, nullable=False, default=0),
+    Column("settings", _json_type(), nullable=False, default=dict),
+    Column("status", String(40), nullable=False, default="ready"),
+    Column("created_at", DateTime, nullable=False, default=datetime.utcnow),
+    Column("updated_at", DateTime, nullable=False, default=datetime.utcnow),
+    UniqueConstraint("model_id", "kind", "level", name="uq_model_variants_model_kind_level"),
+)
+
 world_states = Table(
     "world_states",
     metadata,
@@ -364,6 +384,7 @@ def init_database(engine):
     _ensure_model_columns(engine)
     _ensure_bundle_table(engine)
     _ensure_optimization_job_table(engine)
+    _ensure_model_variants_table(engine)
 
 
 def _ensure_asset_file_columns(engine):
@@ -425,6 +446,11 @@ def _ensure_bundle_table(engine):
 def _ensure_optimization_job_table(engine):
     if not inspect(engine).has_table("optimization_jobs"):
         optimization_jobs.create(engine, checkfirst=True)
+
+
+def _ensure_model_variants_table(engine):
+    if not inspect(engine).has_table("model_variants"):
+        model_variants.create(engine, checkfirst=True)
 
 
 @contextmanager

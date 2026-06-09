@@ -92,6 +92,18 @@
                 {% endif %}
             </div>
 
+            <!-- Original / Game-Optimized toggle (revealed when a game variant exists) -->
+            <div id="variant-toggle" class="{% if not model.has_game_optimized %}hidden {% endif %}mt-3 inline-flex rounded-lg border border-gray-200 overflow-hidden text-sm">
+                <button type="button" id="variant-btn-original" onclick="switchVariant('original')"
+                        class="px-4 py-2 font-medium bg-indigo-600 text-white">
+                    Original
+                </button>
+                <button type="button" id="variant-btn-game" onclick="switchVariant('game')"
+                        class="px-4 py-2 font-medium bg-white text-gray-700 hover:bg-gray-50">
+                    <i class="fas fa-gamepad mr-1"></i>Game-Optimized<span id="variant-game-size"></span>
+                </button>
+            </div>
+
             <!-- Animation Controls (shown only if the model has animations) -->
             <div id="animation-controls" class="hidden mt-4 flex items-center space-x-3 bg-gray-50 rounded-lg p-3">
                 <button id="play-pause-btn" onclick="togglePlayPause()"
@@ -165,6 +177,11 @@
                             VRMA (animation)
                         </a>
                         {% endif %}
+                        <div id="export-game-divider" class="border-t border-gray-100 my-1 {% if not model.has_game_optimized %}hidden{% endif %}"></div>
+                        <a id="export-game-link" href="{{ url_for('api.get_game_optimized', model_id=model.id, download=1) }}"
+                           class="block px-4 py-2 text-sm text-teal-700 hover:bg-teal-50 {% if not model.has_game_optimized %}hidden{% endif %}">
+                            <i class="fas fa-gamepad mr-1"></i>Game-optimized GLB
+                        </a>
                     </div>
                 </div>
                 {% if current_user.is_authenticated %}
@@ -363,17 +380,32 @@ const HAS_PREVIEW = {{ (model.preview_file_id is not none) | tojson }};
 // Is the current user the owner? Only owners capture/upload thumbnails.
 const IS_OWNER = {{ (current_user.is_authenticated and current_user.id == model.user_id) | tojson }};
 
-function loadDetailModel(modelId) {
+// Which variant is currently shown: 'original' or 'game'.
+let CURRENT_VARIANT = 'original';
+
+function loadDetailModel(modelId, variant) {
     const container = document.getElementById(`viewer-detail-${modelId}`);
     if (!container) return;
+    variant = variant || CURRENT_VARIANT;
+    CURRENT_VARIANT = variant;
+
+    // The game-optimized variant is served from its own endpoint; the original
+    // uses the default view URL (passing undefined lets the viewer default it).
+    const srcUrl = variant === 'game'
+        ? `/api/model/${modelId}/game-optimized`
+        : undefined;
 
     try {
         const handleDetailLoad = () => {
-            if (IS_OWNER && FORCE_REGEN) {
-                setTimeout(() => captureThumbnail(false), 800);
-            }
-            if (IS_OWNER && FORCE_REGEN && !SAVED_CAMERA_ORBIT) {
-                setTimeout(() => captureModelViewerPreview(), 1200);
+            // Only (re)capture media from the ORIGINAL — the optimized variant
+            // should never overwrite the model's thumbnail/preview.
+            if (variant === 'original') {
+                if (IS_OWNER && FORCE_REGEN) {
+                    setTimeout(() => captureThumbnail(false), 800);
+                }
+                if (IS_OWNER && FORCE_REGEN && !SAVED_CAMERA_ORBIT) {
+                    setTimeout(() => captureModelViewerPreview(), 1200);
+                }
             }
             setupAnimationControls();
         };
@@ -383,6 +415,7 @@ function loadDetailModel(modelId) {
             name: '{{ model.name }}',
             description: '{{ model.description }}',
             format: '{{ model.file_format }}',
+            srcUrl: srcUrl,
             cameraOrbit: SAVED_CAMERA_ORBIT,
             onLoad: handleDetailLoad,
         });
@@ -401,6 +434,39 @@ function loadDetailModel(modelId) {
             </div>
         `;
     }
+}
+
+// Toggle the detail viewer between the original asset and its game-optimized
+// variant. Reloads the viewer with the appropriate source and updates button
+// styling. No-op if the variant viewer hasn't been loaded yet.
+function switchVariant(variant) {
+    if (variant === CURRENT_VARIANT) return;
+    const origBtn = document.getElementById('variant-btn-original');
+    const gameBtn = document.getElementById('variant-btn-game');
+    const active = 'bg-indigo-600 text-white';
+    const inactive = 'bg-white text-gray-700 hover:bg-gray-50';
+    if (origBtn && gameBtn) {
+        origBtn.className = `px-4 py-2 font-medium ${variant === 'original' ? active : inactive}`;
+        gameBtn.className = `px-4 py-2 font-medium ${variant === 'game' ? active : inactive}`;
+    }
+    // Load (or reload) the viewer with the chosen variant. loadDetailModel
+    // replaces the container contents, so this works whether or not the viewer
+    // was already showing.
+    CURRENT_VARIANT = variant;
+    loadDetailModel('{{ model.id }}', variant);
+}
+
+// Reveal the Original/Game-Optimized toggle + the download entry once a
+// game-optimized variant exists (called after a successful optimization).
+function revealGameOptimized(sizeBytes) {
+    const toggle = document.getElementById('variant-toggle');
+    if (toggle) toggle.classList.remove('hidden');
+    const sizeEl = document.getElementById('variant-game-size');
+    if (sizeEl && sizeBytes) sizeEl.textContent = ` (${(sizeBytes / 1024 / 1024).toFixed(2)} MB)`;
+    const link = document.getElementById('export-game-link');
+    const divider = document.getElementById('export-game-divider');
+    if (link) link.classList.remove('hidden');
+    if (divider) divider.classList.remove('hidden');
 }
 
 function resetDetailCamera() {
@@ -746,10 +812,13 @@ document.addEventListener('DOMContentLoaded', function() {
         function showGameOptimizeSuccess(data) {
             const mb = value => (value / 1024 / 1024).toFixed(2);
             const savings = Math.max(0, data.savings_ratio || 0) * 100;
+            const optimizedSize = data.optimized_size || (data.variant && data.variant.size) || 0;
             gameOptStatus.innerHTML =
-                `Created ${mb(data.optimized_size)} MB copy from ${mb(data.original_size)} MB ` +
+                `Game-optimized version ready: ${mb(optimizedSize)} MB from ${mb(data.original_size)} MB ` +
                 `(${savings.toFixed(1)}% smaller). ` +
-                `<a class="font-semibold text-teal-700 hover:text-teal-900" href="/model/${data.model.id}">Open optimized asset</a>`;
+                `<button type="button" class="font-semibold text-teal-700 hover:text-teal-900 underline" onclick="switchVariant('game')">View it</button>`;
+            // Attached to this model -- reveal the toggle + download entry in place.
+            revealGameOptimized(optimizedSize);
         }
 
         async function pollGameOptimizeJob(statusUrl) {

@@ -853,7 +853,9 @@
             
             // Clear any existing content
             container.innerHTML = '';
-            const modelUrl = `/api/view/${modelId}?viewer=2`;
+            // options.srcUrl lets callers point the viewer at an alternate file
+            // (e.g. the game-optimized variant) instead of the default view URL.
+            const modelUrl = options.srcUrl || `/api/view/${modelId}?viewer=2`;
 
             if (options.preferThree && window.AssetThreeViewer && !options.disableThreeFallback) {
                 const addThreeOverlay = () => {
@@ -1034,6 +1036,7 @@
                 showInfo: true,
                 showControls: true,
                 preferThree: true,
+                srcUrl: modelData.srcUrl,
                 cameraOrbit: modelData.cameraOrbit,
                 alt: modelData.name || 'A 3D model',
                 onLoad: () => {

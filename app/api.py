@@ -4,7 +4,7 @@ from flask_login import current_user, login_required
 from werkzeug.exceptions import HTTPException
 from sqlalchemy import select, update
 from app.db import asset_files, optimization_jobs
-from app.models import ApiKey, AssetBundle, Model3D, User, WorldState
+from app.models import ApiKey, AssetBundle, Model3D, ModelVariant, User, WorldState
 from app.openapi import get_openapi_spec
 import hmac
 import io
@@ -415,6 +415,90 @@ def view_model(model_id):
         return jsonify({'error': 'View failed'}), 500
 
 
+@api_bp.route('/model/<model_id>/game-optimized')
+def get_game_optimized(model_id):
+    """Serve the game-optimized GLB variant attached to a model.
+
+    Inline by default (for the detail-page viewer); pass ?download=1 for an
+    attachment. Honors HTTP Range and uses the immutable variant file id as a
+    strong ETag. 404 if the model has no game-optimized variant yet."""
+    try:
+        model = Model3D.get_by_id(model_id)
+        if not model:
+            return jsonify({'error': 'Model not found'}), 404
+        if not _can_access_model(model):
+            return jsonify({'error': 'Access denied'}), 403
+
+        variant = ModelVariant.get(model.id, 'game')
+        if not variant or not variant.file_id:
+            return jsonify({'error': 'No game-optimized variant'}), 404
+
+        file_id = variant.file_id
+        etag = f'"game-{file_id}"'
+        cache_control = 'public, max-age=31536000, immutable'
+        as_download = request.args.get('download') in ('1', 'true', 'yes')
+        content_type = _mime_for('glb')
+        download_name = f'{_safe_stem(model)}-game.glb'
+
+        if request.if_none_match and etag in request.if_none_match:
+            resp = make_response('', 304)
+            resp.headers['ETag'] = etag
+            resp.headers['Cache-Control'] = cache_control
+            resp.headers['Accept-Ranges'] = 'bytes'
+            return resp
+
+        fs = current_app.config['FILE_STORE']
+        range_header = request.headers.get('Range')
+
+        if not as_download and range_header and range_header.startswith('bytes=') and hasattr(fs, 'get_range'):
+            spec = range_header.split('=', 1)[1].split(',')[0].strip()
+            start_s, _, end_s = spec.partition('-')
+            try:
+                start = int(start_s) if start_s else 0
+                provisional_end = int(end_s) if end_s else None
+                probe_end = provisional_end if provisional_end is not None else start
+                _, total, _ = fs.get_range(file_id, start, probe_end)
+                if total <= 0:
+                    raise ValueError('empty')
+                end = provisional_end if provisional_end is not None else total - 1
+                end = min(end, total - 1)
+                if start > end or start >= total:
+                    resp = make_response('', 416)
+                    resp.headers['Content-Range'] = f'bytes */{total}'
+                    resp.headers['Accept-Ranges'] = 'bytes'
+                    return resp
+                chunk, total, _ = fs.get_range(file_id, start, end)
+                resp = make_response(chunk, 206)
+                resp.headers['Content-Type'] = content_type
+                resp.headers['Content-Length'] = str(len(chunk))
+                resp.headers['Content-Range'] = f'bytes {start}-{end}/{total}'
+                resp.headers['Accept-Ranges'] = 'bytes'
+                resp.headers['ETag'] = etag
+                resp.headers['Cache-Control'] = cache_control
+                return resp
+            except Exception as e:
+                print(f"Game-optimized range fetch fell back to full body: {e}")
+
+        data = variant.read_data()
+        if data is None:
+            return jsonify({'error': 'Variant file not found'}), 404
+        data = _force_meshopt_required_for_external_fallback(data)
+
+        response = make_response(data)
+        response.headers['Content-Type'] = content_type
+        response.headers['Content-Length'] = str(len(data))
+        response.headers['Accept-Ranges'] = 'bytes'
+        response.headers['ETag'] = etag
+        response.headers['Cache-Control'] = cache_control
+        if as_download:
+            response.headers['Content-Disposition'] = f'attachment; filename="{download_name}"'
+        return response
+
+    except Exception as e:
+        print(f"API game-optimized fetch error: {e}")
+        return jsonify({'error': 'Game-optimized fetch failed'}), 500
+
+
 @api_bp.route('/model/<model_id>/status')
 def conversion_status(model_id):
     try:
@@ -428,6 +512,7 @@ def conversion_status(model_id):
             'has_viewable': bool(model.viewable_file_id),
             'has_vrma': bool(model.vrma_file_id),
             'error': model.conversion_error,
+            **_game_optimized_fields(model),
         })
     except Exception as e:
         print(f"API status error: {e}")
@@ -898,10 +983,14 @@ def _serialize_browse_card(model):
     }
 
 
-@api_bp.route('/models', methods=['GET'])
+@api_bp.route('/models/browse', methods=['GET'])
 def list_public_models():
     """Paginated JSON list of public models for the browse gallery's infinite
-    scroll. Mirrors the /browse query params (search, sort, tag, page)."""
+    scroll. Mirrors the /browse query params (search, sort, tag, page).
+
+    NOTE: distinct path from the public `/api/models` endpoint (list_models),
+    which returns a different shape and lacks tag/sort filtering. Don't merge
+    the two routes -- Flask would let the first-registered one shadow this."""
     try:
         search = (request.args.get('search') or '').strip()
         page = request.args.get('page', 1, type=int)
@@ -1197,6 +1286,25 @@ def _serialize_model(model):
         'ai_tags': model.ai_tags,
         'approve_game_ready': model.approve_game_ready,
         'approve_asset_store': model.approve_asset_store,
+        **_game_optimized_fields(model),
+    }
+
+
+def _game_optimized_fields(model):
+    """Summary of the model's game-optimized variant (if any) for serialization."""
+    variant = ModelVariant.get(model.id, 'game')
+    if not variant or not variant.file_id:
+        return {'has_game_optimized': False, 'game_optimized': None}
+    return {
+        'has_game_optimized': True,
+        'game_optimized': {
+            'size': variant.size,
+            'settings': variant.settings,
+            'status': variant.status,
+            'updated_at': variant.updated_at.isoformat() if variant.updated_at else None,
+            'url': url_for('api.get_game_optimized', model_id=model.id),
+            'download_url': url_for('api.get_game_optimized', model_id=model.id, download=1),
+        },
     }
 
 
@@ -1253,7 +1361,8 @@ def _optimization_job_to_api(row):
         'settings': row.settings or {},
         'result': result,
         'result_model_id': row.result_model_id,
-        'model': result.get('model'),
+        # The optimized GLB is now a variant on the source model, not a copy.
+        'variant': result.get('variant'),
         'original_size': result.get('original_size'),
         'optimized_size': result.get('optimized_size'),
         'savings_ratio': result.get('savings_ratio'),
@@ -1347,7 +1456,6 @@ def _run_game_optimizer(model, owner_id, settings):
                 print(f"Could not read gltfpack report: {e}")
 
         fs = current_app.config['FILE_STORE']
-        optimized_name = (settings.get('name') or f'{model.name or _safe_stem(model)} (Game Optimized)').strip()
         optimized_filename = f'{_safe_stem(model)}-game.glb'
         metadata = {
             'kind': 'game_optimized',
@@ -1372,34 +1480,39 @@ def _run_game_optimizer(model, owner_id, settings):
             metadata=metadata,
         )
 
-        description = (model.description or '').strip()
-        texture_label = texture_limit if texture_limit_applied else 'none'
-        suffix = f'Game optimized from model {model.id}. Texture cap {texture_label}px, mesh ratio {simplify_ratio:g}.'
-        optimized = Model3D(
-            name=optimized_name,
-            description=f'{description}\n\n{suffix}'.strip(),
-            file_format='glb',
-            file_size=len(out_bytes),
-            original_filename=optimized_filename,
-            user_id=owner_id,
-            is_public=model.is_public,
-            gridfs_file_id=str(file_id),
-            viewable_file_id=str(file_id),
-            viewable_format='glb',
-            conversion_status='skipped',
-            tags=_merge_tags(model.tags, ['game-optimized']),
-            approve_game_ready=True,
-        )
-        optimized.save()
-
         original_size = len(src_bytes)
         optimized_size = len(out_bytes)
         savings_ratio = 0 if original_size <= 0 else 1 - (optimized_size / original_size)
         texture_note = 'KTX2/Basis' if texture_limit_applied else 'unchanged'
+
+        # Attach the optimized GLB to the SOURCE model as a 'game' variant
+        # (no separate Model3D). Re-optimizing replaces the existing variant;
+        # the old blob is removed once the pointer is swapped.
+        variant_settings = {
+            'texture_limit': texture_limit,
+            'simplify_ratio': simplify_ratio,
+            'compression_mode': compression_mode,
+            'texture_compression': texture_note,
+            'original_size': original_size,
+            'optimized_size': optimized_size,
+            'savings_ratio': savings_ratio,
+            'report': report,
+        }
+        variant, old_file_id = ModelVariant.upsert(
+            model.id, 'game', str(file_id),
+            file_format='glb', size=optimized_size,
+            settings=variant_settings, status='ready',
+        )
+        if old_file_id and old_file_id != str(file_id):
+            try:
+                fs.delete(old_file_id)
+            except Exception as e:
+                print(f"Old game-optimized blob {old_file_id} not deleted: {e}")
+
         return {
             'success': True,
-            'model': _serialize_model(optimized),
             'source_model_id': model.id,
+            'variant': variant.to_api() if variant else None,
             'original_size': original_size,
             'optimized_size': optimized_size,
             'savings_ratio': savings_ratio,
@@ -1431,7 +1544,9 @@ def _process_game_optimization_job(app, job_id):
                 job_id,
                 status='done',
                 result=result,
-                result_model_id=(result.get('model') or {}).get('id'),
+                # The optimized GLB now lives on the source model as a variant,
+                # so the job resolves back to the source model itself.
+                result_model_id=result.get('source_model_id'),
                 finished_at=datetime.utcnow(),
                 error=None,
             )
