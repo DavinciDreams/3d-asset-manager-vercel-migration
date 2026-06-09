@@ -163,6 +163,95 @@ def get_openapi_spec(base_url=''):
                         'metadata': {'type': 'object'},
                     },
                 },
+                'GameOptimized': {
+                    'type': 'object',
+                    'nullable': True,
+                    'description': 'The game-optimized GLB variant attached to the model, or null.',
+                    'properties': {
+                        'size': {'type': 'integer', 'description': 'Optimized GLB size in bytes', 'example': 248320},
+                        'status': {'type': 'string', 'example': 'ready'},
+                        'settings': {'type': 'object', 'description': 'gltfpack settings + size/savings used to produce it'},
+                        'updated_at': {'type': 'string', 'format': 'date-time', 'nullable': True},
+                        'url': {'type': 'string', 'description': 'Inline GLB URL', 'example': '/api/model/abc/game-optimized'},
+                        'download_url': {'type': 'string', 'example': '/api/model/abc/game-optimized?download=1'},
+                    },
+                },
+                'MediaSummary': {
+                    'type': 'object',
+                    'description': 'All media URLs for a model in one response.',
+                    'properties': {
+                        'id': {'type': 'string'},
+                        'name': {'type': 'string'},
+                        'file_format': {'type': 'string', 'enum': ALLOWED_EXTENSIONS},
+                        'conversion_status': {
+                            'type': 'string', 'nullable': True,
+                            'enum': ['pending', 'processing', 'done', 'failed', 'skipped', None],
+                        },
+                        'image': {
+                            'type': 'object',
+                            'description': 'Still thumbnail image.',
+                            'properties': {
+                                'has': {'type': 'boolean'},
+                                'url': {'type': 'string', 'nullable': True},
+                                'content_type': {'type': 'string', 'example': 'image/webp'},
+                            },
+                        },
+                        'video': {
+                            'type': 'object',
+                            'description': 'Rotating preview video (supports HTTP Range).',
+                            'properties': {
+                                'has': {'type': 'boolean'},
+                                'url': {'type': 'string', 'nullable': True},
+                                'content_type': {'type': 'string', 'example': 'video/webm'},
+                                'supports_range': {'type': 'boolean'},
+                            },
+                        },
+                        'model': {
+                            'type': 'object',
+                            'description': 'The renderable / downloadable model file.',
+                            'properties': {
+                                'viewable': {'type': 'boolean'},
+                                'view_url': {'type': 'string', 'nullable': True},
+                                'download_url': {'type': 'string'},
+                                'file_format': {'type': 'string'},
+                            },
+                        },
+                        'game_optimized': {'$ref': '#/components/schemas/GameOptimized'},
+                        'has_game_optimized': {'type': 'boolean'},
+                    },
+                },
+                'BrowseCard': {
+                    'type': 'object',
+                    'description': 'Compact card payload for the browse gallery.',
+                    'properties': {
+                        'id': {'type': 'string'},
+                        'name': {'type': 'string'},
+                        'file_format': {'type': 'string'},
+                        'conversion_status': {'type': 'string', 'nullable': True},
+                        'download_count': {'type': 'integer'},
+                        'owner_username': {'type': 'string'},
+                        'tags': {'type': 'array', 'items': {'type': 'string'}},
+                        'has_preview': {'type': 'boolean'},
+                        'has_thumbnail': {'type': 'boolean'},
+                        'preview_url': {'type': 'string', 'nullable': True},
+                        'thumbnail_url': {'type': 'string', 'nullable': True},
+                        'detail_url': {'type': 'string'},
+                        'is_owner': {'type': 'boolean'},
+                        'viewable': {'type': 'boolean'},
+                        'view_url': {'type': 'string', 'nullable': True},
+                    },
+                },
+                'BrowseListResponse': {
+                    'type': 'object',
+                    'properties': {
+                        'models': {'type': 'array', 'items': {'$ref': '#/components/schemas/BrowseCard'}},
+                        'page': {'type': 'integer', 'example': 1},
+                        'per_page': {'type': 'integer', 'example': 24},
+                        'total': {'type': 'integer', 'example': 57},
+                        'pages': {'type': 'integer', 'example': 3},
+                        'has_next': {'type': 'boolean'},
+                    },
+                },
             },
         },
         'paths': {
@@ -453,6 +542,185 @@ def get_openapi_spec(base_url=''):
                     },
                 }
             },
+            '/model/{model_id}/media': {
+                'get': {
+                    'tags': ['Files'],
+                    'summary': 'Media summary for a model',
+                    'description': (
+                        'Returns every media URL for the model in one call: the '
+                        'still thumbnail image, the rotating preview video, the '
+                        'renderable/downloadable model file, and the game-optimized '
+                        'variant (if any) — each with a presence flag. Private '
+                        'models require the owner session.'
+                    ),
+                    'parameters': [
+                        {'name': 'model_id', 'in': 'path', 'required': True, 'schema': {'type': 'string'}}
+                    ],
+                    'responses': {
+                        '200': {
+                            'description': 'Media summary',
+                            'content': {
+                                'application/json': {
+                                    'schema': {'$ref': '#/components/schemas/MediaSummary'}
+                                }
+                            },
+                        },
+                        '403': _error_response('Access denied (private model)'),
+                        '404': _error_response('Model not found'),
+                        '500': _error_response('Media summary failed'),
+                    },
+                }
+            },
+            '/model/{model_id}/preview': {
+                'parameters': [
+                    {'name': 'model_id', 'in': 'path', 'required': True, 'schema': {'type': 'string'}}
+                ],
+                'get': {
+                    'tags': ['Files'],
+                    'summary': "Get a model's rotating preview video",
+                    'description': (
+                        'Streams the looping WebM preview. Supports HTTP Range '
+                        'requests (206 partial content) for seeking/streaming, and '
+                        'sends a strong ETag + long immutable cache. Private models '
+                        'require the owner session. 404 when no preview exists.'
+                    ),
+                    'parameters': [
+                        {
+                            'name': 'Range', 'in': 'header', 'required': False,
+                            'description': 'Optional byte range, e.g. "bytes=0-".',
+                            'schema': {'type': 'string'},
+                        }
+                    ],
+                    'responses': {
+                        '200': {
+                            'description': 'The full preview video',
+                            'content': {'video/webm': {'schema': {'type': 'string', 'format': 'binary'}}},
+                        },
+                        '206': {
+                            'description': 'Partial content (range request)',
+                            'content': {'video/webm': {'schema': {'type': 'string', 'format': 'binary'}}},
+                        },
+                        '304': {'description': 'Not modified (ETag matched)'},
+                        '403': _error_response('Access denied (private model)'),
+                        '404': _error_response('No preview'),
+                    },
+                },
+                'post': {
+                    'tags': ['Files'],
+                    'summary': 'Upload/replace a rotating preview video',
+                    'description': (
+                        'Owner-only. Send the raw WebM bytes as the request body '
+                        'with Content-Type video/webm. Max ~8MB. Replaces any '
+                        'existing preview. Typically produced client-side by '
+                        'recording the rotating viewer canvas.'
+                    ),
+                    'security': [{'sessionCookie': []}],
+                    'requestBody': {
+                        'required': True,
+                        'content': {
+                            'video/webm': {'schema': {'type': 'string', 'format': 'binary'}}
+                        },
+                    },
+                    'responses': {
+                        '200': {
+                            'description': 'Stored',
+                            'content': {
+                                'application/json': {
+                                    'schema': {
+                                        'type': 'object',
+                                        'properties': {
+                                            'success': {'type': 'boolean'},
+                                            'preview_file_id': {'type': 'string'},
+                                        },
+                                    }
+                                }
+                            },
+                        },
+                        '400': _error_response('Preview missing or too large'),
+                        '403': _error_response('Not the owner'),
+                        '404': _error_response('Model not found'),
+                        '500': _error_response('Preview upload failed'),
+                    },
+                },
+            },
+            '/model/{model_id}/game-optimized': {
+                'get': {
+                    'tags': ['Files'],
+                    'summary': 'Serve the game-optimized GLB variant',
+                    'description': (
+                        'Returns the game-optimized GLB attached to the model '
+                        '(created via /model/{id}/optimize-game). Inline by '
+                        'default; pass `download=1` for an attachment. Supports '
+                        'HTTP Range + ETag + immutable cache. 404 if the model has '
+                        'no game-optimized variant yet.'
+                    ),
+                    'parameters': [
+                        {'name': 'model_id', 'in': 'path', 'required': True, 'schema': {'type': 'string'}},
+                        {
+                            'name': 'download', 'in': 'query', 'required': False,
+                            'description': 'Set to 1/true to receive the file as an attachment.',
+                            'schema': {'type': 'boolean'},
+                        },
+                        {
+                            'name': 'Range', 'in': 'header', 'required': False,
+                            'schema': {'type': 'string'},
+                        },
+                    ],
+                    'responses': {
+                        '200': {
+                            'description': 'The game-optimized GLB',
+                            'content': {'model/gltf-binary': {'schema': {'type': 'string', 'format': 'binary'}}},
+                        },
+                        '206': {'description': 'Partial content (range request)'},
+                        '304': {'description': 'Not modified (ETag matched)'},
+                        '403': _error_response('Access denied (private model)'),
+                        '404': _error_response('No game-optimized variant'),
+                        '500': _error_response('Game-optimized fetch failed'),
+                    },
+                }
+            },
+            '/models/browse': {
+                'get': {
+                    'tags': ['Models'],
+                    'summary': 'Browse gallery feed (infinite scroll)',
+                    'description': (
+                        'Paginated list of public models for the browse gallery. '
+                        'Supports search, sort and multi-tag filtering, and returns '
+                        'compact cards with media URLs and ownership flags. Distinct '
+                        'from /models (different response shape).'
+                    ),
+                    'parameters': [
+                        {'name': 'page', 'in': 'query', 'schema': {'type': 'integer', 'default': 1, 'minimum': 1}},
+                        {
+                            'name': 'per_page', 'in': 'query',
+                            'description': 'Items per page (max 60).',
+                            'schema': {'type': 'integer', 'default': 24, 'maximum': 60},
+                        },
+                        {'name': 'search', 'in': 'query', 'schema': {'type': 'string'}},
+                        {
+                            'name': 'sort', 'in': 'query',
+                            'schema': {'type': 'string', 'enum': ['newest', 'oldest', 'downloads', 'name'], 'default': 'newest'},
+                        },
+                        {
+                            'name': 'tag', 'in': 'query',
+                            'description': 'Tag filter; repeat for multiple (AND-matched).',
+                            'schema': {'type': 'array', 'items': {'type': 'string'}},
+                            'style': 'form', 'explode': True,
+                        },
+                    ],
+                    'responses': {
+                        '200': {
+                            'description': 'Browse cards page',
+                            'content': {
+                                'application/json': {
+                                    'schema': {'$ref': '#/components/schemas/BrowseListResponse'}
+                                }
+                            },
+                        },
+                        '500': _error_response('Could not list models'),
+                    },
+                }
+            },
             '/model/{model_id}/status': {
                 'get': {
                     'tags': ['Files'],
@@ -479,6 +747,8 @@ def get_openapi_spec(base_url=''):
                                             'has_viewable': {'type': 'boolean'},
                                             'has_vrma': {'type': 'boolean'},
                                             'error': {'type': 'string', 'nullable': True},
+                                            'has_game_optimized': {'type': 'boolean'},
+                                            'game_optimized': {'$ref': '#/components/schemas/GameOptimized'},
                                         },
                                     }
                                 }
@@ -533,17 +803,22 @@ def get_openapi_spec(base_url=''):
                 ],
                 'get': {
                     'tags': ['Files'],
-                    'summary': "Get a model's PNG thumbnail",
-                    'description': 'Private models require the owner session. 404 when no thumbnail exists.',
+                    'summary': "Get a model's thumbnail image",
+                    'description': (
+                        'Serves the still thumbnail (WebP for new uploads, PNG for '
+                        'older ones) with a strong ETag + long immutable cache '
+                        '(304 on revalidation). Private models require the owner '
+                        'session. 404 when no thumbnail exists.'
+                    ),
                     'responses': {
                         '200': {
-                            'description': 'PNG image',
+                            'description': 'Thumbnail image (WebP or PNG)',
                             'content': {
-                                'image/png': {
-                                    'schema': {'type': 'string', 'format': 'binary'}
-                                }
+                                'image/webp': {'schema': {'type': 'string', 'format': 'binary'}},
+                                'image/png': {'schema': {'type': 'string', 'format': 'binary'}},
                             },
                         },
+                        '304': {'description': 'Not modified (ETag matched)'},
                         '403': _error_response('Access denied (private model)'),
                         '404': _error_response('No thumbnail'),
                     },
