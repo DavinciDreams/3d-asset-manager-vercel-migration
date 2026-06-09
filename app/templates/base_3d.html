@@ -8,6 +8,146 @@
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     <!-- Model Viewer for 3D model rendering -->
     <script type="module" src="https://ajax.googleapis.com/ajax/libs/model-viewer/4.0.0/model-viewer.min.js"></script>
+    <script type="module">
+        import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.184.0/build/three.module.js';
+        import { GLTFLoader } from 'https://cdn.jsdelivr.net/npm/three@0.184.0/examples/jsm/loaders/GLTFLoader.js';
+        import { DRACOLoader } from 'https://cdn.jsdelivr.net/npm/three@0.184.0/examples/jsm/loaders/DRACOLoader.js';
+        import { KTX2Loader } from 'https://cdn.jsdelivr.net/npm/three@0.184.0/examples/jsm/loaders/KTX2Loader.js';
+        import { OrbitControls } from 'https://cdn.jsdelivr.net/npm/three@0.184.0/examples/jsm/controls/OrbitControls.js';
+        import { MeshoptDecoder } from 'https://cdn.jsdelivr.net/npm/three@0.184.0/examples/jsm/libs/meshopt_decoder.module.js';
+
+        const DRACO_PATH = 'https://www.gstatic.com/draco/versioned/decoders/1.5.7/';
+        const BASIS_PATH = 'https://cdn.jsdelivr.net/npm/three@0.184.0/examples/jsm/libs/basis/';
+
+        function disposeObject(object) {
+            object.traverse((node) => {
+                if (node.geometry) node.geometry.dispose();
+                const materials = Array.isArray(node.material) ? node.material : [node.material];
+                materials.filter(Boolean).forEach((material) => {
+                    Object.values(material).forEach((value) => {
+                        if (value && value.isTexture) value.dispose();
+                    });
+                    material.dispose();
+                });
+            });
+        }
+
+        function frameObject(camera, controls, object, width, height) {
+            const box = new THREE.Box3().setFromObject(object);
+            if (box.isEmpty()) return;
+            const center = box.getCenter(new THREE.Vector3());
+            const size = box.getSize(new THREE.Vector3());
+            const maxDim = Math.max(size.x, size.y, size.z) || 1;
+            const fov = camera.fov * Math.PI / 180;
+            const distance = Math.abs(maxDim / Math.sin(fov / 2)) * 0.75;
+            camera.aspect = width / height;
+            camera.near = Math.max(distance / 100, 0.01);
+            camera.far = distance * 100;
+            camera.position.set(center.x + distance, center.y + maxDim * 0.35, center.z + distance);
+            camera.lookAt(center);
+            camera.updateProjectionMatrix();
+            controls.target.copy(center);
+            controls.update();
+        }
+
+        window.AssetThreeViewer = {
+            async create(container, modelUrl, options = {}) {
+                if (!container) return null;
+                if (container.__threeViewer) container.__threeViewer.dispose();
+                container.innerHTML = '';
+
+                const width = container.clientWidth || 640;
+                const height = container.clientHeight || 420;
+                const scene = new THREE.Scene();
+                const camera = new THREE.PerspectiveCamera(45, width / height, 0.01, 1000);
+                const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
+                renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+                renderer.setSize(width, height, false);
+                renderer.outputColorSpace = THREE.SRGBColorSpace;
+                renderer.toneMapping = THREE.ACESFilmicToneMapping;
+                renderer.toneMappingExposure = 1;
+                renderer.domElement.className = options.large ? 'model-viewer-large' : (options.card ? 'model-viewer-card' : 'model-viewer');
+                container.appendChild(renderer.domElement);
+
+                scene.add(new THREE.HemisphereLight(0xffffff, 0x777788, 1.8));
+                const key = new THREE.DirectionalLight(0xffffff, 2.2);
+                key.position.set(2, 4, 3);
+                scene.add(key);
+
+                const controls = new OrbitControls(camera, renderer.domElement);
+                controls.enableDamping = true;
+                controls.autoRotate = options.autoRotate !== false;
+                controls.autoRotateSpeed = 1.2;
+
+                const loader = new GLTFLoader();
+                const dracoLoader = new DRACOLoader().setDecoderPath(DRACO_PATH);
+                const ktx2Loader = new KTX2Loader().setTranscoderPath(BASIS_PATH);
+                ktx2Loader.detectSupport(renderer);
+                loader.setDRACOLoader(dracoLoader);
+                loader.setKTX2Loader(ktx2Loader);
+                loader.setMeshoptDecoder(MeshoptDecoder);
+                if (MeshoptDecoder.ready) await MeshoptDecoder.ready;
+
+                let model = null;
+                let disposed = false;
+                let animationId = null;
+                const resize = () => {
+                    if (disposed) return;
+                    const nextWidth = container.clientWidth || width;
+                    const nextHeight = container.clientHeight || height;
+                    renderer.setSize(nextWidth, nextHeight, false);
+                    camera.aspect = nextWidth / nextHeight;
+                    camera.updateProjectionMatrix();
+                };
+
+                try {
+                    const gltf = await loader.loadAsync(modelUrl);
+                    model = gltf.scene;
+                    scene.add(model);
+                    frameObject(camera, controls, model, width, height);
+                    if (options.onLoad) options.onLoad();
+                } catch (error) {
+                    dracoLoader.dispose();
+                    ktx2Loader.dispose();
+                    renderer.dispose();
+                    container.innerHTML = '';
+                    if (options.onError) options.onError(error);
+                    throw error;
+                }
+
+                const animate = () => {
+                    if (disposed) return;
+                    controls.update();
+                    renderer.render(scene, camera);
+                    animationId = requestAnimationFrame(animate);
+                };
+                animate();
+                window.addEventListener('resize', resize);
+
+                const api = {
+                    reset() {
+                        if (model) frameObject(camera, controls, model, container.clientWidth || width, container.clientHeight || height);
+                    },
+                    toggleAutoRotate() {
+                        controls.autoRotate = !controls.autoRotate;
+                    },
+                    canvas: renderer.domElement,
+                    dispose() {
+                        disposed = true;
+                        if (animationId) cancelAnimationFrame(animationId);
+                        window.removeEventListener('resize', resize);
+                        if (model) disposeObject(model);
+                        controls.dispose();
+                        dracoLoader.dispose();
+                        ktx2Loader.dispose();
+                        renderer.dispose();
+                    }
+                };
+                container.__threeViewer = api;
+                return api;
+            }
+        };
+    </script>
     <script>
         // Configure model-viewer for better performance and support
         window.ModelViewerElement = window.ModelViewerElement || {};
@@ -661,20 +801,22 @@
             
             modelViewer.addEventListener('error', (event) => {
                 console.error('Model failed to load:', modelUrl, event.detail);
+                if (window.AssetThreeViewer && !options.disableThreeFallback) {
+                    window.AssetThreeViewer.create(container, modelUrl, {
+                        large: options.large,
+                        card: options.card,
+                        autoRotate: true,
+                        onLoad: options.onLoad,
+                        onError: options.onError
+                    }).catch((error) => {
+                        console.error('Compressed GLB fallback failed:', error);
+                        showModelViewerError(container);
+                    });
+                    return;
+                }
                 if (options.onError) options.onError(event.detail);
                 
-                // Show error message
-                const errorDiv = document.createElement('div');
-                errorDiv.className = 'flex items-center justify-center h-full bg-red-50 text-red-600 text-sm';
-                errorDiv.innerHTML = `
-                    <div class="text-center">
-                        <i class="fas fa-exclamation-triangle text-2xl mb-2"></i>
-                        <div>Failed to load 3D model</div>
-                        <div class="text-xs mt-1">Please try refreshing the page</div>
-                    </div>
-                `;
-                container.innerHTML = '';
-                container.appendChild(errorDiv);
+                showModelViewerError(container);
             });
             
             // Add model info overlay if requested
@@ -708,10 +850,28 @@
             container.appendChild(modelViewer);
             return modelViewer;
         }
+
+        function showModelViewerError(container) {
+            const errorDiv = document.createElement('div');
+            errorDiv.className = 'flex items-center justify-center h-full bg-red-50 text-red-600 text-sm';
+            errorDiv.innerHTML = `
+                <div class="text-center">
+                    <i class="fas fa-exclamation-triangle text-2xl mb-2"></i>
+                    <div>Failed to load 3D model</div>
+                    <div class="text-xs mt-1">Please try refreshing the page</div>
+                </div>
+            `;
+            container.innerHTML = '';
+            container.appendChild(errorDiv);
+        }
         
         // Helper function to reset camera position
         function resetCamera(containerId) {
             const container = document.getElementById(containerId);
+            if (container?.__threeViewer) {
+                container.__threeViewer.reset();
+                return;
+            }
             const modelViewer = container?.querySelector('model-viewer');
             if (modelViewer) {
                 modelViewer.resetTurntableRotation();
@@ -722,6 +882,10 @@
         // Helper function to toggle auto-rotation
         function toggleAutoRotate(containerId) {
             const container = document.getElementById(containerId);
+            if (container?.__threeViewer) {
+                container.__threeViewer.toggleAutoRotate();
+                return;
+            }
             const modelViewer = container?.querySelector('model-viewer');
             if (modelViewer) {
                 const isRotating = modelViewer.hasAttribute('auto-rotate');

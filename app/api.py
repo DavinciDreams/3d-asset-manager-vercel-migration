@@ -1,13 +1,16 @@
+from datetime import datetime
 from flask import Blueprint, jsonify, request, current_app, make_response, url_for
 from flask_login import current_user, login_required
 from werkzeug.exceptions import HTTPException
 from sqlalchemy import select
 from app.db import asset_files
-from app.models import ApiKey, Model3D, User, WorldState
+from app.models import ApiKey, AssetBundle, Model3D, User, WorldState
 from app.openapi import get_openapi_spec
 import hmac
 import io
+import json
 import os
+import zipfile
 
 api_bp = Blueprint('api', __name__)
 
@@ -36,11 +39,21 @@ def _can_access_model(model):
 
 
 def _authorized_service_token():
-    expected = os.environ.get('TELLUS_PERSISTENCE_API_TOKEN', '').strip()
-    if not expected:
-        return False
+    return _bearer_token_valid()
+
+
+def _configured_bearer_tokens():
+    tokens = [
+        os.environ.get('ASSET_MANAGER_API_TOKEN'),
+        os.environ.get('API_UPLOAD_TOKEN'),
+        os.environ.get('TELLUS_PERSISTENCE_API_TOKEN'),
+    ]
+    return [token.strip() for token in tokens if token and token.strip()]
+
+
+def _bearer_token_valid():
     header = request.headers.get('Authorization', '')
-    return hmac.compare_digest(header, f'Bearer {expected}')
+    return any(hmac.compare_digest(header, f'Bearer {token}') for token in _configured_bearer_tokens())
 
 
 def _bearer_token():
@@ -53,17 +66,48 @@ def _bearer_token():
 
 def _upload_actor_user():
     """Return the user that should own an upload request, or (None, message)."""
+    user, service = _api_principal()
+    if user:
+        return user, None
+    if service:
+        return None, None
+    return None, 'Authentication required'
+
+
+def _api_principal(required_scope='upload'):
     if current_user.is_authenticated:
-        return current_user, None
-
+        return current_user, False
     api_key = ApiKey.verify_token(_bearer_token(), required_scope='upload')
-    if not api_key:
-        return None, 'Authentication required'
-
-    user = User.get_by_id(api_key.user_id)
+    if api_key:
+        user = User.get_by_id(api_key.user_id)
+        return user, False
+    if not _bearer_token_valid():
+        return None, False
+    user_id = (
+        request.headers.get('X-Asset-User-Id')
+        or request.headers.get('X-User-Id')
+        or os.environ.get('API_UPLOAD_USER_ID')
+        or os.environ.get('ASSET_MANAGER_DEFAULT_USER_ID')
+    )
+    user = User.get_by_id(user_id) if user_id else None
     if not user:
-        return None, 'API key owner was not found'
-    return user, None
+        username = os.environ.get('API_UPLOAD_USERNAME') or os.environ.get('ASSET_MANAGER_DEFAULT_USERNAME')
+        user = User.get_by_username(username) if username else None
+    return user, True
+
+
+def _require_api_principal():
+    user, service = _api_principal()
+    if user or service:
+        return user, service, None
+    return None, False, (jsonify({'error': 'Authentication required'}), 401)
+
+
+def _can_write_model(model):
+    user, service = _api_principal()
+    if service:
+        return True
+    return bool(user and model.user_id == user.id)
 
 
 def _can_read_world(world):
@@ -163,9 +207,12 @@ def list_models():
         search = request.args.get('search', '').strip()
         user_only = request.args.get('user_only', 'false').lower() == 'true'
         
-        if user_only and current_user.is_authenticated:
+        principal, service = _api_principal()
+        if user_only and principal:
             # Get user's models
-            models, total = Model3D.get_user_models(current_user.id, page=page, per_page=per_page)
+            models, total = Model3D.get_user_models(principal.id, page=page, per_page=per_page)
+        elif user_only and service:
+            return jsonify({'error': 'API token is valid, but no API upload user is configured.'}), 409
         else:
             # Get public models
             models, total = Model3D.get_public_models(page=page, per_page=per_page, search=search if search else None)
@@ -187,6 +234,12 @@ def list_models():
                 'conversion_status': model.conversion_status,
                 'has_viewable': bool(model.viewable_file_id),
                 'has_vrma': bool(model.vrma_file_id),
+                'tags': model.tags,
+                'ai_status': model.ai_status,
+                'ai_description': model.ai_description,
+                'ai_tags': model.ai_tags,
+                'approve_game_ready': model.approve_game_ready,
+                'approve_asset_store': model.approve_asset_store,
                 'owner': {
                     'id': owner.id if owner else None,
                     'username': owner.username if owner else 'Unknown'
@@ -390,7 +443,6 @@ def export_model(model_id):
         return jsonify({'error': 'Export failed'}), 500
 
 @api_bp.route('/model/<model_id>', methods=['PUT', 'PATCH'])
-@login_required
 def update_model(model_id):
     """Update a model's metadata (name, description, visibility)."""
     try:
@@ -399,8 +451,7 @@ def update_model(model_id):
         if not model:
             return jsonify({'error': 'Model not found'}), 404
 
-        # Check ownership
-        if model.user_id != current_user.id:
+        if not _can_write_model(model):
             return jsonify({'error': 'Access denied'}), 403
 
         # Accept either JSON or form-encoded payloads
@@ -466,7 +517,6 @@ def update_model(model_id):
 
 
 @api_bp.route('/model/<model_id>/thumbnail', methods=['POST'])
-@login_required
 def upload_thumbnail(model_id):
     """Store a client-captured PNG thumbnail for a model (owner only).
 
@@ -479,7 +529,7 @@ def upload_thumbnail(model_id):
         model = Model3D.get_by_id(model_id)
         if not model:
             return jsonify({'error': 'Model not found'}), 404
-        if model.user_id != current_user.id:
+        if not _can_write_model(model):
             return jsonify({'error': 'Access denied'}), 403
 
         data = request.get_json(silent=True) or {}
@@ -581,7 +631,6 @@ def list_vrma():
 
 
 @api_bp.route('/model/<model_id>/preview', methods=['POST'])
-@login_required
 def upload_preview(model_id):
     """Store a client-captured looping preview video (WebM) for a model
     (owner only). Sent as raw bytes (Content-Type: video/webm)."""
@@ -589,7 +638,7 @@ def upload_preview(model_id):
         model = Model3D.get_by_id(model_id)
         if not model:
             return jsonify({'error': 'Model not found'}), 404
-        if model.user_id != current_user.id:
+        if not _can_write_model(model):
             return jsonify({'error': 'Access denied'}), 403
 
         video_bytes = request.get_data()
@@ -651,7 +700,6 @@ def get_preview(model_id):
 
 
 @api_bp.route('/model/<model_id>', methods=['DELETE'])
-@login_required
 def delete_model(model_id):
     """Delete a model"""
     try:
@@ -660,8 +708,7 @@ def delete_model(model_id):
         if not model:
             return jsonify({'error': 'Model not found'}), 404
         
-        # Check ownership
-        if model.user_id != current_user.id:
+        if not _can_write_model(model):
             return jsonify({'error': 'Access denied'}), 403
         
         # Delete model and file
@@ -770,14 +817,18 @@ def patch_tellus_world_metadata(world_id):
         return jsonify({'error': 'Failed to update world'}), 500
 
 @api_bp.route('/user/models')
-@login_required
 def get_user_models():
     """Get current user's models"""
     try:
+        principal, service, auth_error = _require_api_principal()
+        if auth_error:
+            return auth_error
+        if service and not principal:
+            return jsonify({'error': 'API token is valid, but no API upload user is configured.'}), 409
         page = request.args.get('page', 1, type=int)
         per_page = min(request.args.get('per_page', 20, type=int), 100)
         
-        models, total = Model3D.get_user_models(current_user.id, page=page, per_page=per_page)
+        models, total = Model3D.get_user_models(principal.id, page=page, per_page=per_page)
         
         models_data = []
         for model in models:
@@ -794,6 +845,12 @@ def get_user_models():
                 'conversion_status': model.conversion_status,
                 'has_viewable': bool(model.viewable_file_id),
                 'has_vrma': bool(model.vrma_file_id),
+                'tags': model.tags,
+                'ai_status': model.ai_status,
+                'ai_description': model.ai_description,
+                'ai_tags': model.ai_tags,
+                'approve_game_ready': model.approve_game_ready,
+                'approve_asset_store': model.approve_asset_store,
             })
         
         total_pages = (total + per_page - 1) // per_page
@@ -827,7 +884,7 @@ def _name_from_filename(original_filename):
     return cleaned or base
 
 
-def _store_one_upload(file, base_name, description, is_public, tags, allowed_extensions, fs, max_bytes, owner_user):
+def _store_one_upload(file, base_name, description, is_public, tags, allowed_extensions, fs, max_bytes, owner_id=None):
     """Validate and persist a single uploaded file as a Model3D.
 
     Returns (model, None) on success or (None, error_message) on failure.
@@ -863,7 +920,7 @@ def _store_one_upload(file, base_name, description, is_public, tags, allowed_ext
         content_type=file.content_type,
         metadata={
             'original_filename': file.filename,
-            'uploaded_by': owner_user.id,
+            'uploaded_by': owner_id,
             'upload_date': Model3D().upload_date
         }
     )
@@ -874,7 +931,7 @@ def _store_one_upload(file, base_name, description, is_public, tags, allowed_ext
         file_format=file_extension,
         file_size=file_size,
         original_filename=file.filename,
-        user_id=owner_user.id,
+        user_id=owner_id,
         is_public=is_public,
         gridfs_file_id=str(gridfs_file_id),
         tags=tags
@@ -898,7 +955,203 @@ def _serialize_model(model):
         'conversion_status': model.conversion_status,
         'has_viewable': bool(model.viewable_file_id),
         'has_vrma': bool(model.vrma_file_id),
+        'tags': model.tags,
+        'ai_status': model.ai_status,
+        'ai_description': model.ai_description,
+        'ai_tags': model.ai_tags,
+        'approve_game_ready': model.approve_game_ready,
+        'approve_asset_store': model.approve_asset_store,
     }
+
+
+def _payload():
+    return request.get_json(silent=True) or request.form or {}
+
+
+def _as_bool(value):
+    if isinstance(value, bool):
+        return value
+    return str(value).lower() in ('true', 'on', '1', 'yes')
+
+
+def _merge_tags(*tag_lists):
+    merged = []
+    for tags in tag_lists:
+        for tag in Model3D.normalize_tags(tags):
+            if tag not in merged:
+                merged.append(tag)
+    return merged
+
+
+def _optimize_game_int(data, key, default, allowed=None):
+    raw = data.get(key, default)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f'{key} must be an integer.')
+    if allowed is not None and value not in allowed:
+        allowed_values = ', '.join(str(item) for item in allowed)
+        raise ValueError(f'{key} must be one of: {allowed_values}.')
+    return value
+
+
+def _optimize_game_float(data, key, default):
+    raw = data.get(key, default)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f'{key} must be a number.')
+    if value <= 0 or value > 1:
+        raise ValueError(f'{key} must be greater than 0 and at most 1.')
+    return value
+
+
+@api_bp.route('/model/<model_id>/optimize-game', methods=['POST'])
+def optimize_model_for_game(model_id):
+    """Create a game-optimized GLB copy without replacing the source asset."""
+    import shutil
+    import subprocess
+    import tempfile
+
+    try:
+        model = Model3D.get_by_id(model_id)
+        if not model:
+            return jsonify({'error': 'Model not found'}), 404
+        if not _can_access_model(model):
+            return jsonify({'error': 'Access denied'}), 403
+
+        principal, service = _api_principal()
+        if not (principal or service):
+            return jsonify({'error': 'Authentication required'}), 401
+
+        if not shutil.which('gltfpack'):
+            return jsonify({'error': 'Game optimization is unavailable because gltfpack is not installed.'}), 503
+
+        data = _payload()
+        try:
+            texture_limit = _optimize_game_int(data, 'texture_limit', 1024, allowed=(0, 1024, 2048, 4096))
+            simplify_ratio = _optimize_game_float(data, 'simplify_ratio', 0.75)
+            compression_mode = (data.get('compression_mode') or 'meshopt').strip().lower()
+            if compression_mode not in ('meshopt', 'fallback'):
+                return jsonify({'error': 'compression_mode must be meshopt or fallback.'}), 400
+        except ValueError as e:
+            return jsonify({'error': str(e)}), 400
+
+        src_bytes, src_fmt = model.get_viewable_data()
+        src_fmt = (src_fmt or model.file_format or '').lower()
+        if not src_bytes:
+            return jsonify({'error': 'Source file not found'}), 404
+        if src_fmt not in ('glb', 'gltf'):
+            return jsonify({'error': 'Game optimization currently supports GLB/GLTF assets.'}), 400
+
+        workdir = tempfile.mkdtemp(prefix='game_optimize_')
+        try:
+            in_path = os.path.join(workdir, f'input.{src_fmt}')
+            out_path = os.path.join(workdir, 'game.glb')
+            report_path = os.path.join(workdir, 'report.json')
+            with open(in_path, 'wb') as f:
+                f.write(src_bytes)
+
+            cmd = [
+                'gltfpack',
+                '-i', in_path,
+                '-o', out_path,
+                '-cc' if compression_mode == 'meshopt' else '-cf',
+                '-si', f'{simplify_ratio:g}',
+                '-r', report_path,
+            ]
+            if texture_limit:
+                cmd.extend(['-tl', str(texture_limit)])
+
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=300,
+                check=False,
+            )
+            if result.returncode != 0:
+                msg = (result.stderr or result.stdout or 'gltfpack failed.').strip()
+                print(f"Game optimization failed for {model.id}: {msg}")
+                return jsonify({'error': 'Game optimization failed.', 'details': msg[-1000:]}), 502
+
+            with open(out_path, 'rb') as f:
+                out_bytes = f.read()
+
+            report = {}
+            if os.path.exists(report_path):
+                try:
+                    with open(report_path, 'r', encoding='utf-8') as f:
+                        report = json.load(f)
+                except Exception as e:
+                    print(f"Could not read gltfpack report: {e}")
+        except subprocess.TimeoutExpired:
+            return jsonify({'error': 'Game optimization timed out.'}), 504
+        finally:
+            shutil.rmtree(workdir, ignore_errors=True)
+
+        fs = current_app.config['FILE_STORE']
+        optimized_name = (data.get('name') or f'{model.name or _safe_stem(model)} (Game Optimized)').strip()
+        optimized_filename = f'{_safe_stem(model)}-game.glb'
+        metadata = {
+            'kind': 'game_optimized',
+            'source_model_id': model.id,
+            'source_format': src_fmt,
+            'source_size': len(src_bytes),
+            'optimized_size': len(out_bytes),
+            'texture_limit': texture_limit,
+            'simplify_ratio': simplify_ratio,
+            'gltfpack': {'mode': compression_mode, 'report': report},
+        }
+        file_id = fs.put(
+            out_bytes,
+            filename=optimized_filename,
+            content_type=_mime_for('glb'),
+            metadata=metadata,
+        )
+
+        owner_id = principal.id if principal else model.user_id
+        description = (model.description or '').strip()
+        suffix = f'Game optimized from model {model.id}. Texture cap {texture_limit or "none"}px, mesh ratio {simplify_ratio:g}.'
+        optimized = Model3D(
+            name=optimized_name,
+            description=f'{description}\n\n{suffix}'.strip(),
+            file_format='glb',
+            file_size=len(out_bytes),
+            original_filename=optimized_filename,
+            user_id=owner_id,
+            is_public=model.is_public,
+            gridfs_file_id=str(file_id),
+            viewable_file_id=str(file_id),
+            viewable_format='glb',
+            conversion_status='skipped',
+            tags=_merge_tags(model.tags, ['game-optimized']),
+            approve_game_ready=True,
+        )
+        optimized.save()
+
+        original_size = len(src_bytes)
+        optimized_size = len(out_bytes)
+        savings_ratio = 0 if original_size <= 0 else 1 - (optimized_size / original_size)
+        return jsonify({
+            'success': True,
+            'model': _serialize_model(optimized),
+            'source_model_id': model.id,
+            'original_size': original_size,
+            'optimized_size': optimized_size,
+            'savings_ratio': savings_ratio,
+            'settings': {
+                'texture_limit': texture_limit,
+                'simplify_ratio': simplify_ratio,
+                'compression': 'gltfpack -cc' if compression_mode == 'meshopt' else 'gltfpack -cf',
+            },
+            'report': report,
+        }), 201
+    except Exception as e:
+        print(f"API game optimization error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': 'Game optimization failed'}), 500
 
 
 @api_bp.route('/upload', methods=['POST'])
@@ -917,10 +1170,10 @@ def upload_model():
     no name) does not require a name.
     """
     try:
-        owner_user, auth_error = _upload_actor_user()
-        if not owner_user:
-            return jsonify({'error': auth_error}), 401
-
+        principal, _service, auth_error = _require_api_principal()
+        if auth_error:
+            return auth_error
+        owner_id = principal.id if principal else None
         description = request.form.get('description', '').strip()
         is_public = request.form.get('is_public') == 'true'
         tags = Model3D.normalize_tags(request.form.get('tags', ''))
@@ -950,7 +1203,7 @@ def upload_model():
         for file in files:
             model, err = _store_one_upload(
                 file, base_name, description, is_public, tags,
-                allowed_extensions, fs, max_bytes, owner_user
+                allowed_extensions, fs, max_bytes, owner_id=owner_id
             )
             if model:
                 uploaded.append(model)
@@ -987,3 +1240,240 @@ def upload_model():
         import traceback
         traceback.print_exc()
         return jsonify({'error': 'Upload failed. Please try again.'}), 500
+
+
+@api_bp.route('/model/<model_id>/conversion', methods=['POST'])
+def enqueue_conversion(model_id):
+    """Requeue a model for converter processing."""
+    try:
+        model = Model3D.get_by_id(model_id)
+        if not model:
+            return jsonify({'error': 'Model not found'}), 404
+        if not _can_write_model(model):
+            return jsonify({'error': 'Access denied'}), 403
+        if not current_app.config.get('ENABLE_CONVERSION', True):
+            return jsonify({'error': 'Conversion is disabled on this server.'}), 503
+        from app.conversion import enqueue
+        enqueue(model, enabled=True)
+        model.conversion_error = None
+        model.conversion_claimed_at = None
+        model.save()
+        return jsonify({'success': True, 'model': _serialize_model(model)})
+    except Exception as e:
+        print(f"API conversion enqueue error: {e}")
+        return jsonify({'error': 'Conversion enqueue failed'}), 500
+
+
+@api_bp.route('/model/<model_id>/ai/autotag', methods=['POST'])
+def autotag_model(model_id):
+    """Generate tags and a store-ready description for a model."""
+    try:
+        model = Model3D.get_by_id(model_id)
+        if not model:
+            return jsonify({'error': 'Model not found'}), 404
+        if not _can_write_model(model):
+            return jsonify({'error': 'Access denied'}), 403
+
+        data = _payload()
+        overwrite = _as_bool(data.get('overwrite', True))
+        include_description = _as_bool(data.get('include_description', True))
+
+        try:
+            from app.ai_enrichment import enrich_model
+            enriched = enrich_model(model, extra_context=data.get('context') or {})
+            model.ai_status = 'done'
+            model.ai_error = None
+        except Exception as e:
+            enriched = {}
+            model.ai_status = 'failed'
+            model.ai_error = str(e)[:500]
+            model.save()
+            return jsonify({'error': 'AI enrichment failed', 'detail': model.ai_error}), 502
+
+        model.ai_tags = Model3D.normalize_tags(enriched.get('tags', []))
+        model.ai_description = enriched.get('description') or None
+        model.ai_metadata = {
+            'summary': enriched.get('summary'),
+            'categories': enriched.get('categories', []),
+            'quality_notes': enriched.get('quality_notes', []),
+            'provider': enriched.get('provider'),
+            'model': enriched.get('model'),
+            'response_id': enriched.get('response_id'),
+            'updated_at': datetime.utcnow().isoformat(),
+        }
+        if overwrite:
+            model.tags = _merge_tags(model.ai_tags)
+            if include_description and model.ai_description:
+                model.description = model.ai_description
+        else:
+            model.tags = _merge_tags(model.tags, model.ai_tags)
+            if include_description and not model.description and model.ai_description:
+                model.description = model.ai_description
+        model.save()
+        return jsonify({'success': True, 'model': _serialize_model(model), 'enrichment': model.ai_metadata})
+    except Exception as e:
+        print(f"API autotag error: {e}")
+        return jsonify({'error': 'AI enrichment failed'}), 500
+
+
+@api_bp.route('/model/<model_id>/approval', methods=['PUT', 'PATCH'])
+def update_approval(model_id):
+    """Set game-ready and asset-store approval flags."""
+    try:
+        model = Model3D.get_by_id(model_id)
+        if not model:
+            return jsonify({'error': 'Model not found'}), 404
+        if not _can_write_model(model):
+            return jsonify({'error': 'Access denied'}), 403
+        data = _payload()
+        if 'approve_game_ready' in data:
+            model.approve_game_ready = _as_bool(data.get('approve_game_ready'))
+        if 'approve_asset_store' in data:
+            model.approve_asset_store = _as_bool(data.get('approve_asset_store'))
+        if 'approval_notes' in data:
+            model.approval_notes = (data.get('approval_notes') or '').strip() or None
+        model.approval_updated_at = datetime.utcnow()
+        model.tags = _merge_tags(
+            model.tags,
+            ['game-ready'] if model.approve_game_ready else [],
+            ['asset-store'] if model.approve_asset_store else [],
+        )
+        model.save()
+        return jsonify({'success': True, 'model': _serialize_model(model)})
+    except Exception as e:
+        print(f"API approval error: {e}")
+        return jsonify({'error': 'Approval update failed'}), 500
+
+
+def _build_bundle_zip(bundle, models_):
+    fs = current_app.config['FILE_STORE']
+    out = io.BytesIO()
+    manifest = bundle.to_api(include_models=True)
+    with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr('manifest.json', json.dumps(manifest, indent=2))
+        readme = f"# {bundle.name}\n\n{bundle.description}\n\nAssets: {len(models_)}\n"
+        zf.writestr('README.md', readme)
+        for model in models_:
+            data, fmt = model.get_viewable_data()
+            if not data:
+                continue
+            filename = model.original_filename or f"{_safe_stem(model)}.{fmt or model.file_format or 'bin'}"
+            safe_name = filename.replace('\\', '/').split('/')[-1]
+            zf.writestr(f"assets/{model.id}_{safe_name}", data)
+    return out.getvalue()
+
+
+@api_bp.route('/bundles', methods=['GET'])
+def list_bundles():
+    try:
+        page = request.args.get('page', 1, type=int)
+        per_page = min(request.args.get('per_page', 20, type=int), 100)
+        user_only = request.args.get('user_only', 'false').lower() == 'true'
+        principal, service = _api_principal()
+        bundles_, total = AssetBundle.list_for_user(
+            user_id=principal.id if principal else None,
+            page=page,
+            per_page=per_page,
+            public_only=not (user_only or service),
+        )
+        total_pages = (total + per_page - 1) // per_page
+        return jsonify({
+            'bundles': [bundle.to_api(include_models=False) for bundle in bundles_],
+            'pagination': {
+                'page': page, 'per_page': per_page, 'total': total,
+                'pages': total_pages, 'has_prev': page > 1, 'has_next': page < total_pages,
+            },
+        })
+    except Exception as e:
+        print(f"API list bundles error: {e}")
+        return jsonify({'error': 'Failed to retrieve bundles'}), 500
+
+
+@api_bp.route('/bundles', methods=['POST'])
+def create_bundle():
+    try:
+        principal, service, auth_error = _require_api_principal()
+        if auth_error:
+            return auth_error
+        data = request.get_json(silent=True) or {}
+        model_ids = [str(mid) for mid in data.get('model_ids', []) if mid]
+        if not model_ids:
+            return jsonify({'error': 'model_ids is required.'}), 400
+        models_ = []
+        for model_id in model_ids:
+            model = Model3D.get_by_id(model_id)
+            if not model:
+                return jsonify({'error': f'Model not found: {model_id}'}), 404
+            if not (service or _can_access_model(model) or (principal and model.user_id == principal.id)):
+                return jsonify({'error': f'Access denied for model: {model_id}'}), 403
+            models_.append(model)
+
+        name = (data.get('name') or '').strip()
+        if not name:
+            name = f"{models_[0].name} Bundle" if models_ else "Asset Bundle"
+        tags = _merge_tags(data.get('tags', []), *(model.tags for model in models_))
+        bundle = AssetBundle(
+            name=name,
+            description=(data.get('description') or '').strip(),
+            owner_id=principal.id if principal else None,
+            is_public=_as_bool(data.get('is_public', False)),
+            model_ids=model_ids,
+            tags=tags,
+            status=data.get('status') or 'draft',
+            metadata={
+                'approve_game_ready': all(model.approve_game_ready for model in models_),
+                'approve_asset_store': all(model.approve_asset_store for model in models_),
+                'created_by_api': True,
+            },
+        ).save()
+
+        if _as_bool(data.get('create_zip', True)):
+            zip_bytes = _build_bundle_zip(bundle, models_)
+            file_id = current_app.config['FILE_STORE'].put(
+                zip_bytes,
+                filename=f"bundle_{bundle.id}.zip",
+                content_type='application/zip',
+                metadata={'bundle_id': bundle.id, 'kind': 'bundle'},
+            )
+            bundle.file_id = str(file_id)
+            bundle.save()
+
+        return jsonify({'success': True, 'bundle': bundle.to_api(include_models=True)}), 201
+    except Exception as e:
+        print(f"API create bundle error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': 'Bundle creation failed'}), 500
+
+
+@api_bp.route('/bundles/<bundle_id>', methods=['GET'])
+def get_bundle(bundle_id):
+    try:
+        bundle = AssetBundle.get(bundle_id)
+        if not bundle:
+            return jsonify({'error': 'Bundle not found'}), 404
+        principal, service = _api_principal()
+        if not (bundle.is_public or service or (principal and bundle.owner_id == principal.id)):
+            return jsonify({'error': 'Access denied'}), 403
+        return jsonify({'bundle': bundle.to_api(include_models=True)})
+    except Exception as e:
+        print(f"API get bundle error: {e}")
+        return jsonify({'error': 'Failed to retrieve bundle'}), 500
+
+
+@api_bp.route('/bundles/<bundle_id>/download', methods=['GET'])
+def download_bundle(bundle_id):
+    try:
+        bundle = AssetBundle.get(bundle_id)
+        if not bundle:
+            return jsonify({'error': 'Bundle not found'}), 404
+        principal, service = _api_principal()
+        if not (bundle.is_public or service or (principal and bundle.owner_id == principal.id)):
+            return jsonify({'error': 'Access denied'}), 403
+        if not bundle.file_id:
+            return jsonify({'error': 'Bundle zip has not been created.'}), 404
+        data = current_app.config['FILE_STORE'].get(bundle.file_id).read()
+        return _download_bytes(data, f'{_safe_stem(bundle)}.zip', 'application/zip')
+    except Exception as e:
+        print(f"API download bundle error: {e}")
+        return jsonify({'error': 'Bundle download failed'}), 500

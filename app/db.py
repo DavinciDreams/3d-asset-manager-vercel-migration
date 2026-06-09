@@ -104,6 +104,32 @@ models = Table(
     Column("conversion_error", Text),
     Column("conversion_claimed_at", DateTime),
     Column("vrma_file_id", String(36), ForeignKey("asset_files.id")),
+    Column("ai_status", String(40)),
+    Column("ai_error", Text),
+    Column("ai_description", Text),
+    Column("ai_tags", _json_type(), nullable=False, default=list),
+    Column("ai_metadata", _json_type(), nullable=False, default=dict),
+    Column("approve_game_ready", Boolean, nullable=False, default=False, index=True),
+    Column("approve_asset_store", Boolean, nullable=False, default=False, index=True),
+    Column("approval_notes", Text),
+    Column("approval_updated_at", DateTime),
+)
+
+bundles = Table(
+    "bundles",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("name", String(255), nullable=False),
+    Column("description", Text, nullable=False, default=""),
+    Column("owner_id", String(36), ForeignKey("users.id"), index=True),
+    Column("is_public", Boolean, nullable=False, default=False, index=True),
+    Column("model_ids", _json_type(), nullable=False, default=list),
+    Column("tags", _json_type(), nullable=False, default=list),
+    Column("status", String(40), nullable=False, default="draft", index=True),
+    Column("file_id", String(36), ForeignKey("asset_files.id")),
+    Column("metadata", _json_type(), nullable=False, default=dict),
+    Column("created_at", DateTime, nullable=False, default=datetime.utcnow),
+    Column("updated_at", DateTime, nullable=False, default=datetime.utcnow),
 )
 
 world_states = Table(
@@ -279,6 +305,7 @@ def init_database(engine):
     metadata.create_all(engine)
     _ensure_asset_file_columns(engine)
     _ensure_model_columns(engine)
+    _ensure_bundle_table(engine)
 
 
 def _ensure_asset_file_columns(engine):
@@ -310,6 +337,15 @@ def _ensure_model_columns(engine):
         "conversion_error": "TEXT",
         "conversion_claimed_at": "TIMESTAMP",
         "vrma_file_id": "VARCHAR(36)",
+        "ai_status": "VARCHAR(40)",
+        "ai_error": "TEXT",
+        "ai_description": "TEXT",
+        "ai_tags": "JSONB NOT NULL DEFAULT '[]'::jsonb" if engine.dialect.name == "postgresql" else "JSON DEFAULT '[]' NOT NULL",
+        "ai_metadata": "JSONB NOT NULL DEFAULT '{}'::jsonb" if engine.dialect.name == "postgresql" else "JSON DEFAULT '{}' NOT NULL",
+        "approve_game_ready": "BOOLEAN NOT NULL DEFAULT FALSE",
+        "approve_asset_store": "BOOLEAN NOT NULL DEFAULT FALSE",
+        "approval_notes": "TEXT",
+        "approval_updated_at": "TIMESTAMP",
     }
     with engine.begin() as conn:
         for column, ddl_type in desired.items():
@@ -319,6 +355,13 @@ def _ensure_model_columns(engine):
                 except OperationalError as error:
                     if not _ignore_duplicate_column(error):
                         raise
+
+
+def _ensure_bundle_table(engine):
+    # metadata.create_all creates this table for fresh installs. Keeping a small
+    # explicit hook makes startup migrations symmetrical with models/files.
+    if not inspect(engine).has_table("bundles"):
+        bundles.create(engine, checkfirst=True)
 
 
 @contextmanager
