@@ -1024,7 +1024,8 @@ def optimize_model_for_game(model_id):
         if not (principal or service):
             return jsonify({'error': 'Authentication required'}), 401
 
-        if not shutil.which('gltfpack'):
+        gltfpack_bin = shutil.which('gltfpack')
+        if not gltfpack_bin:
             return jsonify({'error': 'Game optimization is unavailable because gltfpack is not installed.'}), 503
 
         data = _payload()
@@ -1053,7 +1054,7 @@ def optimize_model_for_game(model_id):
                 f.write(src_bytes)
 
             cmd = [
-                'gltfpack',
+                gltfpack_bin,
                 '-i', in_path,
                 '-o', out_path,
                 '-cc' if compression_mode == 'meshopt' else '-cf',
@@ -1067,7 +1068,7 @@ def optimize_model_for_game(model_id):
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=300,
+                timeout=120,
                 check=False,
             )
             if result.returncode != 0:

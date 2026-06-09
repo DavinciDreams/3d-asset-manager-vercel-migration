@@ -726,7 +726,10 @@ document.addEventListener('DOMContentLoaded', function() {
                         compression_mode: compressionMode
                     })
                 });
-                const data = await response.json();
+                const contentType = response.headers.get('content-type') || '';
+                const data = contentType.includes('application/json')
+                    ? await response.json()
+                    : { error: (await response.text()).trim() || `HTTP ${response.status}` };
                 if (!response.ok) {
                     throw new Error(data.error || 'Game optimization failed.');
                 }
