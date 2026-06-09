@@ -66,21 +66,25 @@
     {% endif %}
 
     {% if models and models.items and models.items|length > 0 %}
-        <!-- Gallery grid: dense, compact, square previews -->
-        <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-5 gap-4">
+        <!-- Gallery grid: dense, compact, square previews.
+             First page is server-rendered; further pages are appended by the
+             infinite-scroll script below. Media is lazy-loaded per card. -->
+        <div id="gallery-grid" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-5 gap-4">
             {% for model in models.items %}
-            <div class="bg-white rounded-lg card-shadow hover-scale overflow-hidden flex flex-col">
+            <div class="model-card bg-white rounded-lg card-shadow hover-scale overflow-hidden flex flex-col">
                 <!-- Square preview -->
                 <a href="{{ url_for('main.model_detail', model_id=model.id) }}"
                    class="block relative aspect-square bg-gray-100">
                     {% if model.preview_file_id %}
-                        <video class="w-full h-full object-cover" autoplay loop muted playsinline
-                               poster="{% if model.thumbnail_file_id %}{{ url_for('api.get_thumbnail', model_id=model.id) }}{% endif %}">
-                            <source src="{{ url_for('api.get_preview', model_id=model.id) }}" type="video/webm">
-                        </video>
+                        {# Video src is filled in by the observer only when visible. #}
+                        <video class="w-full h-full object-cover lazy-media" loop muted playsinline
+                               preload="none"
+                               data-preview-src="{{ url_for('api.get_preview', model_id=model.id) }}"
+                               poster="{% if model.thumbnail_file_id %}{{ url_for('api.get_thumbnail', model_id=model.id) }}{% endif %}"></video>
                     {% elif model.thumbnail_file_id %}
-                        <img src="{{ url_for('api.get_thumbnail', model_id=model.id) }}"
-                             alt="{{ model.name }}" class="w-full h-full object-cover"
+                        <img alt="{{ model.name }}" class="w-full h-full object-cover lazy-media"
+                             loading="lazy"
+                             data-img-src="{{ url_for('api.get_thumbnail', model_id=model.id) }}"
                              onerror="this.style.display='none';this.nextElementSibling.style.display='flex';">
                         <div class="absolute inset-0 hidden items-center justify-center text-gray-300">
                             <i class="fas fa-cube text-3xl"></i>
@@ -123,41 +127,177 @@
             {% endfor %}
         </div>
 
-        <!-- Pagination -->
-        {% if models.pages > 1 %}
-        <div class="flex justify-center mt-8">
-            <nav class="flex space-x-1">
-                {% if models.has_prev %}
-                    <a href="{{ url_for('main.browse', page=models.prev_num, search=search, sort=sort, tag=tags) }}"
-                       class="px-3 py-2 bg-gray-200 text-gray-700 rounded hover:bg-gray-300">
-                        Previous
-                    </a>
-                {% endif %}
-                
-                {% for page_num in models.iter_pages() %}
-                    {% if page_num %}
-                        {% if page_num != models.page %}
-                            <a href="{{ url_for('main.browse', page=page_num, search=search, sort=sort, tag=tags) }}"
-                               class="px-3 py-2 bg-gray-200 text-gray-700 rounded hover:bg-gray-300">
-                                {{ page_num }}
-                            </a>
-                        {% else %}
-                            <span class="px-3 py-2 bg-blue-600 text-white rounded">{{ page_num }}</span>
-                        {% endif %}
-                    {% else %}
-                        <span class="px-3 py-2">…</span>
-                    {% endif %}
-                {% endfor %}
-                
-                {% if models.has_next %}
-                    <a href="{{ url_for('main.browse', page=models.next_num, search=search, sort=sort, tag=tags) }}"
-                       class="px-3 py-2 bg-gray-200 text-gray-700 rounded hover:bg-gray-300">
-                        Next
-                    </a>
-                {% endif %}
-            </nav>
+        <!-- Infinite-scroll status / sentinel -->
+        <div id="scroll-sentinel" class="h-12"></div>
+        <div id="scroll-status" class="flex justify-center mt-4 mb-8 text-gray-400 text-sm" aria-live="polite">
+            {% if models.has_next %}
+            <span id="loading-spinner" class="hidden"><i class="fas fa-spinner fa-spin mr-2"></i>Loading more…</span>
+            {% else %}
+            <span>That's everything.</span>
+            {% endif %}
         </div>
-        {% endif %}
+
+        <script>
+        // --- Browse infinite scroll + viewport-only media loading -----------
+        // The first page is in the DOM already; we fetch subsequent pages from
+        // /api/models and append cards. One IntersectionObserver loads a card's
+        // thumbnail / starts its preview video only while it is on screen, and
+        // pauses the video when it scrolls away -- essential now that dozens of
+        // cards can be present at once.
+        (function () {
+            const grid = document.getElementById('gallery-grid');
+            const sentinel = document.getElementById('scroll-sentinel');
+            const statusEl = document.getElementById('scroll-status');
+            const spinner = document.getElementById('loading-spinner');
+            if (!grid || !sentinel) return;
+
+            const params = {
+                search: {{ (search or '') | tojson }},
+                sort: {{ (sort or 'newest') | tojson }},
+                tags: {{ (tags or []) | tojson }},
+            };
+            let page = {{ models.page }};
+            let hasNext = {{ 'true' if models.has_next else 'false' }};
+            let loading = false;
+
+            // Lazy media: load img/video when visible, pause video when hidden.
+            const mediaObserver = new IntersectionObserver((entries) => {
+                for (const entry of entries) {
+                    const el = entry.target;
+                    if (entry.isIntersecting) {
+                        if (el.tagName === 'IMG' && el.dataset.imgSrc && !el.src) {
+                            el.src = el.dataset.imgSrc;
+                        } else if (el.tagName === 'VIDEO') {
+                            if (el.dataset.previewSrc && !el.dataset.loaded) {
+                                el.src = el.dataset.previewSrc;
+                                el.dataset.loaded = '1';
+                            }
+                            const p = el.play();
+                            if (p && p.catch) p.catch(() => {});
+                        }
+                    } else if (el.tagName === 'VIDEO') {
+                        el.pause();
+                    }
+                }
+            }, { rootMargin: '200px 0px' });
+
+            function observeMediaIn(root) {
+                root.querySelectorAll('.lazy-media').forEach((el) => mediaObserver.observe(el));
+            }
+            // Wire up the server-rendered first page.
+            observeMediaIn(grid);
+
+            const esc = (s) => String(s == null ? '' : s)
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+            function tagQuery(extraTag) {
+                const usp = new URLSearchParams();
+                if (params.search) usp.set('search', params.search);
+                if (params.sort) usp.set('sort', params.sort);
+                const tagSet = new Set(params.tags);
+                if (extraTag) tagSet.add(extraTag);
+                tagSet.forEach((t) => usp.append('tag', t));
+                return usp.toString();
+            }
+
+            function iconFor(fmt) {
+                if (fmt === 'vrm') return 'fa-user';
+                if (fmt === 'vrma') return 'fa-person-running';
+                return 'fa-cube';
+            }
+
+            function cardHtml(m) {
+                let media;
+                if (m.has_preview && m.preview_url) {
+                    media = `<video class="w-full h-full object-cover lazy-media" loop muted playsinline preload="none"
+                                 data-preview-src="${esc(m.preview_url)}"
+                                 ${m.thumbnail_url ? `poster="${esc(m.thumbnail_url)}"` : ''}></video>`;
+                } else if (m.has_thumbnail && m.thumbnail_url) {
+                    media = `<img alt="${esc(m.name)}" class="w-full h-full object-cover lazy-media" loading="lazy"
+                                 data-img-src="${esc(m.thumbnail_url)}"
+                                 onerror="this.style.display='none';this.nextElementSibling.style.display='flex';">
+                             <div class="absolute inset-0 hidden items-center justify-center text-gray-300"><i class="fas fa-cube text-3xl"></i></div>`;
+                } else {
+                    media = `<div class="absolute inset-0 flex items-center justify-center text-gray-300"><i class="fas ${iconFor(m.file_format)} text-3xl"></i></div>`;
+                }
+
+                let statusBadge = '';
+                if (m.conversion_status === 'pending' || m.conversion_status === 'processing') {
+                    statusBadge = `<span class="inline-flex items-center mt-1 w-fit px-1.5 py-0.5 text-[10px] font-medium bg-yellow-100 text-yellow-800 rounded"><i class="fas fa-spinner fa-spin mr-1"></i>Processing</span>`;
+                } else if (m.conversion_status === 'failed') {
+                    statusBadge = `<span class="inline-flex items-center mt-1 w-fit px-1.5 py-0.5 text-[10px] font-medium bg-red-100 text-red-800 rounded"><i class="fas fa-exclamation-triangle mr-1"></i>Preview failed</span>`;
+                }
+
+                const tags = (m.tags || []).slice(0, 3).map((t) => {
+                    const active = params.tags.includes(t);
+                    const cls = active ? 'bg-indigo-600 text-white' : 'bg-indigo-50 text-indigo-700 hover:bg-indigo-100';
+                    return `<a href="/browse?${tagQuery(active ? null : t)}" class="text-[10px] px-1.5 py-0.5 rounded ${cls}">${esc(t)}</a>`;
+                }).join('');
+                const tagBlock = tags ? `<div class="flex flex-wrap gap-1 mt-2">${tags}</div>` : '';
+
+                return `<div class="model-card bg-white rounded-lg card-shadow hover-scale overflow-hidden flex flex-col">
+                    <a href="${esc(m.detail_url)}" class="block relative aspect-square bg-gray-100">
+                        ${media}
+                        <span class="absolute top-1.5 right-1.5 bg-black/60 text-white text-[10px] px-1.5 py-0.5 rounded uppercase">${esc(m.file_format)}</span>
+                    </a>
+                    <div class="p-3 flex flex-col flex-1">
+                        <a href="${esc(m.detail_url)}" class="font-semibold text-sm text-gray-800 hover:text-indigo-600 truncate" title="${esc(m.name)}">${esc(m.name)}</a>
+                        ${statusBadge}
+                        <div class="flex justify-between items-center text-xs text-gray-400 mt-1">
+                            <span class="truncate">${esc(m.owner_username)}</span>
+                            <span><i class="fas fa-download mr-0.5"></i>${m.download_count}</span>
+                        </div>
+                        ${tagBlock}
+                    </div>
+                </div>`;
+            }
+
+            async function loadMore() {
+                if (loading || !hasNext) return;
+                loading = true;
+                if (spinner) spinner.classList.remove('hidden');
+                try {
+                    const usp = new URLSearchParams();
+                    usp.set('page', String(page + 1));
+                    if (params.search) usp.set('search', params.search);
+                    if (params.sort) usp.set('sort', params.sort);
+                    params.tags.forEach((t) => usp.append('tag', t));
+
+                    const res = await fetch(`/api/models?${usp.toString()}`, { headers: { 'Accept': 'application/json' } });
+                    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                    const data = await res.json();
+
+                    const frag = document.createElement('div');
+                    frag.innerHTML = (data.models || []).map(cardHtml).join('');
+                    const added = Array.from(frag.children);
+                    added.forEach((node) => grid.appendChild(node));
+                    observeMediaIn(grid);
+
+                    page = data.page;
+                    hasNext = !!data.has_next;
+                    if (!hasNext && statusEl) {
+                        statusEl.innerHTML = '<span>That’s everything.</span>';
+                    }
+                } catch (err) {
+                    console.error('Failed to load more models:', err);
+                    if (statusEl) statusEl.innerHTML = '<button id="retry-more" class="text-blue-600 hover:underline">Couldn’t load more — retry</button>';
+                    const retry = document.getElementById('retry-more');
+                    if (retry) retry.addEventListener('click', () => { if (statusEl) statusEl.innerHTML = ''; loadMore(); });
+                    // Stop observing so we don't hammer a failing endpoint.
+                    sentinelObserver.disconnect();
+                } finally {
+                    loading = false;
+                    if (spinner) spinner.classList.add('hidden');
+                }
+            }
+
+            const sentinelObserver = new IntersectionObserver((entries) => {
+                if (entries.some((e) => e.isIntersecting)) loadMore();
+            }, { rootMargin: '600px 0px' });
+            if (hasNext) sentinelObserver.observe(sentinel);
+        })();
+        </script>
 
     {% else %}
         <!-- Empty State -->
