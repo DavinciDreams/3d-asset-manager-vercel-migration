@@ -1,6 +1,6 @@
 from flask import Blueprint, render_template, request, redirect, url_for, flash, current_app, session
 from flask_login import login_required, current_user
-from app.models import ApiKey, Model3D, User
+from app.models import ApiKey, Model3D, ModelVariant, User
 from werkzeug.utils import secure_filename
 import io
 
@@ -181,8 +181,12 @@ def model_detail(model_id):
         all_tags = Model3D.get_user_tags(model.user_id) if (
             current_user.is_authenticated and current_user.id == model.user_id) else []
 
+        # Game-optimized variant (if any) so the detail page can show the
+        # Original/Game-Optimized toggle + download on a fresh load.
+        game_variant = ModelVariant.get(model.id, 'game')
+
         return render_template('model_detail.html', model=model, owner=owner,
-                               all_tags=all_tags)
+                               all_tags=all_tags, game_variant=game_variant)
         
     except Exception as e:
         print(f"Model detail error: {e}")

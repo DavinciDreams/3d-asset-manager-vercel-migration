@@ -92,15 +92,15 @@
                 {% endif %}
             </div>
 
-            <!-- Original / Game-Optimized toggle (revealed when a game variant exists) -->
-            <div id="variant-toggle" class="{% if not model.has_game_optimized %}hidden {% endif %}mt-3 inline-flex rounded-lg border border-gray-200 overflow-hidden text-sm">
+            <!-- Original / Game-Optimized toggle (shown when a game variant exists) -->
+            <div id="variant-toggle" class="{% if not game_variant %}hidden {% endif %}mt-3 inline-flex rounded-lg border border-gray-200 overflow-hidden text-sm">
                 <button type="button" id="variant-btn-original" onclick="switchVariant('original')"
                         class="px-4 py-2 font-medium bg-indigo-600 text-white">
                     Original
                 </button>
                 <button type="button" id="variant-btn-game" onclick="switchVariant('game')"
                         class="px-4 py-2 font-medium bg-white text-gray-700 hover:bg-gray-50">
-                    <i class="fas fa-gamepad mr-1"></i>Game-Optimized<span id="variant-game-size"></span>
+                    <i class="fas fa-gamepad mr-1"></i>Game-Optimized<span id="variant-game-size">{% if game_variant and game_variant.size %} ({{ "%.2f"|format(game_variant.size / 1024 / 1024) }} MB){% endif %}</span>
                 </button>
             </div>
 
@@ -177,9 +177,9 @@
                             VRMA (animation)
                         </a>
                         {% endif %}
-                        <div id="export-game-divider" class="border-t border-gray-100 my-1 {% if not model.has_game_optimized %}hidden{% endif %}"></div>
+                        <div id="export-game-divider" class="border-t border-gray-100 my-1 {% if not game_variant %}hidden{% endif %}"></div>
                         <a id="export-game-link" href="{{ url_for('api.get_game_optimized', model_id=model.id, download=1) }}"
-                           class="block px-4 py-2 text-sm text-teal-700 hover:bg-teal-50 {% if not model.has_game_optimized %}hidden{% endif %}">
+                           class="block px-4 py-2 text-sm text-teal-700 hover:bg-teal-50 {% if not game_variant %}hidden{% endif %}">
                             <i class="fas fa-gamepad mr-1"></i>Game-optimized GLB
                         </a>
                     </div>
