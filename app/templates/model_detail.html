@@ -727,9 +727,18 @@ document.addEventListener('DOMContentLoaded', function() {
                     })
                 });
                 const contentType = response.headers.get('content-type') || '';
-                const data = contentType.includes('application/json')
-                    ? await response.json()
-                    : { error: (await response.text()).trim() || `HTTP ${response.status}` };
+                let data;
+                if (contentType.includes('application/json')) {
+                    data = await response.json();
+                } else {
+                    const bodyText = (await response.text()).trim();
+                    const isHtml = bodyText.startsWith('<!DOCTYPE') || bodyText.startsWith('<html');
+                    data = {
+                        error: isHtml
+                            ? `Server returned HTTP ${response.status} while optimizing. The asset is still safe; try again after the optimizer service is fixed.`
+                            : bodyText || `HTTP ${response.status}`
+                    };
+                }
                 if (!response.ok) {
                     throw new Error(data.error || 'Game optimization failed.');
                 }
