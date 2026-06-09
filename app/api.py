@@ -10,6 +10,7 @@ import hmac
 import io
 import json
 import os
+import struct
 import threading
 import uuid
 import zipfile
@@ -32,6 +33,82 @@ MIME_TYPES = {
 
 def _mime_for(fmt):
     return MIME_TYPES.get((fmt or '').lower(), 'application/octet-stream')
+
+
+_GLB_MAGIC = b'glTF'
+_GLB_JSON_CHUNK = 0x4E4F534A
+
+
+def _json_chunk_bytes(payload):
+    raw = json.dumps(payload, separators=(',', ':')).encode('utf-8')
+    padding = (-len(raw)) % 4
+    return raw + (b' ' * padding)
+
+
+def _force_meshopt_required_for_external_fallback(glb_bytes):
+    """Repair old gltfpack -cf GLBs that reference a missing *.fallback.bin.
+
+    gltfpack -cf writes meshopt-compressed data into the GLB and an external
+    fallback buffer next to it. Since this app stores one file per model, older
+    uploads are missing that fallback .bin. Modern loaders can use the embedded
+    meshopt data when EXT_meshopt_compression is required, so we rewrite only
+    the JSON chunk to require meshopt and leave binary chunks intact.
+    """
+    if not glb_bytes or glb_bytes[:4] != _GLB_MAGIC or len(glb_bytes) < 20:
+        return glb_bytes
+    try:
+        magic, version, declared_length = struct.unpack_from('<4sII', glb_bytes, 0)
+        if magic != _GLB_MAGIC or version != 2 or declared_length > len(glb_bytes):
+            return glb_bytes
+
+        offset = 12
+        json_start = json_end = None
+        chunks = []
+        while offset + 8 <= declared_length:
+            chunk_length, chunk_type = struct.unpack_from('<II', glb_bytes, offset)
+            data_start = offset + 8
+            data_end = data_start + chunk_length
+            if data_end > declared_length:
+                return glb_bytes
+            chunks.append((offset, chunk_length, chunk_type, data_start, data_end))
+            if chunk_type == _GLB_JSON_CHUNK and json_start is None:
+                json_start, json_end = data_start, data_end
+            offset = data_end
+
+        if json_start is None:
+            return glb_bytes
+
+        gltf = json.loads(glb_bytes[json_start:json_end].decode('utf-8').rstrip(' \t\r\n\0'))
+        used = set(gltf.get('extensionsUsed') or [])
+        required = set(gltf.get('extensionsRequired') or [])
+        if 'EXT_meshopt_compression' not in used or 'EXT_meshopt_compression' in required:
+            return glb_bytes
+        external_fallback = any(
+            (buffer.get('uri') or '').endswith('.fallback.bin')
+            and (buffer.get('extensions') or {}).get('EXT_meshopt_compression', {}).get('fallback') is True
+            for buffer in gltf.get('buffers') or []
+        )
+        if not external_fallback:
+            return glb_bytes
+
+        required.add('EXT_meshopt_compression')
+        gltf['extensionsRequired'] = [name for name in gltf.get('extensionsUsed', []) if name in required]
+        json_bytes = _json_chunk_bytes(gltf)
+
+        rebuilt = bytearray()
+        rebuilt.extend(glb_bytes[:12])
+        for _chunk_offset, chunk_length, chunk_type, data_start, data_end in chunks:
+            if chunk_type == _GLB_JSON_CHUNK and data_start == json_start:
+                rebuilt.extend(struct.pack('<II', len(json_bytes), chunk_type))
+                rebuilt.extend(json_bytes)
+            else:
+                rebuilt.extend(struct.pack('<II', chunk_length, chunk_type))
+                rebuilt.extend(glb_bytes[data_start:data_end])
+        struct.pack_into('<I', rebuilt, 8, len(rebuilt))
+        return bytes(rebuilt)
+    except Exception as error:
+        print(f"GLB meshopt fallback repair warning: {error}")
+        return glb_bytes
 
 
 def _can_access_model(model):
@@ -322,7 +399,9 @@ def view_model(model_id):
         
         if not file_data:
             return jsonify({'error': 'File not found'}), 404
-        
+        if (view_format or '').lower() in ('glb', 'vrm'):
+            file_data = _force_meshopt_required_for_external_fallback(file_data)
+
         # Create response for viewing (not download)
         response = make_response(file_data)
         response.headers['Content-Type'] = _mime_for(view_format)
