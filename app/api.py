@@ -1067,6 +1067,7 @@ def _run_game_optimizer(model, owner_id, settings):
     texture_limit = settings['texture_limit']
     simplify_ratio = settings['simplify_ratio']
     compression_mode = settings['compression_mode']
+    texture_limit_applied = bool(texture_limit)
 
     src_bytes, src_fmt = model.get_viewable_data()
     src_fmt = (src_fmt or model.file_format or '').lower()
@@ -1092,7 +1093,7 @@ def _run_game_optimizer(model, owner_id, settings):
             '-r', report_path,
         ]
         if texture_limit:
-            cmd.extend(['-tl', str(texture_limit)])
+            cmd.extend(['-tc', '-tl', str(texture_limit)])
 
         result = subprocess.run(
             cmd,
@@ -1125,9 +1126,15 @@ def _run_game_optimizer(model, owner_id, settings):
             'source_format': src_fmt,
             'source_size': len(src_bytes),
             'optimized_size': len(out_bytes),
-            'texture_limit': texture_limit,
+            'texture_limit': texture_limit if texture_limit_applied else None,
+            'requested_texture_limit': texture_limit,
             'simplify_ratio': simplify_ratio,
-            'gltfpack': {'mode': compression_mode, 'report': report},
+            'gltfpack': {
+                'mode': compression_mode,
+                'texture_compression': texture_limit_applied,
+                'texture_note': 'Texture cap applied with KTX2/Basis compression.' if texture_limit_applied else '',
+                'report': report,
+            },
         }
         file_id = fs.put(
             out_bytes,
@@ -1137,7 +1144,8 @@ def _run_game_optimizer(model, owner_id, settings):
         )
 
         description = (model.description or '').strip()
-        suffix = f'Game optimized from model {model.id}. Texture cap {texture_limit or "none"}px, mesh ratio {simplify_ratio:g}.'
+        texture_label = texture_limit if texture_limit_applied else 'none'
+        suffix = f'Game optimized from model {model.id}. Texture cap {texture_label}px, mesh ratio {simplify_ratio:g}.'
         optimized = Model3D(
             name=optimized_name,
             description=f'{description}\n\n{suffix}'.strip(),
@@ -1158,6 +1166,7 @@ def _run_game_optimizer(model, owner_id, settings):
         original_size = len(src_bytes)
         optimized_size = len(out_bytes)
         savings_ratio = 0 if original_size <= 0 else 1 - (optimized_size / original_size)
+        texture_note = 'KTX2/Basis' if texture_limit_applied else 'unchanged'
         return {
             'success': True,
             'model': _serialize_model(optimized),
@@ -1169,6 +1178,7 @@ def _run_game_optimizer(model, owner_id, settings):
                 'texture_limit': texture_limit,
                 'simplify_ratio': simplify_ratio,
                 'compression': 'gltfpack -cc' if compression_mode == 'meshopt' else 'gltfpack -cf',
+                'texture_compression': texture_note,
             },
             'report': report,
         }

@@ -1,3 +1,24 @@
+FROM python:3.12-slim AS gltfpack-builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        cmake \
+        g++ \
+        git \
+        make \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git clone --depth 1 https://github.com/BinomialLLC/basis_universal.git /tmp/basis_universal \
+    && git clone --depth 1 https://github.com/zeux/meshoptimizer.git /tmp/meshoptimizer \
+    && cmake -S /tmp/meshoptimizer -B /tmp/meshoptimizer/build \
+        -DMESHOPT_BUILD_GLTFPACK=ON \
+        -DMESHOPT_GLTFPACK_BASISU_PATH=/tmp/basis_universal \
+        -DMESHOPT_INSTALL=OFF \
+        -DCMAKE_BUILD_TYPE=Release \
+    && cmake --build /tmp/meshoptimizer/build --target gltfpack -j$(nproc) \
+    && install -m 0755 /tmp/meshoptimizer/build/gltfpack /usr/local/bin/gltfpack \
+    && /usr/local/bin/gltfpack -v
+
 FROM python:3.12-slim
 
 # Avoid .pyc files and buffer issues in containers
@@ -9,12 +30,13 @@ WORKDIR /app
 # System tools for mesh conversion and FBX animation extraction.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         assimp-utils \
-        gltfpack \
         nodejs \
         npm \
         curl \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+COPY --from=gltfpack-builder /usr/local/bin/gltfpack /usr/local/bin/gltfpack
 
 RUN curl -fSL -o /usr/local/bin/FBX2glTF \
         https://github.com/facebookincubator/FBX2glTF/releases/download/v0.9.7/FBX2glTF-linux-x64 \
