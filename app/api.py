@@ -1650,7 +1650,9 @@ def _start_game_optimization_thread(app, job_id):
 
 GAME_OPTIMIZE_DEFAULTS = {
     'texture_limit': 1024,
-    'simplify_ratio': 0.75,
+    # 0.85 keeps more geometry than 0.75 and looked great in practice while
+    # still being small with meshopt ("smallest") compression.
+    'simplify_ratio': 0.85,
     'compression_mode': 'meshopt',
 }
 
