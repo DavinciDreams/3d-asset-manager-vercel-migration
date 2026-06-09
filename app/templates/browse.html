@@ -7,8 +7,12 @@
     /* The preview media is decorative and sits inside the card's <a>. Without
        this, a playing <video> can swallow the click so the link never fires
        (page just scrolls to top). Let clicks fall through to the anchor. */
-    #gallery-grid .lazy-media { pointer-events: none; }
+    #gallery-grid .lazy-media,
+    #gallery-grid .card-media canvas { pointer-events: none; }
+    /* The live 3D viewer canvas should fill the square card media area. */
+    #gallery-grid .card-media canvas { width: 100% !important; height: 100% !important; object-fit: cover; }
 </style>
+{% include "_preview_capture.html" %}
 <div class="container mx-auto px-4 py-8">
     <div class="flex flex-wrap justify-between items-center gap-4 mb-6">
         <h1 class="text-3xl font-bold text-gray-800">Browse 3D Models</h1>
@@ -79,15 +83,23 @@
             {% for model in models.items %}
             <div class="model-card bg-white rounded-lg card-shadow hover-scale overflow-hidden flex flex-col">
                 <!-- Square preview -->
+                {% set is_owner = current_user.is_authenticated and current_user.id == model.user_id %}
+                {% set viewable = model.viewable_file_id or model.file_format in ['glb', 'gltf'] %}
                 <a href="{{ url_for('main.model_detail', model_id=model.id) }}"
-                   class="block relative aspect-square bg-gray-100">
+                   class="block relative aspect-square bg-gray-100 card-media"
+                   data-model-id="{{ model.id }}"
+                   data-viewable="{{ '1' if viewable else '0' }}"
+                   data-is-owner="{{ '1' if is_owner else '0' }}"
+                   {% if viewable %}data-view-src="{{ url_for('api.view_model', model_id=model.id) }}?viewer=2"{% endif %}
+                   {% if model.thumbnail_file_id %}data-thumb-src="{{ url_for('api.get_thumbnail', model_id=model.id) }}"{% endif %}>
                     {% if model.preview_file_id %}
-                        {# Video src is filled in by the observer only when visible. #}
+                        {# Has a cached rotating preview -> cheap <video>, played by the observer when visible. #}
                         <video class="w-full h-full object-cover lazy-media" loop muted playsinline
                                preload="none"
                                data-preview-src="{{ url_for('api.get_preview', model_id=model.id) }}"
                                poster="{% if model.thumbnail_file_id %}{{ url_for('api.get_thumbnail', model_id=model.id) }}{% endif %}"></video>
                     {% elif model.thumbnail_file_id %}
+                        {# No preview yet: show thumbnail now; a live 3D viewer mounts on view (and captures for the owner). #}
                         <img alt="{{ model.name }}" class="w-full h-full object-cover lazy-media"
                              loading="lazy"
                              data-img-src="{{ url_for('api.get_thumbnail', model_id=model.id) }}"
@@ -190,8 +202,109 @@
             function observeMediaIn(root) {
                 root.querySelectorAll('.lazy-media').forEach((el) => mediaObserver.observe(el));
             }
+
+            // --- Live 3D previews for cards without a cached video ----------
+            // Cards that are viewable but have no preview video mount a live,
+            // rotating AssetThreeViewer when on screen (so browse looks alive),
+            // capped to a few at once for performance. For the owner, we capture
+            // a short WebM the first time so subsequent loads use the cheap
+            // <video>. Animated models animate in both the live view and capture
+            // (AssetThreeViewer auto-plays embedded clips).
+            const MAX_LIVE_VIEWERS = 4;
+            const liveActive = new Map();   // card element -> viewer api (or 'pending')
+            const liveWanted = new Set();   // cards currently in view wanting a live viewer
+            const liveCaptured = new Set(); // model ids we've already tried to capture
+
+            function liveEligible(card) {
+                return card
+                    && card.dataset.viewable === '1'
+                    && !card.dataset.liveDone
+                    && !card.querySelector('video[data-preview-src]'); // already has cached preview
+            }
+
+            async function mountLive(card) {
+                if (!window.AssetThreeViewer || liveActive.has(card)) return;
+                liveActive.set(card, 'pending');
+                const modelId = card.dataset.modelId;
+                const viewUrl = card.dataset.viewSrc;
+                if (!viewUrl) { liveActive.delete(card); return; }
+
+                // Host element for the canvas, overlaid on the card media.
+                let host = card.querySelector('.live-host');
+                if (!host) {
+                    host = document.createElement('div');
+                    host.className = 'live-host absolute inset-0';
+                    card.appendChild(host);
+                }
+                try {
+                    const api = await window.AssetThreeViewer.create(host, viewUrl, {
+                        card: true,
+                        autoRotate: true,
+                        onError: () => { /* keep the thumbnail/icon underneath */ },
+                    });
+                    if (!api) { liveActive.delete(card); return; }
+                    // If the card scrolled away while loading, tear down now.
+                    if (!liveWanted.has(card)) { api.dispose(); host.remove(); liveActive.delete(card); return; }
+                    liveActive.set(card, api);
+
+                    // Owner-only: capture a rotating (and animated) WebM once.
+                    if (card.dataset.isOwner === '1' && window.capturePreview
+                        && modelId && !liveCaptured.has(modelId)) {
+                        liveCaptured.add(modelId);
+                        const canvas = api.canvas;
+                        if (canvas) {
+                            window.capturePreview(canvas, modelId, { durationMs: 4000 })
+                                .then((ok) => { if (ok) card.dataset.liveDone = '1'; })
+                                .catch(() => {});
+                        }
+                    }
+                } catch (e) {
+                    liveActive.delete(card);
+                }
+            }
+
+            function unmountLive(card) {
+                const api = liveActive.get(card);
+                if (api && api !== 'pending') {
+                    try { api.dispose(); } catch (e) {}
+                    const host = card.querySelector('.live-host');
+                    if (host) host.remove();
+                }
+                liveActive.delete(card);
+            }
+
+            // Promote queued cards into free live-viewer slots (nearest first
+            // is approximated by insertion order of liveWanted).
+            function pumpLiveQueue() {
+                if (liveActive.size >= MAX_LIVE_VIEWERS) return;
+                for (const card of liveWanted) {
+                    if (liveActive.size >= MAX_LIVE_VIEWERS) break;
+                    if (!liveActive.has(card) && liveEligible(card)) mountLive(card);
+                }
+            }
+
+            const liveObserver = new IntersectionObserver((entries) => {
+                for (const entry of entries) {
+                    const card = entry.target;
+                    if (entry.isIntersecting && liveEligible(card)) {
+                        liveWanted.add(card);
+                    } else {
+                        liveWanted.delete(card);
+                        unmountLive(card);
+                    }
+                }
+                pumpLiveQueue();
+            }, { rootMargin: '100px 0px' });
+
+            function observeLiveIn(root) {
+                root.querySelectorAll('.card-media[data-viewable="1"]').forEach((card) => {
+                    if (liveEligible(card)) liveObserver.observe(card);
+                });
+            }
+
             // Wire up the server-rendered first page.
             observeMediaIn(grid);
+            observeLiveIn(grid);
 
             const esc = (s) => String(s == null ? '' : s)
                 .replace(/&/g, '&amp;').replace(/</g, '&lt;')
@@ -242,8 +355,15 @@
                 }).join('');
                 const tagBlock = tags ? `<div class="flex flex-wrap gap-1 mt-2">${tags}</div>` : '';
 
+                const viewable = m.viewable && m.view_url;
+                const mediaAttrs =
+                    `data-model-id="${esc(m.id)}" data-viewable="${viewable ? '1' : '0'}" ` +
+                    `data-is-owner="${m.is_owner ? '1' : '0'}"` +
+                    `${viewable ? ` data-view-src="${esc(m.view_url)}"` : ''}` +
+                    `${m.thumbnail_url ? ` data-thumb-src="${esc(m.thumbnail_url)}"` : ''}`;
+
                 return `<div class="model-card bg-white rounded-lg card-shadow hover-scale overflow-hidden flex flex-col">
-                    <a href="${esc(m.detail_url)}" class="block relative aspect-square bg-gray-100">
+                    <a href="${esc(m.detail_url)}" class="block relative aspect-square bg-gray-100 card-media" ${mediaAttrs}>
                         ${media}
                         <span class="absolute top-1.5 right-1.5 bg-black/60 text-white text-[10px] px-1.5 py-0.5 rounded uppercase">${esc(m.file_format)}</span>
                     </a>
@@ -279,6 +399,7 @@
                     const added = Array.from(frag.children);
                     added.forEach((node) => grid.appendChild(node));
                     observeMediaIn(grid);
+                    observeLiveIn(grid);
 
                     page = data.page;
                     hasNext = !!data.has_next;
