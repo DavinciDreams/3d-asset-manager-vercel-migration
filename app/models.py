@@ -15,6 +15,7 @@ from app.db import (
     count_rows,
     model_variants,
     models,
+    optimization_jobs,
     users,
     world_states,
 )
@@ -324,6 +325,45 @@ class Model3D:
                     fs.delete(row.id)
         except Exception as e:
             print(f"Error deleting cached exports: {e}")
+
+        # Delete derived variant files (game-optimized GLB, future LOD) and
+        # their rows. The model_variants.model_id FK -> models.id would
+        # otherwise block the model delete on Postgres.
+        try:
+            with engine.begin() as conn:
+                variant_rows = conn.execute(
+                    select(model_variants.c.file_id)
+                    .where(model_variants.c.model_id == self.id)
+                ).all()
+            for row in variant_rows:
+                if row.file_id:
+                    try:
+                        fs.delete(row.file_id)
+                    except Exception as e:
+                        print(f"Error deleting variant file: {e}")
+            with engine.begin() as conn:
+                conn.execute(model_variants.delete().where(model_variants.c.model_id == self.id))
+        except Exception as e:
+            print(f"Error deleting model variants: {e}")
+
+        # Clear optimization jobs that reference this model. Both source_model_id
+        # and result_model_id are FKs -> models.id, so any job pointing here
+        # (e.g. an old game-optimized copy was a job's result) blocks the delete.
+        try:
+            with engine.begin() as conn:
+                conn.execute(
+                    optimization_jobs.delete().where(
+                        optimization_jobs.c.source_model_id == self.id
+                    )
+                )
+                conn.execute(
+                    update(optimization_jobs)
+                    .where(optimization_jobs.c.result_model_id == self.id)
+                    .values(result_model_id=None)
+                )
+        except Exception as e:
+            print(f"Error clearing optimization jobs: {e}")
+
         with engine.begin() as conn:
             conn.execute(models.delete().where(models.c.id == self.id))
 
