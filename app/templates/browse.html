@@ -289,28 +289,43 @@
                 liveActive.delete(card);
             }
 
-            // Promote queued cards into free live-viewer slots (nearest first
-            // is approximated by insertion order of liveWanted).
+            // Promote wanted cards into free live-viewer slots, closest to the
+            // viewport center first -- so the focused row always spins and, if
+            // there are more visible cards than the cap, the central ones win.
+            function distanceToViewportCenter(card) {
+                const rect = card.getBoundingClientRect();
+                const cardCenter = rect.top + rect.height / 2;
+                return Math.abs(cardCenter - window.innerHeight / 2);
+            }
             function pumpLiveQueue() {
                 if (liveActive.size >= MAX_LIVE_VIEWERS) return;
-                for (const card of liveWanted) {
+                const candidates = Array.from(liveWanted)
+                    .filter((card) => !liveActive.has(card) && liveEligible(card))
+                    .sort((a, b) => distanceToViewportCenter(a) - distanceToViewportCenter(b));
+                for (const card of candidates) {
                     if (liveActive.size >= MAX_LIVE_VIEWERS) break;
-                    if (!liveActive.has(card) && liveEligible(card)) mountLive(card);
+                    mountLive(card);
                 }
             }
 
+            // Only treat a card as "wanted" once it is genuinely on screen
+            // (not in a pre-load band) so cards don't start spinning while
+            // almost off-screen. A card must be at least ~35% visible to mount,
+            // and is dropped once it falls below ~10% (hysteresis avoids
+            // flicker at the edges).
             const liveObserver = new IntersectionObserver((entries) => {
                 for (const entry of entries) {
                     const card = entry.target;
-                    if (entry.isIntersecting && liveEligible(card)) {
+                    const ratio = entry.intersectionRatio;
+                    if (entry.isIntersecting && ratio >= 0.35 && liveEligible(card)) {
                         liveWanted.add(card);
-                    } else {
+                    } else if (!entry.isIntersecting || ratio < 0.1) {
                         liveWanted.delete(card);
                         unmountLive(card);
                     }
                 }
                 pumpLiveQueue();
-            }, { rootMargin: '300px 0px' });
+            }, { rootMargin: '0px', threshold: [0, 0.1, 0.35, 0.6] });
 
             function observeLiveIn(root) {
                 root.querySelectorAll('.card-media[data-viewable="1"]').forEach((card) => {
