@@ -42,7 +42,7 @@
                 <label for="vrma-select" class="text-sm text-gray-600">Apply animation:</label>
                 <select id="vrma-select"
                         class="border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500">
-                    <option value="" data-vrma-id="">— None (T-pose) —</option>
+                    <option value="" data-vrma-id="none">— None (T-pose) —</option>
                 </select>
                 <button type="button" onclick="stopVrmAnimation()"
                         class="text-gray-500 hover:text-gray-700 text-sm">
@@ -958,17 +958,27 @@ document.addEventListener('DOMContentLoaded', function() {
         .then(data => {
             const sel = document.getElementById('vrma-select');
             if (!sel || !data.animations) return;
+            // Precedence: the owner's saved choice wins. 'none' is an explicit
+            // "no animation" and must NOT be overridden by the global default.
+            // Only when nothing is saved do we fall back to the global default
+            // (hip-hop dance) so every VRM animates by default.
+            const explicitNone = SAVED_DEFAULT_VRMA === 'none';
+            const effectiveDefaultId = explicitNone
+                ? null
+                : (SAVED_DEFAULT_VRMA || data.default_id || null);
             data.animations.forEach(a => {
                 const opt = document.createElement('option');
                 opt.value = a.view_url;
                 opt.setAttribute('data-vrma-id', a.id);
-                opt.textContent = a.name;
-                if (SAVED_DEFAULT_VRMA && a.id === SAVED_DEFAULT_VRMA) {
+                opt.textContent = a.name + (a.id === data.default_id && !SAVED_DEFAULT_VRMA ? ' (default)' : '');
+                if (effectiveDefaultId && a.id === effectiveDefaultId) {
                     opt.selected = true;
                     pendingDefaultUrl = a.view_url;
                 }
                 sel.appendChild(opt);
             });
+            // Reflect an explicit "none" selection in the dropdown (no clip plays).
+            if (explicitNone) sel.value = '';
             sel.addEventListener('change', async () => {
                 if (!controller) return;
                 if (!sel.value) { controller.stopAnimation(); return; }
