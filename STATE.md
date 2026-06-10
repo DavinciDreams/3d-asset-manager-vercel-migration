@@ -136,7 +136,34 @@ blink, and gaze never fight each other.
   fixed_eyes variant, viewer swapped to it. GLTFExporter round-trip on a
   meshopt/quantized/WebP source works.
 
-**Status:** ✅ Complete & live-verified.
+**Follow-up (same PR) — variant chaining + preview priority:**
+- `_run_game_optimizer` now PREFERS the `fixed_eyes` variant as its source when
+  one exists (reads variant bytes; falls back to `model.get_viewable_data()`), so
+  the game-optimized asset folds in the eyes + blink. Records `source_is_fixed_eyes`
+  in the variant settings/metadata/result. gltfpack preserves the blink clip.
+- Preview source priority across galleries (index/browse/dashboard rows):
+  **game-optimized → fixed-eyes → original** (game variant is smallest AND now has
+  the eyes). `main.py` sets `model.has_fixed_eyes` alongside `has_game_optimized`
+  via a second batched `model_ids_with_kind('fixed_eyes', ids)` query in all three
+  list paths + `_enrich_dashboard_models`.
+- Detail UI: optimize panel shows a "using your fixed-eyes version" note when a
+  fixed-eyes variant exists (revealed live after a bake too); optimize success
+  message appends "(includes your fixed eyes & blink)"; bake success nudges
+  re-optimizing if a (now-stale, eyeless) game variant already existed.
+- Verified: py_compile + node --check + Jinja-compile of the 3 gallery templates;
+  detail renders with the note; `url_for('api.get_fixed_eyes')` resolves.
+
+**UI cleanup (same PR):**
+- Detail viewer no longer shows the floating Reset/Rotate overlay (`showControls:
+  false` in `createDetailedModelViewer`) — it was covering the variant toggles.
+  Added a **Rotate** button to the detail toolbar next to Reset View.
+- Fixed a latent bug: `resetDetailCamera()` only handled `<model-viewer>`; it now
+  also handles the Three.js viewer (`__threeViewer.reset()`), which is what GLB
+  uses — so "Reset View" actually works for GLB models now.
+
+**Status:** ✅ Complete & live-verified. Full chain confirmed end-to-end by the user:
+upload → fix eyes → bake → game-optimize (sources fixed-eyes) → 60% smaller variant
+WITH the blinking eyes intact; preview prefers the optimized-with-eyes file.
 
 ### 2026-06-09 — Viewer/dashboard/browse/serving (PRs #6, #7)
 **Files:** base_3d.html, _vrm_viewer.html, dashboard.html, browse.html, api.py, db.py,

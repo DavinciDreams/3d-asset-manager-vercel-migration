@@ -11,11 +11,16 @@ DASHBOARD_PER_PAGE = 30
 
 
 def _enrich_dashboard_models(user_models):
-    """Attach has_game_optimized to each model (one batched variant query) so
-    dashboard previews can prefer the smaller optimized file."""
-    optimized_ids = ModelVariant.model_ids_with_kind('game', [m.id for m in user_models])
+    """Attach has_game_optimized + has_fixed_eyes to each model (two batched
+    variant queries) so previews can pick the best source: the game-optimized
+    file (which now bakes in any fixed eyes and is smallest) is preferred, then
+    the fixed-eyes variant, then the original."""
+    ids = [m.id for m in user_models]
+    optimized_ids = ModelVariant.model_ids_with_kind('game', ids)
+    fixed_ids = ModelVariant.model_ids_with_kind('fixed_eyes', ids)
     for model in user_models:
         model.has_game_optimized = model.id in optimized_ids
+        model.has_fixed_eyes = model.id in fixed_ids
 
 
 class Pagination:
@@ -52,13 +57,17 @@ def index():
         recent_models, total_public = Model3D.get_public_models(page=1, per_page=6)
 
 
-        # Add owner username + game-optimized flag (landing cards prefer the
-        # smaller optimized variant for the live preview). Batched variant query.
-        optimized_ids = ModelVariant.model_ids_with_kind('game', [m.id for m in recent_models])
+        # Add owner username + variant flags (landing cards prefer the
+        # game-optimized variant, then fixed-eyes, for the live preview).
+        # Batched variant queries.
+        _recent_ids = [m.id for m in recent_models]
+        optimized_ids = ModelVariant.model_ids_with_kind('game', _recent_ids)
+        fixed_ids = ModelVariant.model_ids_with_kind('fixed_eyes', _recent_ids)
         for model in recent_models:
             user = User.get_by_id(model.user_id)
             model.owner_username = user.username if user else 'Unknown'
             model.has_game_optimized = model.id in optimized_ids
+            model.has_fixed_eyes = model.id in fixed_ids
 
         # Get statistics
         stats = Model3D.get_stats()
@@ -177,14 +186,16 @@ def browse():
             search=search if search else None,
             sort=sort, tag=tags if tags else None)
 
-        # Add owner username + whether a game-optimized variant exists (browse
-        # prefers that smaller file for the live preview) to each model. One
-        # batched variant query instead of per-model lookups.
-        optimized_ids = ModelVariant.model_ids_with_kind('game', [m.id for m in models])
+        # Add owner username + variant flags (browse prefers the game-optimized
+        # file, then fixed-eyes, for the live preview). Batched variant queries.
+        _ids = [m.id for m in models]
+        optimized_ids = ModelVariant.model_ids_with_kind('game', _ids)
+        fixed_ids = ModelVariant.model_ids_with_kind('fixed_eyes', _ids)
         for model in models:
             user = User.get_by_id(model.user_id)
             model.owner_username = user.username if user else 'Unknown'
             model.has_game_optimized = model.id in optimized_ids
+            model.has_fixed_eyes = model.id in fixed_ids
 
         pagination = Pagination(models, total, page, per_page)
         all_tags = Model3D.get_public_tags()

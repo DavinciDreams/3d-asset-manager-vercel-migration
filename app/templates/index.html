@@ -116,7 +116,7 @@
                    class="block h-56 relative bg-gray-100 card-media"
                    data-model-id="{{ model.id }}"
                    data-viewable="{{ '1' if viewable else '0' }}"
-                   {% if viewable %}data-view-src="{% if model.has_game_optimized %}{{ url_for('api.get_game_optimized', model_id=model.id) }}{% else %}{{ url_for('api.view_model', model_id=model.id) }}?viewer=2{% endif %}"{% endif %}
+                   {% if viewable %}data-view-src="{% if model.has_game_optimized %}{{ url_for('api.get_game_optimized', model_id=model.id) }}{% elif model.has_fixed_eyes %}{{ url_for('api.get_fixed_eyes', model_id=model.id) }}{% else %}{{ url_for('api.view_model', model_id=model.id) }}?viewer=2{% endif %}"{% endif %}
                    {% if model.camera_orbit %}data-camera-orbit="{{ model.camera_orbit }}"{% endif %}
                    {% if model.default_animation %}data-default-animation="{{ model.default_animation }}"{% endif %}>
                     {% if model.thumbnail_file_id %}

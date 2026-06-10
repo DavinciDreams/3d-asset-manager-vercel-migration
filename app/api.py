@@ -1682,8 +1682,23 @@ def _run_game_optimizer(model, owner_id, settings):
     compression_mode = settings['compression_mode']
     texture_limit_applied = bool(texture_limit)
 
-    src_bytes, src_fmt = model.get_viewable_data()
-    src_fmt = (src_fmt or model.file_format or '').lower()
+    # Prefer the fixed-eyes variant as the source when it exists, so the
+    # game-optimized asset includes the baked eyeballs (+ blink). Falls back to
+    # the model's normal viewable data. The fixed-eyes file is a self-contained
+    # GLB, so gltfpack handles it the same way (and preserves the blink clip).
+    src_bytes = None
+    src_fmt = None
+    used_fixed_eyes = False
+    fixed_variant = ModelVariant.get(model.id, 'fixed_eyes')
+    if fixed_variant and fixed_variant.file_id:
+        data = fixed_variant.read_data()
+        if data:
+            src_bytes = data
+            src_fmt = (fixed_variant.file_format or 'glb').lower()
+            used_fixed_eyes = True
+    if src_bytes is None:
+        src_bytes, src_fmt = model.get_viewable_data()
+        src_fmt = (src_fmt or model.file_format or '').lower()
     if not src_bytes:
         raise FileNotFoundError('Source file not found')
     if src_fmt not in ('glb', 'gltf'):
@@ -1754,6 +1769,7 @@ def _run_game_optimizer(model, owner_id, settings):
             'source_model_id': model.id,
             'source_format': src_fmt,
             'source_size': len(src_bytes),
+            'source_is_fixed_eyes': used_fixed_eyes,
             'optimized_size': len(out_bytes),
             'texture_limit': texture_limit if texture_limit_applied else None,
             'requested_texture_limit': texture_limit,
@@ -1788,6 +1804,7 @@ def _run_game_optimizer(model, owner_id, settings):
             'original_size': original_size,
             'optimized_size': optimized_size,
             'savings_ratio': savings_ratio,
+            'source_is_fixed_eyes': used_fixed_eyes,
             'report': report,
         }
         variant, old_file_id = ModelVariant.upsert(
@@ -1808,6 +1825,7 @@ def _run_game_optimizer(model, owner_id, settings):
             'original_size': original_size,
             'optimized_size': optimized_size,
             'savings_ratio': savings_ratio,
+            'source_is_fixed_eyes': used_fixed_eyes,
             'settings': {
                 'texture_limit': texture_limit,
                 'simplify_ratio': simplify_ratio,
