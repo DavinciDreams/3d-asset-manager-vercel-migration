@@ -92,15 +92,19 @@
                 {% endif %}
             </div>
 
-            <!-- Original / Game-Optimized toggle (shown when a game variant exists) -->
-            <div id="variant-toggle" class="{% if not game_variant %}hidden {% endif %}mt-3 inline-flex rounded-lg border border-gray-200 overflow-hidden text-sm">
+            <!-- Original / Game-Optimized / Fixed-Eyes toggle (shown when a variant exists) -->
+            <div id="variant-toggle" class="{% if not game_variant and not fixed_eyes_variant %}hidden {% endif %}mt-3 inline-flex rounded-lg border border-gray-200 overflow-hidden text-sm">
                 <button type="button" id="variant-btn-original" onclick="switchVariant('original')"
                         class="px-4 py-2 font-medium bg-indigo-600 text-white">
                     Original
                 </button>
                 <button type="button" id="variant-btn-game" onclick="switchVariant('game')"
-                        class="px-4 py-2 font-medium bg-white text-gray-700 hover:bg-gray-50">
+                        class="px-4 py-2 font-medium bg-white text-gray-700 hover:bg-gray-50 {% if not game_variant %}hidden{% endif %}">
                     <i class="fas fa-gamepad mr-1"></i>Game-Optimized<span id="variant-game-size">{% if game_variant and game_variant.size %} ({{ "%.2f"|format(game_variant.size / 1024 / 1024) }} MB){% endif %}</span>
+                </button>
+                <button type="button" id="variant-btn-fixed_eyes" onclick="switchVariant('fixed_eyes')"
+                        class="px-4 py-2 font-medium bg-white text-gray-700 hover:bg-gray-50 {% if not fixed_eyes_variant %}hidden{% endif %}">
+                    <i class="fas fa-eye mr-1"></i>Fixed Eyes<span id="variant-fixed-size">{% if fixed_eyes_variant and fixed_eyes_variant.size %} ({{ "%.2f"|format(fixed_eyes_variant.size / 1024 / 1024) }} MB){% endif %}</span>
                 </button>
             </div>
 
@@ -182,12 +186,23 @@
                            class="block px-4 py-2 text-sm text-teal-700 hover:bg-teal-50 {% if not game_variant %}hidden{% endif %}">
                             <i class="fas fa-gamepad mr-1"></i>Game-optimized GLB
                         </a>
+                        <div id="export-fixed-divider" class="border-t border-gray-100 my-1 {% if not fixed_eyes_variant %}hidden{% endif %}"></div>
+                        <a id="export-fixed-link" href="{{ url_for('api.get_fixed_eyes', model_id=model.id, download=1) }}"
+                           class="block px-4 py-2 text-sm text-purple-700 hover:bg-purple-50 {% if not fixed_eyes_variant %}hidden{% endif %}">
+                            <i class="fas fa-eye mr-1"></i>Fixed-eyes GLB
+                        </a>
                     </div>
                 </div>
                 {% if current_user.is_authenticated %}
                 <button type="button" id="game-opt-toggle"
                         class="w-full sm:w-auto bg-teal-600 text-white py-3 px-6 rounded-lg hover:bg-teal-700 transition flex items-center justify-center">
                     <i class="fas fa-gamepad mr-2"></i>Optimize for Game
+                </button>
+                {% endif %}
+                {% if current_user.is_authenticated and current_user.id == model.user_id and model.file_format in ['glb', 'gltf'] %}
+                <button type="button" id="fix-eyes-toggle"
+                        class="w-full sm:w-auto bg-purple-600 text-white py-3 px-6 rounded-lg hover:bg-purple-700 transition flex items-center justify-center">
+                    <i class="fas fa-eye mr-2"></i>Fix Eyes
                 </button>
                 {% endif %}
             </div>
@@ -226,6 +241,126 @@
                     </div>
                 </div>
                 <p id="game-opt-status" class="mt-3 text-sm text-gray-600"></p>
+            </div>
+            {% endif %}
+
+            {% if current_user.is_authenticated and current_user.id == model.user_id and model.file_format in ['glb', 'gltf'] %}
+            <!-- Fix Eyes panel: add blinker eyeballs to cover reconstruction
+                 holes in the eye sockets, then bake them into a new GLB.
+                 Floats as a fixed overlay on the right so it stays beside the
+                 model with no scrolling while you position the eyes. -->
+            <div id="fix-eyes-panel"
+                 class="hidden fixed top-24 right-4 z-40 w-80 max-h-[80vh] overflow-y-auto border border-purple-200 bg-purple-50 rounded-lg p-4 shadow-2xl">
+                <div class="flex items-center justify-between mb-2">
+                    <h3 class="font-semibold text-purple-800"><i class="fas fa-eye mr-1"></i>Fix Eyes</h3>
+                    <button type="button" id="fix-eyes-close" class="text-gray-400 hover:text-gray-700" title="Close">
+                        <i class="fas fa-times"></i>
+                    </button>
+                </div>
+                <p class="text-sm text-gray-700 mb-3">
+                    <i class="fas fa-info-circle text-purple-500 mr-1"></i>
+                    Add eyeballs to cover holes left by the image-to-3D pipeline.
+                    Click <b>Add Eyes</b>, drag each eye onto a socket, then tune size/position and <b>Bake</b>.
+                </p>
+                <div id="fix-eyes-step1">
+                    <button type="button" id="fix-eyes-add"
+                            class="bg-purple-600 text-white px-4 py-2 rounded hover:bg-purple-700 transition">
+                        <i class="fas fa-plus mr-1"></i>Add Eyes
+                    </button>
+                </div>
+
+                <div id="fix-eyes-step2" class="hidden">
+                    <!-- Select which eye the sliders affect -->
+                    <div class="flex items-center gap-2 mb-2 text-sm">
+                        <span class="text-gray-700 font-medium">Editing:</span>
+                        <button type="button" id="eye-sel-left"
+                                class="px-3 py-1 rounded border border-purple-300 bg-purple-600 text-white">Left</button>
+                        <button type="button" id="eye-sel-right"
+                                class="px-3 py-1 rounded border border-purple-300 bg-white text-gray-700">Right</button>
+                        <span class="text-gray-500 text-xs ml-2">(or drag an eye in the viewer)</span>
+                    </div>
+                    <!-- Symmetry: on = dragging mirrors both eyes; turn off to
+                         nudge one eye for asymmetric meshes (fix cross-eyed look). -->
+                    <label class="flex items-center mb-3 text-sm text-gray-700">
+                        <input type="checkbox" id="eye-symmetry" checked
+                               class="h-4 w-4 text-purple-600 border-gray-300 rounded mr-2">
+                        Symmetry (drag moves both) — uncheck to nudge one eye
+                    </label>
+
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+                        <label class="block">
+                            <span class="text-gray-700">Eye size</span>
+                            <input type="range" id="eye-size" min="0.15" max="2.5" step="0.01" value="1" class="w-full">
+                        </label>
+                        <label class="block">
+                            <span class="text-gray-700">Spacing</span>
+                            <input type="range" id="eye-spacing" min="0" max="100" step="1" value="50" class="w-full">
+                        </label>
+                        <label class="block">
+                            <span class="text-gray-700">Height</span>
+                            <input type="range" id="eye-height" min="0" max="100" step="1" value="50" class="w-full">
+                        </label>
+                        <label class="block">
+                            <span class="text-gray-700">Depth (in/out)</span>
+                            <input type="range" id="eye-depth" min="0" max="100" step="1" value="50" class="w-full">
+                        </label>
+                        <label class="block">
+                            <span class="text-gray-700">Iris color</span>
+                            <input type="color" id="eye-iris" value="#5a3a1a" class="w-full h-9 rounded border border-gray-300">
+                        </label>
+                        <label class="block">
+                            <span class="text-gray-700">Sclera (white)</span>
+                            <input type="color" id="eye-sclera" value="#f0f0eb" class="w-full h-9 rounded border border-gray-300">
+                        </label>
+                    </div>
+
+                    <!-- Iris aim: the irises must point OUT of the face. Most
+                         image-to-3D models face -Z (default), but Flip + the
+                         yaw/pitch sliders let you aim them for any model. -->
+                    <div class="mt-3 border-t border-purple-100 pt-3">
+                        <div class="flex items-center gap-2 mb-2 text-sm">
+                            <span class="text-gray-700 font-medium">Iris aim:</span>
+                            <button type="button" id="eye-flip"
+                                    class="px-3 py-1 rounded border border-purple-300 bg-white text-purple-700 hover:bg-purple-50">
+                                <i class="fas fa-arrows-rotate mr-1"></i>Flip facing
+                            </button>
+                            <span class="text-gray-500 text-xs">if eyes point the wrong way</span>
+                        </div>
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+                            <label class="block">
+                                <span class="text-gray-700">Aim left/right (yaw)</span>
+                                <input type="range" id="eye-yaw" min="0" max="360" step="1" value="180" class="w-full">
+                            </label>
+                            <label class="block">
+                                <span class="text-gray-700">Aim up/down (pitch)</span>
+                                <input type="range" id="eye-pitch" min="-60" max="60" step="1" value="0" class="w-full">
+                            </label>
+                        </div>
+                    </div>
+
+                    <label class="flex items-center mt-3 text-sm text-gray-700">
+                        <input type="checkbox" id="eye-blink" checked
+                               class="h-4 w-4 text-purple-600 border-gray-300 rounded mr-2">
+                        Add a blinking animation (bakes a glTF clip into the file)
+                    </label>
+
+                    <div class="flex flex-wrap gap-2 mt-4">
+                        <button type="button" id="fix-eyes-bake"
+                                class="bg-purple-700 text-white px-4 py-2 rounded hover:bg-purple-800 transition">
+                            <i class="fas fa-save mr-1"></i>Bake &amp; Save
+                        </button>
+                        <button type="button" id="fix-eyes-undo" disabled
+                                class="bg-white border border-gray-300 text-gray-700 px-4 py-2 rounded hover:bg-gray-50 transition disabled:opacity-40 disabled:cursor-not-allowed"
+                                title="Undo last change (Ctrl+Z)">
+                            <i class="fas fa-rotate-left mr-1"></i>Undo
+                        </button>
+                        <button type="button" id="fix-eyes-cancel"
+                                class="bg-gray-300 text-gray-800 px-4 py-2 rounded hover:bg-gray-400 transition">
+                            Cancel
+                        </button>
+                    </div>
+                </div>
+                <p id="fix-eyes-status" class="mt-3 text-sm text-gray-600"></p>
             </div>
             {% endif %}
         </div>
@@ -394,11 +529,14 @@ function loadDetailModel(modelId, variant) {
     variant = variant || CURRENT_VARIANT;
     CURRENT_VARIANT = variant;
 
-    // The game-optimized variant is served from its own endpoint; the original
-    // uses the default view URL (passing undefined lets the viewer default it).
+    // The game-optimized + fixed-eyes variants are each served from their own
+    // endpoint; the original uses the default view URL (passing undefined lets
+    // the viewer default it).
     const srcUrl = variant === 'game'
         ? `/api/model/${modelId}/game-optimized`
-        : undefined;
+        : (variant === 'fixed_eyes'
+            ? `/api/model/${modelId}/fixed-eyes`
+            : undefined);
 
     try {
         const handleDetailLoad = () => {
@@ -446,14 +584,18 @@ function loadDetailModel(modelId, variant) {
 // styling. No-op if the variant viewer hasn't been loaded yet.
 function switchVariant(variant) {
     if (variant === CURRENT_VARIANT) return;
-    const origBtn = document.getElementById('variant-btn-original');
-    const gameBtn = document.getElementById('variant-btn-game');
     const active = 'bg-indigo-600 text-white';
     const inactive = 'bg-white text-gray-700 hover:bg-gray-50';
-    if (origBtn && gameBtn) {
-        origBtn.className = `px-4 py-2 font-medium ${variant === 'original' ? active : inactive}`;
-        gameBtn.className = `px-4 py-2 font-medium ${variant === 'game' ? active : inactive}`;
-    }
+    // Style each variant button; preserve a button's existing `hidden` class so
+    // toggling selection never reveals a variant that doesn't exist yet.
+    [['original', 'variant-btn-original'], ['game', 'variant-btn-game'],
+     ['fixed_eyes', 'variant-btn-fixed_eyes']].forEach(([key, id]) => {
+        const btn = document.getElementById(id);
+        if (!btn) return;
+        const wasHidden = btn.classList.contains('hidden');
+        btn.className = `px-4 py-2 font-medium ${variant === key ? active : inactive}`;
+        if (wasHidden) btn.classList.add('hidden');
+    });
     // Load (or reload) the viewer with the chosen variant. loadDetailModel
     // replaces the container contents, so this works whether or not the viewer
     // was already showing.
@@ -470,6 +612,20 @@ function revealGameOptimized(sizeBytes) {
     if (sizeEl && sizeBytes) sizeEl.textContent = ` (${(sizeBytes / 1024 / 1024).toFixed(2)} MB)`;
     const link = document.getElementById('export-game-link');
     const divider = document.getElementById('export-game-divider');
+    if (link) link.classList.remove('hidden');
+    if (divider) divider.classList.remove('hidden');
+}
+
+// Reveal the Fixed-Eyes toggle button + download entry after a successful bake.
+function revealFixedEyes(sizeBytes) {
+    const toggle = document.getElementById('variant-toggle');
+    if (toggle) toggle.classList.remove('hidden');
+    const btn = document.getElementById('variant-btn-fixed_eyes');
+    if (btn) btn.classList.remove('hidden');
+    const sizeEl = document.getElementById('variant-fixed-size');
+    if (sizeEl && sizeBytes) sizeEl.textContent = ` (${(sizeBytes / 1024 / 1024).toFixed(2)} MB)`;
+    const link = document.getElementById('export-fixed-link');
+    const divider = document.getElementById('export-fixed-divider');
     if (link) link.classList.remove('hidden');
     if (divider) divider.classList.remove('hidden');
 }
@@ -893,6 +1049,281 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 });
+
+// --- Fix Eyes: add blinker eyeballs, then bake them into a GLB variant -------
+(function () {
+    const toggle = document.getElementById('fix-eyes-toggle');
+    const panel = document.getElementById('fix-eyes-panel');
+    if (!toggle || !panel) return;  // not owner / not a GLB
+
+    const MODEL_ID = '{{ model.id }}';
+    const step1 = document.getElementById('fix-eyes-step1');
+    const step2 = document.getElementById('fix-eyes-step2');
+    const statusEl = document.getElementById('fix-eyes-status');
+    const addBtn = document.getElementById('fix-eyes-add');
+    const bakeBtn = document.getElementById('fix-eyes-bake');
+    const cancelBtn = document.getElementById('fix-eyes-cancel');
+    const selLeft = document.getElementById('eye-sel-left');
+    const selRight = document.getElementById('eye-sel-right');
+    const sizeEl = document.getElementById('eye-size');
+    const spacingEl = document.getElementById('eye-spacing');
+    const heightEl = document.getElementById('eye-height');
+    const depthEl = document.getElementById('eye-depth');
+    const irisEl = document.getElementById('eye-iris');
+    const scleraEl = document.getElementById('eye-sclera');
+    const blinkEl = document.getElementById('eye-blink');
+    const yawEl = document.getElementById('eye-yaw');
+    const pitchEl = document.getElementById('eye-pitch');
+    const flipBtn = document.getElementById('eye-flip');
+    const symmetryEl = document.getElementById('eye-symmetry');
+    const undoBtn = document.getElementById('fix-eyes-undo');
+
+    // Snapshot current eye state for undo, then refresh the Undo button.
+    function recordHistory() {
+        const e = eyes();
+        if (e && e.active) { e.pushHistory(); refreshUndo(); }
+    }
+    function refreshUndo() {
+        const e = eyes();
+        if (undoBtn) undoBtn.disabled = !(e && e.active && e.canUndo);
+    }
+
+    // The Three.js viewer instance (createDetailedModelViewer uses preferThree
+    // for GLB, so the container exposes __threeViewer with the .eyes editor).
+    function viewer() {
+        const c = document.getElementById('viewer-detail-' + MODEL_ID);
+        return c && c.__threeViewer ? c.__threeViewer : null;
+    }
+    function eyes() {
+        const v = viewer();
+        return v && v.eyes ? v.eyes : null;
+    }
+    function setStatus(msg, isError) {
+        statusEl.textContent = msg || '';
+        statusEl.className = 'mt-3 text-sm ' + (isError ? 'text-red-600' : 'text-gray-600');
+    }
+
+    // Map a 0..100 slider to a world-unit offset around the model center using
+    // the viewer's known model bounds (exposed via eyes editor helpers, which
+    // read live positions). We derive ranges from current eye spread instead of
+    // re-querying bounds: simple + robust.
+    function applySliders() {
+        const e = eyes();
+        if (!e || !e.active) return;
+        // Size slider value is a multiplier of the editor's default radius
+        // (1 == default). With symmetry on, both eyes; off = selected eye only.
+        e.setSizeScale(parseFloat(sizeEl.value), /* both */ symmetryEl.checked);
+    }
+
+    function setSelected(which) {
+        const e = eyes();
+        if (e) e.select(which);
+        const on = 'px-3 py-1 rounded border border-purple-300 bg-purple-600 text-white';
+        const off = 'px-3 py-1 rounded border border-purple-300 bg-white text-gray-700';
+        selLeft.className = which === 'left' ? on : off;
+        selRight.className = which === 'right' ? on : off;
+        // Reflect the selected eye's own aim in the sliders (matters when
+        // symmetry is off and each eye has its own gaze).
+        if (e && e.active) {
+            if (yawEl) yawEl.value = e.selectedYaw;
+            if (pitchEl) pitchEl.value = e.selectedPitch;
+        }
+    }
+
+    toggle.addEventListener('click', () => {
+        // Ensure the Three viewer is loaded (it normally auto-loads on page open).
+        if (!viewer()) { loadDetailModel(MODEL_ID, 'original'); }
+        panel.classList.toggle('hidden');
+    });
+
+    addBtn.addEventListener('click', () => {
+        const e = eyes();
+        if (!e) { setStatus('3D viewer is still loading — try again in a moment.', true); return; }
+        e.add({
+            iris: irisEl.value, sclera: scleraEl.value,
+        });
+        // Record the editor's chosen base radius + the eyes' starting center so
+        // the size/height/depth/spacing sliders move relative to real values.
+        window.__eyeBaseRadius = e.baseRadius || 0.05;
+        const c = e.center ? e.center() : null;
+        window.__eyeBaseY = c ? c.y : 0;
+        window.__eyeBaseZ = c ? c.z : 0;
+        // Reset sliders to their neutral middle/default each time.
+        sizeEl.value = 1; spacingEl.value = 50; heightEl.value = 50; depthEl.value = 50;
+        // Start with symmetry on (matches the checkbox default).
+        symmetryEl.checked = true;
+        e.mirror = true;
+        e.previewBlink(blinkEl.checked);
+        step1.classList.add('hidden');
+        step2.classList.remove('hidden');
+        setSelected('left');
+        setStatus('Drag each eye onto a socket, then tune with the sliders.');
+        wireViewerDrag();
+        refreshUndo();  // disabled until the first change
+    });
+
+    // Pointer drag on the canvas moves the eye under the cursor.
+    function wireViewerDrag() {
+        const v = viewer();
+        if (!v || !v.canvas || v.__eyeDragWired) return;
+        const canvas = v.canvas;
+        v.__eyeDragWired = true;
+        const toNDC = (ev) => {
+            const r = canvas.getBoundingClientRect();
+            return [((ev.clientX - r.left) / r.width) * 2 - 1,
+                    -((ev.clientY - r.top) / r.height) * 2 + 1];
+        };
+        canvas.addEventListener('pointerdown', (ev) => {
+            const e = eyes(); if (!e || !e.active) return;
+            const [x, y] = toNDC(ev);
+            // Snapshot before the drag begins (only if it actually grabs an eye).
+            e.pushHistory();
+            if (e.beginDrag(x, y)) {
+                setSelected(e.selected);
+                canvas.setPointerCapture(ev.pointerId);
+            } else {
+                // Didn't grab an eye → drop the snapshot we just took.
+                e.undo();
+            }
+        });
+        canvas.addEventListener('pointermove', (ev) => {
+            const e = eyes(); if (!e || !e.active) return;
+            const [x, y] = toNDC(ev);
+            e.drag(x, y);
+        });
+        canvas.addEventListener('pointerup', (ev) => {
+            const e = eyes(); if (e) { e.endDrag(); refreshUndo(); }
+            try { canvas.releasePointerCapture(ev.pointerId); } catch (_) {}
+        });
+    }
+
+    selLeft.addEventListener('click', () => setSelected('left'));
+    selRight.addEventListener('click', () => setSelected('right'));
+
+    // Snapshot once at the START of a slider gesture (pointer/keyboard), so the
+    // whole drag-to-value collapses into a single undo step.
+    function makeUndoable(el) {
+        el.addEventListener('pointerdown', recordHistory);
+        el.addEventListener('keydown', (ev) => {
+            if (['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Home','End','PageUp','PageDown'].includes(ev.key)) {
+                recordHistory();
+            }
+        });
+    }
+    [sizeEl, spacingEl, heightEl, depthEl, yawEl, pitchEl].forEach(makeUndoable);
+
+    sizeEl.addEventListener('input', applySliders);
+    spacingEl.addEventListener('input', () => {
+        const e = eyes(); if (!e) return;
+        // Spacing slider 0..100 -> world units relative to base radius.
+        const base = (window.__eyeBaseRadius || 0.05);
+        e.setSpacing((spacingEl.value / 100) * base * 12);
+    });
+    heightEl.addEventListener('input', () => {
+        const e = eyes(); if (!e) return;
+        const base = (window.__eyeBaseRadius || 0.05);
+        // Center height +/- a few base radii around current.
+        e.setVertical((window.__eyeBaseY || 0) + ((heightEl.value - 50) / 50) * base * 6);
+    });
+    depthEl.addEventListener('input', () => {
+        const e = eyes(); if (!e) return;
+        const base = (window.__eyeBaseRadius || 0.05);
+        e.setDepth((window.__eyeBaseZ || 0) + ((depthEl.value - 50) / 50) * base * 6);
+    });
+    irisEl.addEventListener('input', () => {
+        const e = eyes(); if (e) e.setColors({ iris: irisEl.value, sclera: scleraEl.value });
+    });
+    scleraEl.addEventListener('input', () => {
+        const e = eyes(); if (e) e.setColors({ iris: irisEl.value, sclera: scleraEl.value });
+    });
+    blinkEl.addEventListener('change', () => {
+        const e = eyes(); if (e) e.previewBlink(blinkEl.checked);
+    });
+    yawEl.addEventListener('input', () => {
+        const e = eyes();
+        // Symmetry off -> aim only the selected eye (per-eye gaze correction).
+        if (e) e.setLook(parseFloat(yawEl.value), parseFloat(pitchEl.value), symmetryEl.checked);
+    });
+    pitchEl.addEventListener('input', () => {
+        const e = eyes();
+        if (e) e.setLook(parseFloat(yawEl.value), parseFloat(pitchEl.value), symmetryEl.checked);
+    });
+    flipBtn.addEventListener('click', () => {
+        const e = eyes(); if (!e) return;
+        recordHistory();
+        e.flipFacing();
+        // Reflect the new yaw in the slider.
+        yawEl.value = e.lookYaw;
+    });
+    symmetryEl.addEventListener('change', () => {
+        const e = eyes(); if (e) e.mirror = symmetryEl.checked;
+    });
+
+    // Undo: restore the previous snapshot and sync the sliders to it.
+    function doUndo() {
+        const e = eyes();
+        if (!e || !e.active || !e.canUndo) return;
+        e.undo();
+        // Reflect the restored selected-eye aim in the sliders.
+        yawEl.value = e.selectedYaw;
+        pitchEl.value = e.selectedPitch;
+        refreshUndo();
+    }
+    undoBtn.addEventListener('click', doUndo);
+    // Ctrl/Cmd+Z while the panel is open.
+    document.addEventListener('keydown', (ev) => {
+        if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'z'
+            && !panel.classList.contains('hidden')) {
+            ev.preventDefault();
+            doUndo();
+        }
+    });
+
+    function closeEditor() {
+        const e = eyes(); if (e) e.remove();
+        step2.classList.add('hidden');
+        step1.classList.remove('hidden');
+        panel.classList.add('hidden');
+        setStatus('');
+    }
+    cancelBtn.addEventListener('click', closeEditor);
+    const closeBtn = document.getElementById('fix-eyes-close');
+    if (closeBtn) closeBtn.addEventListener('click', closeEditor);
+
+    bakeBtn.addEventListener('click', async () => {
+        const e = eyes();
+        if (!e || !e.active) { setStatus('Add eyes first.', true); return; }
+        bakeBtn.disabled = true;
+        bakeBtn.classList.add('opacity-70', 'cursor-not-allowed');
+        setStatus('Baking eyes into the model…');
+        try {
+            const blob = await e.exportGLB({ withBlink: blinkEl.checked });
+            setStatus('Uploading fixed model (' + (blob.size / 1024 / 1024).toFixed(2) + ' MB)…');
+            const fd = new FormData();
+            fd.append('file', blob, 'fixed-eyes.glb');
+            fd.append('blink', blinkEl.checked ? '1' : '0');
+            const resp = await fetch('/api/model/' + MODEL_ID + '/fixed-eyes', {
+                method: 'POST', body: fd,
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok || !data.success) {
+                throw new Error(data.error || ('Upload failed (HTTP ' + resp.status + ').'));
+            }
+            setStatus('Done! Fixed-eyes version saved.');
+            revealFixedEyes(data.variant && data.variant.size);
+            // Swap the viewer to the freshly baked variant so you see the result.
+            e.remove();
+            loadDetailModel(MODEL_ID, 'fixed_eyes');
+            step2.classList.add('hidden');
+            step1.classList.remove('hidden');
+        } catch (err) {
+            setStatus(err.message || 'Bake failed.', true);
+        } finally {
+            bakeBtn.disabled = false;
+            bakeBtn.classList.remove('opacity-70', 'cursor-not-allowed');
+        }
+    });
+})();
 
 </script>
 

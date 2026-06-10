@@ -78,6 +78,66 @@ A Flask web app for uploading, viewing, browsing, and optimizing 3D assets
 
 ## Recent Changes
 
+### 2026-06-09 — "Fix Eyes" blinker eyeballs (client-side bake)
+**Why:** Image-to-3D pipeline produces character models with holes/black voids in
+the eye sockets (reconstruction can't resolve dark recessed regions). Feature lets
+the owner drop in eyeballs to cover the holes and bake them into a downloadable GLB.
+
+**Key decision — baking happens CLIENT-SIDE in the browser, not server-side.**
+The source GLBs are `EXT_meshopt_compression` + `KHR_mesh_quantization` + `EXT_texture_webp`
+(gltfpack `-cc` output, emitted by the pipeline itself — original == optimized file).
+**trimesh CANNOT read these** (IndexError on compressed buffers). The viewer ALREADY
+decodes them (MeshoptDecoder/KTX2). So eyes are added in Three.js and exported with
+`GLTFExporter`; the server just stores the uploaded bytes. No trimesh/gltfpack/Blender,
+no new Python deps.
+
+**Eye node structure (3 nested nodes per eye — decouples all concerns):**
+`wrapper` (position + SIZE, axis-aligned) → `blinkNode` (blink scale.y, axis-aligned,
+so squash is always world-vertical regardless of aim) → `mesh` (eyeball, carries the
+per-eye LOOK rotation). Each held in a `FixedEyes` group. This layering is why size,
+blink, and gaze never fight each other.
+
+**Files changed:**
+- `base_3d.html` — `GLTFExporter` import; `buildEyeballMesh()` (sphere, sclera/iris/
+  pupil via VERTEX COLORS, no texture; iris cap small (0.28) so white shows at sides);
+  `api.eyes` editor: add/select/drag(mirror)/setSizeScale/setSpacing/setVertical/
+  setDepth/setColors/setLook(yaw,pitch,both)/flipFacing/previewBlink/exportGLB,
+  plus getters (baseRadius, center, mirror, selectedYaw/Pitch). `eyeMixer` for live
+  blink wired into `animate()`; pauses model auto-rotate while editing; eye cleanup
+  in `dispose()`.
+  - Blink = baked `THREE.AnimationClip('EyeBlink')` squashing the blinkNode scale.y;
+    keyframes use scale 1 (independent of size). Autoplays in any glTF viewer.
+  - Mirror mode (default on): dragging one eye mirrors the other across model X
+    center → stays level/parallel/equal-depth. Per-eye yaw/pitch stored in
+    `wrap.userData` so gaze can be corrected per eye when symmetry is off.
+- `model_detail.html` — owner-only "Fix Eyes" button; FLOATING overlay panel
+  (fixed top-right, own scroll, close ✕) with: Editing L/R, Symmetry toggle, sliders
+  (size/spacing/height/depth), iris+sclera pickers, Flip facing + yaw/pitch aim,
+  blink toggle, Undo, Bake/Cancel. Pointer-drag wiring; "Fixed Eyes" entry in variant
+  toggle + Export menu; `revealFixedEyes()`; `switchVariant()` handles 3 variants;
+  `loadDetailModel()` srcUrl handles `fixed_eyes`. Sliders/symmetry reset on Add Eyes.
+  - Undo: editor keeps a 50-deep history of eye-state snapshots (pos/size/per-eye
+    aim), pushed before each gesture (drag, slider, flip). Button + Ctrl/Cmd+Z.
+- `api.py` — `POST /api/model/<id>/fixed-eyes` (`@login_required`, owner-only,
+  validates GLB magic bytes, 200MB cap, FILE_STORE.put + `ModelVariant.upsert(id,
+  'fixed_eyes',...)`, deletes old blob); `GET .../fixed-eyes` (mirror of
+  get_game_optimized: Range + ETag + ?download=1). Variant kind = `'fixed_eyes'`.
+- `main.py` — model_detail passes `fixed_eyes_variant`.
+- `wsgi.py` — local `__main__` dev run now enables `TEMPLATES_AUTO_RELOAD` + debug +
+  reloader (never runs under gunicorn) so template edits hot-reload. NOTE: Flask
+  caches Jinja in-memory per process; if templates seem stale, restart the dev server.
+
+**Verification:**
+- `py_compile` (api/main/wsgi) OK; `node --check` on viewer module + detail scripts OK.
+- App boots (sqlite fallback); both routes register; `url_for` resolves; owner render
+  shows full panel, anon doesn't; anon POST → 302; GET missing → 404.
+- ✅ **LIVE in-browser bake CONFIRMED** by the user on the fairy model (uploaded via
+  the real /api/upload path): eyes placed, blink works, baked GLB saved as the
+  fixed_eyes variant, viewer swapped to it. GLTFExporter round-trip on a
+  meshopt/quantized/WebP source works.
+
+**Status:** ✅ Complete & live-verified.
+
 ### 2026-06-09 — Viewer/dashboard/browse/serving (PRs #6, #7)
 **Files:** base_3d.html, _vrm_viewer.html, dashboard.html, browse.html, api.py, db.py,
 main.py, requirements.txt, scripts/migrate_thumbnails_to_webp.py

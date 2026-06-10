@@ -241,9 +241,13 @@ def model_detail(model_id):
         # Game-optimized variant (if any) so the detail page can show the
         # Original/Game-Optimized toggle + download on a fresh load.
         game_variant = ModelVariant.get(model.id, 'game')
+        # Fixed-eyes variant (if any): owner-baked GLB with blinker eyeballs
+        # covering reconstruction holes; surfaces its own toggle + download.
+        fixed_eyes_variant = ModelVariant.get(model.id, 'fixed_eyes')
 
         return render_template('model_detail.html', model=model, owner=owner,
-                               all_tags=all_tags, game_variant=game_variant)
+                               all_tags=all_tags, game_variant=game_variant,
+                               fixed_eyes_variant=fixed_eyes_variant)
         
     except Exception as e:
         print(f"Model detail error: {e}")
