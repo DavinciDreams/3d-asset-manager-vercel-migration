@@ -527,6 +527,150 @@ def get_game_optimized(model_id):
         return jsonify({'error': 'Game-optimized fetch failed'}), 500
 
 
+# Hard cap on an uploaded baked GLB. Eyeballs add a few hundred KB at most; the
+# original model dominates the size, so cap generously above any real asset.
+FIXED_EYES_MAX_BYTES = 200 * 1024 * 1024
+
+
+@api_bp.route('/model/<model_id>/fixed-eyes', methods=['POST'])
+@login_required
+def post_fixed_eyes(model_id):
+    """Store an owner-baked GLB (original model + blinker eyeballs, optionally a
+    blink animation clip) as the model's 'fixed_eyes' variant. The GLB is built
+    client-side by the viewer's GLTFExporter, so the server just validates and
+    stores the bytes -- no mesh library needed."""
+    try:
+        model = Model3D.get_by_id(model_id)
+        if not model:
+            return jsonify({'error': 'Model not found'}), 404
+        if not (current_user.is_authenticated and model.user_id == current_user.id):
+            return jsonify({'error': 'Only the owner can fix a model\'s eyes.'}), 403
+
+        upload = request.files.get('file')
+        if upload is None:
+            return jsonify({'error': 'No file uploaded.'}), 400
+        data = upload.read()
+        if not data:
+            return jsonify({'error': 'Uploaded file is empty.'}), 400
+        if len(data) > FIXED_EYES_MAX_BYTES:
+            return jsonify({'error': 'Baked model is too large.'}), 413
+        # Validate it's actually a binary glTF (magic "glTF").
+        if data[:4] != b'glTF':
+            return jsonify({'error': 'Uploaded file is not a valid GLB.'}), 400
+
+        blink = request.form.get('blink') in ('1', 'true', 'yes')
+
+        fs = current_app.config['FILE_STORE']
+        filename = f'{_safe_stem(model)}-fixed-eyes.glb'
+        file_id = fs.put(
+            data,
+            filename=filename,
+            content_type=_mime_for('glb'),
+            metadata={
+                'kind': 'fixed_eyes',
+                'source_model_id': model.id,
+                'has_blink': blink,
+                'size': len(data),
+            },
+        )
+        variant, old_file_id = ModelVariant.upsert(
+            model.id, 'fixed_eyes', str(file_id),
+            file_format='glb', size=len(data),
+            settings={'has_blink': blink}, status='ready',
+        )
+        if old_file_id and old_file_id != str(file_id):
+            try:
+                fs.delete(old_file_id)
+            except Exception as e:
+                print(f"Old fixed-eyes blob {old_file_id} not deleted: {e}")
+
+        return jsonify({
+            'success': True,
+            'variant': variant.to_api() if variant else None,
+        })
+    except Exception as e:
+        print(f"API fixed-eyes upload error: {e}")
+        return jsonify({'error': 'Could not save fixed-eyes model.'}), 500
+
+
+@api_bp.route('/model/<model_id>/fixed-eyes', methods=['GET'])
+def get_fixed_eyes(model_id):
+    """Serve the fixed-eyes GLB variant. Inline by default (detail-page viewer);
+    ?download=1 for an attachment. Mirrors get_game_optimized (Range + ETag)."""
+    try:
+        model = Model3D.get_by_id(model_id)
+        if not model:
+            return jsonify({'error': 'Model not found'}), 404
+        if not _can_access_model(model):
+            return jsonify({'error': 'Access denied'}), 403
+
+        variant = ModelVariant.get(model.id, 'fixed_eyes')
+        if not variant or not variant.file_id:
+            return jsonify({'error': 'No fixed-eyes variant'}), 404
+
+        file_id = variant.file_id
+        etag = f'"fixedeyes-{file_id}"'
+        cache_control = 'public, max-age=31536000, immutable'
+        as_download = request.args.get('download') in ('1', 'true', 'yes')
+        content_type = _mime_for('glb')
+        download_name = f'{_safe_stem(model)}-fixed-eyes.glb'
+
+        if request.if_none_match and etag in request.if_none_match:
+            resp = make_response('', 304)
+            resp.headers['ETag'] = etag
+            resp.headers['Cache-Control'] = cache_control
+            resp.headers['Accept-Ranges'] = 'bytes'
+            return resp
+
+        fs = current_app.config['FILE_STORE']
+        range_header = request.headers.get('Range')
+        if not as_download and range_header and range_header.startswith('bytes=') and hasattr(fs, 'get_range'):
+            spec = range_header.split('=', 1)[1].split(',')[0].strip()
+            start_s, _, end_s = spec.partition('-')
+            try:
+                start = int(start_s) if start_s else 0
+                provisional_end = int(end_s) if end_s else None
+                probe_end = provisional_end if provisional_end is not None else start
+                _, total, _ = fs.get_range(file_id, start, probe_end)
+                if total <= 0:
+                    raise ValueError('empty')
+                end = provisional_end if provisional_end is not None else total - 1
+                end = min(end, total - 1)
+                if start > end or start >= total:
+                    resp = make_response('', 416)
+                    resp.headers['Content-Range'] = f'bytes */{total}'
+                    resp.headers['Accept-Ranges'] = 'bytes'
+                    return resp
+                chunk, total, _ = fs.get_range(file_id, start, end)
+                resp = make_response(chunk, 206)
+                resp.headers['Content-Type'] = content_type
+                resp.headers['Content-Length'] = str(len(chunk))
+                resp.headers['Content-Range'] = f'bytes {start}-{end}/{total}'
+                resp.headers['Accept-Ranges'] = 'bytes'
+                resp.headers['ETag'] = etag
+                resp.headers['Cache-Control'] = cache_control
+                return resp
+            except Exception as e:
+                print(f"Fixed-eyes range fetch fell back to full body: {e}")
+
+        data = variant.read_data()
+        if data is None:
+            return jsonify({'error': 'Variant file not found'}), 404
+
+        response = make_response(data)
+        response.headers['Content-Type'] = content_type
+        response.headers['Content-Length'] = str(len(data))
+        response.headers['Accept-Ranges'] = 'bytes'
+        response.headers['ETag'] = etag
+        response.headers['Cache-Control'] = cache_control
+        if as_download:
+            response.headers['Content-Disposition'] = f'attachment; filename="{download_name}"'
+        return response
+    except Exception as e:
+        print(f"API fixed-eyes fetch error: {e}")
+        return jsonify({'error': 'Fixed-eyes fetch failed'}), 500
+
+
 @api_bp.route('/model/<model_id>/status')
 def conversion_status(model_id):
     try:

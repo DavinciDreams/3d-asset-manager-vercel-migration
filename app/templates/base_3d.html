@@ -19,6 +19,7 @@
     <script type="module">
         import * as THREE from 'three';
         import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+        import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
         import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
         import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js';
         import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -39,6 +40,44 @@
                     material.dispose();
                 });
             });
+        }
+
+        // --- Eye "blinker" builder -------------------------------------------
+        // Builds a single eyeball: a sphere with a flat-shaded sclera + iris +
+        // pupil painted via VERTEX COLORS (no texture, so the exported GLB stays
+        // self-contained and works in any glTF viewer). The iris faces +Z in
+        // local space; the caller rotates the eye to aim it out of the socket.
+        function buildEyeballMesh(THREE, opts = {}) {
+            const radius = opts.radius || 1;
+            const sclera = new THREE.Color(opts.sclera || '#f0f0eb');
+            const iris = new THREE.Color(opts.iris || '#5a3a1a');
+            const pupil = new THREE.Color(opts.pupil || '#101010');
+            // Iris/pupil cap sizes (fraction of the way across the sphere from
+            // the +Z pole). Kept small so visible white sclera remains at the
+            // sides even when the eyeball fills the socket.
+            const irisFrac = opts.irisFrac != null ? opts.irisFrac : 0.28;
+            const pupilFrac = opts.pupilFrac != null ? opts.pupilFrac : 0.11;
+
+            const geo = new THREE.SphereGeometry(radius, 48, 32);
+            const pos = geo.attributes.position;
+            const colors = new Float32Array(pos.count * 3);
+            const irisCos = Math.cos(Math.PI * irisFrac);
+            const pupilCos = Math.cos(Math.PI * pupilFrac);
+            const v = new THREE.Vector3();
+            for (let i = 0; i < pos.count; i++) {
+                v.fromBufferAttribute(pos, i).normalize();
+                let c = sclera;
+                if (v.z >= pupilCos) c = pupil;
+                else if (v.z >= irisCos) c = iris;
+                colors[i * 3] = c.r; colors[i * 3 + 1] = c.g; colors[i * 3 + 2] = c.b;
+            }
+            geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+            const mat = new THREE.MeshStandardMaterial({
+                vertexColors: true, roughness: 0.35, metalness: 0.0,
+            });
+            const mesh = new THREE.Mesh(geo, mat);
+            mesh.name = opts.name || 'FixedEye';
+            return mesh;
         }
 
         function frameObject(camera, controls, object, width, height, padding) {
@@ -178,6 +217,11 @@
                 let currentClipName = null;
                 let animPaused = false;
 
+                // Separate mixer for the live blink preview of editor-added eyes,
+                // so it never interferes with the model's own animation mixer.
+                let eyeMixer = null;
+                let eyeBlinkAction = null;
+
                 const resize = () => {
                     if (disposed) return;
                     const nextWidth = container.clientWidth || width;
@@ -249,6 +293,7 @@
                     if (disposed) return;
                     const delta = clock.getDelta();
                     if (mixer && !animPaused) mixer.update(delta);
+                    if (eyeMixer) eyeMixer.update(delta);
                     controls.update();
                     renderer.render(scene, camera);
                     animationId = requestAnimationFrame(animate);
@@ -296,6 +341,419 @@
                         renderer.render(scene, camera);
                         return new Promise((resolve) => renderer.domElement.toBlob(resolve, options.mimeType || 'image/png'));
                     },
+                    // --- Fix-Eyes editor -------------------------------------
+                    // Adds two eyeballs to the model so reconstruction holes in
+                    // the eye sockets are covered, lets the owner position/scale/
+                    // recolor them, then bakes them (with an optional blink clip)
+                    // into a downloadable GLB via GLTFExporter.
+                    eyes: (() => {
+                        let group = null;          // THREE.Group holding both eyes
+                        let leftEye = null, rightEye = null;
+                        let selected = 'left';
+                        let raycaster = null;
+                        let dragging = false;
+                        // Iris aim. Default 180 = -Z, since most image-to-3D
+                        // characters face -Z (their irises would otherwise point
+                        // out the back of the head).
+                        let lookYaw = 180, lookPitch = 0;
+                        // The default eyeball radius the editor picked in add()
+                        // (world units, scaled to the model). Size slider is a
+                        // multiplier of this so it stays sane for any model size.
+                        let baseRadius = 0.05;
+                        // Whether the live blink preview is on. Tracked so size
+                        // changes can rebuild the clip (its keyframes capture the
+                        // resting scale, so a stale clip would snap the eye back).
+                        let blinkPreviewOn = false;
+                        // Auto-rotate state to restore when the editor closes
+                        // (we pause the turntable while positioning eyes).
+                        let wasAutoRotating = false;
+                        // Mirror mode: dragging one eye mirrors the other across the
+                        // model's X centerline so the pair stays level + symmetric.
+                        let mirror = true;
+                        // Undo history: stack of full eye-state snapshots, captured
+                        // BEFORE each mutating action. Capped so it can't grow huge.
+                        const history = [];
+                        const HISTORY_MAX = 50;
+                        const modelBox = new THREE.Box3();
+                        const modelSize = new THREE.Vector3();
+                        const modelCenter = new THREE.Vector3();
+
+                        const refreshModelBounds = () => {
+                            if (!model) return;
+                            modelBox.setFromObject(model);
+                            modelBox.getSize(modelSize);
+                            modelBox.getCenter(modelCenter);
+                        };
+
+                        const eyeFor = (which) => which === 'right' ? rightEye : leftEye;
+
+                        const api2 = {
+                            get active() { return group != null; },
+                            get selected() { return selected; },
+                            select(which) { selected = which === 'right' ? 'right' : 'left'; },
+
+                            // Create the eye pair (idempotent). Eyes start near the
+                            // top-front of the model bounding box (typical face
+                            // location) at a sensible default size; the owner then
+                            // nudges them onto the actual sockets.
+                            add(opts = {}) {
+                                if (group) return api2;
+                                refreshModelBounds();
+                                // Default radius as a fraction of the model's
+                                // bounding-sphere diameter. Smaller default (was
+                                // 0.06) since most faces want small eyes; the size
+                                // slider scales 0.15x–2x around this.
+                                const r = (opts.radius || 0.03) * Math.max(modelSize.length(), 0.001);
+                                baseRadius = r;
+                                const spacing = (opts.spacing || 0.12) * modelSize.x || r * 2.5;
+                                const top = modelCenter.y + modelSize.y * (opts.vertical != null ? opts.vertical : 0.28);
+                                const front = modelCenter.z + modelSize.z * 0.5;
+
+                                group = new THREE.Group();
+                                group.name = 'FixedEyes';
+                                const colors = {
+                                    sclera: opts.sclera, iris: opts.iris, pupil: opts.pupil,
+                                };
+                                // Each eye is THREE nested nodes so position, size,
+                                // blink and look never fight, and the blink always
+                                // squashes WORLD-vertical regardless of iris aim:
+                                //   wrap     -> position + size (axis-aligned)
+                                //   blinkN   -> blink scale.y  (axis-aligned)
+                                //   mesh     -> the eyeball, carries look rotation
+                                const makeEye = (name, x) => {
+                                    const wrap = new THREE.Group();
+                                    wrap.name = name;
+                                    const blinkN = new THREE.Group();
+                                    blinkN.name = name + 'Blink';
+                                    const mesh = buildEyeballMesh(THREE, { ...colors, radius: r, name: name + 'Mesh' });
+                                    blinkN.add(mesh);
+                                    wrap.add(blinkN);
+                                    wrap.position.set(x, top, front);
+                                    wrap.userData.mesh = mesh;       // recolor target
+                                    wrap.userData.blinkNode = blinkN; // blink target
+                                    return wrap;
+                                };
+                                leftEye = makeEye('FixedEyeL', modelCenter.x - spacing / 2);
+                                rightEye = makeEye('FixedEyeR', modelCenter.x + spacing / 2);
+                                group.add(leftEye, rightEye);
+                                scene.add(group);
+                                raycaster = new THREE.Raycaster();
+                                history.length = 0;  // fresh undo history per session
+                                // Aim irises per the default look (−Z for typical
+                                // image-to-3D characters); owner can adjust.
+                                api2.setLook(lookYaw, lookPitch);
+                                // Stop the turntable while editing — a spinning
+                                // model makes eye placement impossible. Remember the
+                                // prior state to restore on remove().
+                                wasAutoRotating = controls.autoRotate;
+                                controls.autoRotate = false;
+                                return api2;
+                            },
+
+                            get baseRadius() { return baseRadius; },
+                            // Set the SELECTED eye's size as a multiplier of the
+                            // default radius (1 == default). Both eyes start equal;
+                            // selecting + sliding lets you tune one if needed.
+                            setSizeScale(mult, both = false) {
+                                if (!group) return;
+                                // Scale the WRAPPER. The eyeball mesh was built at
+                                // `baseRadius`, so wrapper scale = mult makes the
+                                // visible radius mult*baseRadius. Blink lives on the
+                                // inner mesh, so it's untouched by resizing.
+                                const s = Math.max(mult, 0.001);
+                                const targets = both ? [leftEye, rightEye] : [eyeFor(selected)];
+                                targets.forEach((e) => { if (e) e.scale.setScalar(s); });
+                            },
+                            // Slider helpers operate on the SELECTED eye unless
+                            // `both` is set. Values are world units.
+                            nudge(axis, delta, both = false) {
+                                if (!group) return;
+                                const targets = both ? [leftEye, rightEye] : [eyeFor(selected)];
+                                targets.forEach((e) => { if (e) e.position[axis] += delta; });
+                            },
+                            setSpacing(spacing) {
+                                if (!group || !leftEye || !rightEye) return;
+                                const cx = (leftEye.position.x + rightEye.position.x) / 2;
+                                leftEye.position.x = cx - spacing / 2;
+                                rightEye.position.x = cx + spacing / 2;
+                            },
+                            setVertical(y) {
+                                if (!group) return;
+                                [leftEye, rightEye].forEach((e) => { if (e) e.position.y = y; });
+                            },
+                            setDepth(z) {
+                                if (!group) return;
+                                [leftEye, rightEye].forEach((e) => { if (e) e.position.z = z; });
+                            },
+                            setScaleBoth(scalar) {
+                                if (!group) return;
+                                [leftEye, rightEye].forEach((e) => { if (e) e.scale.setScalar(scalar); });
+                            },
+                            // Aim where the irises point. The iris is painted on
+                            // the eye's +Z face; we rotate both eyes so +Z points
+                            // along (yaw, pitch). yaw 0 = +Z, 180 = -Z (most
+                            // image-to-3D models face -Z, so that's the default).
+                            // Rotation is applied to e.quaternion; the blink clip
+                            // squashes scale.y independently, so they don't fight.
+                            // Aim irises. Each eye stores its OWN yaw/pitch in
+                            // userData so they can be aimed independently. With
+                            // `both` (default), aim both; otherwise just the
+                            // selected eye (for per-eye gaze correction on
+                            // asymmetric meshes). null leaves that axis unchanged.
+                            setLook(yawDeg, pitchDeg, both = true) {
+                                if (!group) return;
+                                // Keep the shared values in sync for the default/UI.
+                                lookYaw = (yawDeg == null) ? lookYaw : yawDeg;
+                                lookPitch = (pitchDeg == null) ? lookPitch : pitchDeg;
+                                const apply = (wrap) => {
+                                    const mesh = wrap && wrap.userData.mesh;
+                                    if (!mesh) return;
+                                    const u = wrap.userData;
+                                    u.yaw = (yawDeg == null) ? (u.yaw != null ? u.yaw : lookYaw) : yawDeg;
+                                    u.pitch = (pitchDeg == null) ? (u.pitch != null ? u.pitch : lookPitch) : pitchDeg;
+                                    const yaw = THREE.MathUtils.degToRad(u.yaw);
+                                    const pitch = THREE.MathUtils.degToRad(u.pitch);
+                                    const dir = new THREE.Vector3(
+                                        Math.sin(yaw) * Math.cos(pitch),
+                                        Math.sin(pitch),
+                                        Math.cos(yaw) * Math.cos(pitch)
+                                    ).normalize();
+                                    // Rotate the MESH only, so the blink node stays
+                                    // axis-aligned (blink squash stays world-vertical).
+                                    mesh.quaternion.setFromUnitVectors(
+                                        new THREE.Vector3(0, 0, 1), dir);
+                                };
+                                if (both) { [leftEye, rightEye].forEach(apply); }
+                                else { apply(eyeFor(selected)); }
+                            },
+                            flipFacing() { api2.setLook(lookYaw >= 90 ? 0 : 180, null, true); },
+                            get lookYaw() { return lookYaw; },
+                            get lookPitch() { return lookPitch; },
+                            // Per-eye aim of the currently selected eye (for the UI
+                            // to reflect when you switch eyes with symmetry off).
+                            get selectedYaw() { const e = eyeFor(selected); return e && e.userData.yaw != null ? e.userData.yaw : lookYaw; },
+                            get selectedPitch() { const e = eyeFor(selected); return e && e.userData.pitch != null ? e.userData.pitch : lookPitch; },
+                            // Midpoint between the two eyes (world space) — used as
+                            // the reference for the height/depth sliders.
+                            center() {
+                                if (!leftEye || !rightEye) return null;
+                                return new THREE.Vector3(
+                                    (leftEye.position.x + rightEye.position.x) / 2,
+                                    (leftEye.position.y + rightEye.position.y) / 2,
+                                    (leftEye.position.z + rightEye.position.z) / 2,
+                                );
+                            },
+                            setColors({ sclera, iris, pupil } = {}) {
+                                if (!group) return;
+                                [leftEye, rightEye].forEach((wrap) => {
+                                    const mesh = wrap && wrap.userData.mesh;
+                                    if (!mesh) return;
+                                    const fresh = buildEyeballMesh(THREE, {
+                                        sclera, iris, pupil,
+                                        radius: mesh.geometry.parameters.radius,
+                                    });
+                                    mesh.geometry.dispose();
+                                    mesh.geometry = fresh.geometry;
+                                    fresh.material.dispose();
+                                });
+                            },
+                            // Drag the selected eye across the screen plane that
+                            // passes through it (keeps depth constant). Called by
+                            // the gizmo UI on pointer events.
+                            beginDrag(ndcX, ndcY) {
+                                if (!group) return false;
+                                raycaster.setFromCamera(new THREE.Vector2(ndcX, ndcY), camera);
+                                // Raycast the inner meshes (the wrappers have no
+                                // geometry); map a hit back to its wrapper.
+                                const meshes = [leftEye.userData.mesh, rightEye.userData.mesh].filter(Boolean);
+                                const hits = raycaster.intersectObjects(meshes, false);
+                                if (hits.length) {
+                                    // mesh -> blinkNode -> wrap; walk up two parents.
+                                    const hitWrap = hits[0].object.parent && hits[0].object.parent.parent;
+                                    selected = hitWrap === rightEye ? 'right' : 'left';
+                                    dragging = true;
+                                    controls.enabled = false;
+                                    return true;
+                                }
+                                return false;
+                            },
+
+                            drag(ndcX, ndcY) {
+                                if (!dragging || !group) return;
+                                const e = eyeFor(selected);
+                                if (!e) return;
+                                // Project onto the camera-facing plane through the eye.
+                                const planeN = camera.getWorldDirection(new THREE.Vector3());
+                                const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(planeN, e.position);
+                                raycaster.setFromCamera(new THREE.Vector2(ndcX, ndcY), camera);
+                                const pt = new THREE.Vector3();
+                                if (!raycaster.ray.intersectPlane(plane, pt)) return;
+                                e.position.copy(pt);
+                                // Mirror the other eye across the model's X centerline
+                                // so the pair stays level, parallel and equal-depth.
+                                if (mirror) {
+                                    const other = e === leftEye ? rightEye : leftEye;
+                                    if (other) {
+                                        other.position.set(
+                                            2 * modelCenter.x - pt.x,  // mirror X
+                                            pt.y,                       // same height
+                                            pt.z                        // same depth
+                                        );
+                                    }
+                                }
+                            },
+                            endDrag() { dragging = false; controls.enabled = true; },
+                            get mirror() { return mirror; },
+                            set mirror(v) { mirror = !!v; },
+
+                            // --- Undo history ----------------------------------
+                            // A snapshot is the full editable state of both eyes:
+                            // position, size (wrapper scale), and per-eye aim.
+                            _snapshot() {
+                                if (!leftEye || !rightEye) return null;
+                                const cap = (wrap) => ({
+                                    pos: wrap.position.toArray(),
+                                    scale: wrap.scale.x,
+                                    yaw: wrap.userData.yaw,
+                                    pitch: wrap.userData.pitch,
+                                });
+                                return { left: cap(leftEye), right: cap(rightEye) };
+                            },
+                            _restore(snap) {
+                                if (!snap || !leftEye || !rightEye) return;
+                                const put = (wrap, s) => {
+                                    wrap.position.fromArray(s.pos);
+                                    wrap.scale.setScalar(s.scale);
+                                    wrap.userData.yaw = s.yaw;
+                                    wrap.userData.pitch = s.pitch;
+                                    // Re-apply the stored aim to the mesh quaternion.
+                                    const yaw = THREE.MathUtils.degToRad(s.yaw != null ? s.yaw : lookYaw);
+                                    const pitch = THREE.MathUtils.degToRad(s.pitch != null ? s.pitch : lookPitch);
+                                    const dir = new THREE.Vector3(
+                                        Math.sin(yaw) * Math.cos(pitch),
+                                        Math.sin(pitch),
+                                        Math.cos(yaw) * Math.cos(pitch)
+                                    ).normalize();
+                                    const mesh = wrap.userData.mesh;
+                                    if (mesh) mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), dir);
+                                };
+                                put(leftEye, snap.left);
+                                put(rightEye, snap.right);
+                            },
+                            // Call BEFORE a mutating action to make it undoable.
+                            pushHistory() {
+                                const snap = api2._snapshot();
+                                if (!snap) return;
+                                history.push(snap);
+                                if (history.length > HISTORY_MAX) history.shift();
+                            },
+                            get canUndo() { return history.length > 0; },
+                            undo() {
+                                const snap = history.pop();
+                                if (snap) api2._restore(snap);
+                                return history.length;  // remaining undo steps
+                            },
+
+                            // Start/stop a LIVE blink preview in the editor (uses
+                            // the dedicated eyeMixer so it won't touch the model's
+                            // own animation). Rebuilt on demand so it reflects the
+                            // current eye scale.
+                            previewBlink(enabled) {
+                                if (eyeMixer) {
+                                    eyeMixer.stopAllAction();
+                                    eyeMixer = null;
+                                    eyeBlinkAction = null;
+                                }
+                                blinkPreviewOn = !!enabled;
+                                if (!enabled || !group) return;
+                                const clip = api2.buildBlinkClip();
+                                if (!clip) return;
+                                eyeMixer = new THREE.AnimationMixer(group);
+                                eyeBlinkAction = eyeMixer.clipAction(clip);
+                                eyeBlinkAction.play();
+                            },
+
+                            remove() {
+                                api2.previewBlink(false);
+                                if (!group) return;
+                                scene.remove(group);
+                                [leftEye, rightEye].forEach((wrap) => {
+                                    const mesh = wrap && wrap.userData.mesh;
+                                    if (mesh) { mesh.geometry.dispose(); mesh.material.dispose(); }
+                                });
+                                group = leftEye = rightEye = null;
+                                // Restore the turntable to whatever it was before.
+                                controls.autoRotate = wasAutoRotating;
+                            },
+
+                            // Build a glTF AnimationClip that blinks both eyes
+                            // (scale.y squash). Returns the clip so the exporter
+                            // can bake it; also plays it live in the editor.
+                            buildBlinkClip() {
+                                if (!leftEye || !rightEye) return null;
+                                const period = 4.0, blink = 0.14; // seconds
+                                const tracks = [];
+                                // Animate the axis-aligned BLINK node (always at
+                                // resting scale 1). Independent of size (wrapper) and
+                                // look (mesh), so the squash is always world-vertical
+                                // and never resets the eye's size.
+                                [leftEye, rightEye].forEach((wrap) => {
+                                    const blinkN = wrap.userData.blinkNode;
+                                    if (!blinkN) return;
+                                    const times = [0, period - blink, period - blink / 2, period];
+                                    const open = [1, 1, 1];
+                                    const shut = [1, 0.06, 1];
+                                    const values = [...open, ...open, ...shut, ...open];
+                                    tracks.push(new THREE.VectorKeyframeTrack(
+                                        `${blinkN.name}.scale`, times, values));
+                                });
+                                return new THREE.AnimationClip('EyeBlink', period, tracks);
+                            },
+
+                            // Export the WHOLE scene (model + eyes) to a GLB Blob.
+                            // If withBlink, the blink clip is baked in. Eyes use
+                            // vertex colors so no extra textures are emitted.
+                            async exportGLB({ withBlink = true } = {}) {
+                                const exporter = new GLTFExporter();
+                                // Stop the live blink and reset inner meshes to their
+                                // resting (open) scale so the exported rest pose isn't
+                                // captured mid-blink.
+                                api2.previewBlink(false);
+                                [leftEye, rightEye].forEach((wrap) => {
+                                    const blinkN = wrap && wrap.userData.blinkNode;
+                                    if (blinkN) blinkN.scale.set(1, 1, 1);
+                                });
+                                const animations = [];
+                                if (withBlink) {
+                                    const clip = api2.buildBlinkClip();
+                                    if (clip) animations.push(clip);
+                                }
+                                // Export `model` + eye `group` together. Wrap in a
+                                // temp scene so we don't drag in lights/helpers.
+                                const exportRoot = new THREE.Scene();
+                                // GLTFExporter clones references; re-parenting then
+                                // restoring keeps the live viewer intact.
+                                const modelParent = model.parent;
+                                const groupParent = group ? group.parent : null;
+                                exportRoot.add(model);
+                                if (group) exportRoot.add(group);
+                                try {
+                                    const glb = await new Promise((resolve, reject) => {
+                                        exporter.parse(exportRoot, resolve, reject, {
+                                            binary: true,
+                                            animations,
+                                            onlyVisible: true,
+                                        });
+                                    });
+                                    return new Blob([glb], { type: 'model/gltf-binary' });
+                                } finally {
+                                    if (modelParent) modelParent.add(model);
+                                    if (group && groupParent) groupParent.add(group);
+                                }
+                            },
+                        };
+                        return api2;
+                    })(),
                     canvas: renderer.domElement,
                     dispose() {
                         disposed = true;
@@ -306,6 +764,8 @@
                             mixer.uncacheRoot(model);
                             mixer = null;
                         }
+                        if (eyeMixer) { eyeMixer.stopAllAction(); eyeMixer = null; }
+                        if (api && api.eyes && api.eyes.active) api.eyes.remove();
                         if (model) disposeObject(model);
                         scene.environment = null;
                         envTexture.dispose();

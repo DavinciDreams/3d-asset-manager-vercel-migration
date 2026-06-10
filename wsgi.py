@@ -8,4 +8,8 @@ app = create_app()
 
 if __name__ == "__main__":
     # Local dev fallback; in production gunicorn imports `app` directly.
-    app.run(host="0.0.0.0", port=8000)
+    # Enable template auto-reload + debug so edits to templates/Python are picked
+    # up without a manual restart. This block never runs under gunicorn.
+    app.config["TEMPLATES_AUTO_RELOAD"] = True
+    app.jinja_env.auto_reload = True
+    app.run(host="0.0.0.0", port=8000, debug=True, use_reloader=True)
