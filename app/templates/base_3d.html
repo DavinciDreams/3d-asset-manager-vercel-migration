@@ -1595,7 +1595,10 @@
             const options = {
                 large: true,
                 showInfo: true,
-                showControls: true,
+                // No floating Reset/Rotate overlay on the detail page — it
+                // overlaps the variant toggle + controls that sit under the
+                // viewer, and the detail toolbar already has Reset View / rotate.
+                showControls: false,
                 preferThree: true,
                 srcUrl: modelData.srcUrl,
                 cameraOrbit: modelData.cameraOrbit,

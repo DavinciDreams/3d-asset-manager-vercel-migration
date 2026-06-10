@@ -140,6 +140,10 @@
                             class="text-blue-600 hover:text-blue-800 text-sm">
                         <i class="fas fa-home mr-1"></i>Reset View
                     </button>
+                    <button onclick="toggleAutoRotate('viewer-detail-{{ model.id }}')"
+                            class="text-blue-600 hover:text-blue-800 text-sm">
+                        <i class="fas fa-sync mr-1"></i>Rotate
+                    </button>
                     {% if current_user.is_authenticated and current_user.id == model.user_id %}
                     <button id="save-view-btn" onclick="saveDefaultView()"
                             class="text-green-600 hover:text-green-800 text-sm font-medium">
@@ -642,6 +646,12 @@ function revealFixedEyes(sizeBytes) {
 
 function resetDetailCamera() {
     const container = document.getElementById('viewer-detail-{{ model.id }}');
+    // Three.js viewer (default for GLB) reframes via its own api; fall back to
+    // the <model-viewer> web component when that's what's mounted.
+    if (container?.__threeViewer) {
+        container.__threeViewer.reset();
+        return;
+    }
     const modelViewer = container?.querySelector('model-viewer');
     if (modelViewer) {
         modelViewer.resetTurntableRotation();

@@ -153,7 +153,17 @@ blink, and gaze never fight each other.
 - Verified: py_compile + node --check + Jinja-compile of the 3 gallery templates;
   detail renders with the note; `url_for('api.get_fixed_eyes')` resolves.
 
-**Status:** ✅ Complete & live-verified (core); follow-up statically verified.
+**UI cleanup (same PR):**
+- Detail viewer no longer shows the floating Reset/Rotate overlay (`showControls:
+  false` in `createDetailedModelViewer`) — it was covering the variant toggles.
+  Added a **Rotate** button to the detail toolbar next to Reset View.
+- Fixed a latent bug: `resetDetailCamera()` only handled `<model-viewer>`; it now
+  also handles the Three.js viewer (`__threeViewer.reset()`), which is what GLB
+  uses — so "Reset View" actually works for GLB models now.
+
+**Status:** ✅ Complete & live-verified. Full chain confirmed end-to-end by the user:
+upload → fix eyes → bake → game-optimize (sources fixed-eyes) → 60% smaller variant
+WITH the blinking eyes intact; preview prefers the optimized-with-eyes file.
 
 ### 2026-06-09 — Viewer/dashboard/browse/serving (PRs #6, #7)
 **Files:** base_3d.html, _vrm_viewer.html, dashboard.html, browse.html, api.py, db.py,
