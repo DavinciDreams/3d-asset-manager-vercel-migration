@@ -111,6 +111,34 @@ def _force_meshopt_required_for_external_fallback(glb_bytes):
         return glb_bytes
 
 
+def _glb_is_meshopt_compressed(glb_bytes):
+    """True if the GLB already uses EXT_meshopt_compression (i.e. it is already
+    gltfpack/meshopt output). Such files are effectively already game-optimized,
+    so we register them as the variant instead of re-running gltfpack (which
+    fails on legacy -cf GLBs that reference a missing external fallback .bin)."""
+    if not glb_bytes or glb_bytes[:4] != _GLB_MAGIC or len(glb_bytes) < 20:
+        return False
+    try:
+        magic, version, declared_length = struct.unpack_from('<4sII', glb_bytes, 0)
+        if magic != _GLB_MAGIC or version != 2 or declared_length > len(glb_bytes):
+            return False
+        offset = 12
+        while offset + 8 <= declared_length:
+            chunk_length, chunk_type = struct.unpack_from('<II', glb_bytes, offset)
+            data_start = offset + 8
+            data_end = data_start + chunk_length
+            if data_end > declared_length:
+                return False
+            if chunk_type == _GLB_JSON_CHUNK:
+                gltf = json.loads(glb_bytes[data_start:data_end].decode('utf-8').rstrip(' \t\r\n\0'))
+                used = set(gltf.get('extensionsUsed') or [])
+                return 'EXT_meshopt_compression' in used
+            offset = data_end
+    except Exception as e:
+        print(f"meshopt detection warning: {e}")
+    return False
+
+
 def _can_access_model(model):
     if model.is_public:
         return True
@@ -1500,9 +1528,10 @@ def _run_game_optimizer(model, owner_id, settings):
     import subprocess
     import tempfile
 
+    # gltfpack is required only to RUN an optimization; the already-optimized
+    # short-circuit below (registering an existing meshopt GLB as the variant)
+    # does not need it, so we check inside the gltfpack branch instead.
     gltfpack_bin = shutil.which('gltfpack')
-    if not gltfpack_bin:
-        raise RuntimeError('Game optimization is unavailable because gltfpack is not installed.')
 
     texture_limit = settings['texture_limit']
     simplify_ratio = settings['simplify_ratio']
@@ -1516,47 +1545,63 @@ def _run_game_optimizer(model, owner_id, settings):
     if src_fmt not in ('glb', 'gltf'):
         raise ValueError('Game optimization currently supports GLB/GLTF assets.')
 
+    # Repair legacy gltfpack -cf GLBs that reference a missing external
+    # *.fallback.bin (otherwise gltfpack reports "resource not found").
+    if src_fmt == 'glb':
+        src_bytes = _force_meshopt_required_for_external_fallback(src_bytes)
+
     workdir = tempfile.mkdtemp(prefix='game_optimize_')
     try:
-        in_path = os.path.join(workdir, f'input.{src_fmt}')
-        out_path = os.path.join(workdir, 'game.glb')
-        report_path = os.path.join(workdir, 'report.json')
-        with open(in_path, 'wb') as f:
-            f.write(src_bytes)
-
-        cmd = [
-            gltfpack_bin,
-            '-i', in_path,
-            '-o', out_path,
-            '-si', f'{simplify_ratio:g}',
-            '-r', report_path,
-        ]
-        if compression_mode == 'meshopt':
-            cmd.append('-cc')
-        if texture_limit:
-            cmd.extend(['-tc', '-tl', str(texture_limit)])
-
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=300,
-            check=False,
-        )
-        if result.returncode != 0:
-            msg = (result.stderr or result.stdout or 'gltfpack failed.').strip()
-            raise RuntimeError(msg[-1000:] or 'gltfpack failed.')
-
-        with open(out_path, 'rb') as f:
-            out_bytes = f.read()
-
         report = {}
-        if os.path.exists(report_path):
-            try:
-                with open(report_path, 'r', encoding='utf-8') as f:
-                    report = json.load(f)
-            except Exception as e:
-                print(f"Could not read gltfpack report: {e}")
+
+        # If the source is ALREADY a meshopt/gltfpack GLB, it is effectively
+        # already game-optimized. Re-running gltfpack on it is redundant and
+        # fails on the missing fallback buffer -- so register the existing file
+        # as the variant (the optimized preview + size still show up).
+        if src_fmt == 'glb' and _glb_is_meshopt_compressed(src_bytes):
+            out_bytes = src_bytes
+            report = {'already_optimized': True}
+        else:
+            if not gltfpack_bin:
+                raise RuntimeError('Game optimization is unavailable because gltfpack is not installed.')
+            in_path = os.path.join(workdir, f'input.{src_fmt}')
+            out_path = os.path.join(workdir, 'game.glb')
+            report_path = os.path.join(workdir, 'report.json')
+            with open(in_path, 'wb') as f:
+                f.write(src_bytes)
+
+            cmd = [
+                gltfpack_bin,
+                '-i', in_path,
+                '-o', out_path,
+                '-si', f'{simplify_ratio:g}',
+                '-r', report_path,
+            ]
+            if compression_mode == 'meshopt':
+                cmd.append('-cc')
+            if texture_limit:
+                cmd.extend(['-tc', '-tl', str(texture_limit)])
+
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=300,
+                check=False,
+            )
+            if result.returncode != 0:
+                msg = (result.stderr or result.stdout or 'gltfpack failed.').strip()
+                raise RuntimeError(msg[-1000:] or 'gltfpack failed.')
+
+            with open(out_path, 'rb') as f:
+                out_bytes = f.read()
+
+            if os.path.exists(report_path):
+                try:
+                    with open(report_path, 'r', encoding='utf-8') as f:
+                        report = json.load(f)
+                except Exception as e:
+                    print(f"Could not read gltfpack report: {e}")
 
         fs = current_app.config['FILE_STORE']
         optimized_filename = f'{_safe_stem(model)}-game.glb'
