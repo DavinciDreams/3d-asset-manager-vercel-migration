@@ -21,6 +21,12 @@ def _model_summary_schema():
             'description': {'type': 'string', 'example': 'A low-poly spaceship.'},
             'file_format': {'type': 'string', 'enum': ALLOWED_EXTENSIONS, 'example': 'glb'},
             'file_size': {'type': 'integer', 'description': 'Size in bytes', 'example': 248320},
+            'content_hash': {
+                'type': 'string',
+                'nullable': True,
+                'description': 'SHA-256 digest of the original uploaded model binary.',
+                'example': 'f4e2a16f2c8d0cfdcf2d8a9d3b2f0af30d3c90e2e531fdb4c8d8d55c2d5a7c0f',
+            },
             'original_filename': {'type': 'string', 'example': 'spaceship.glb'},
             'is_public': {'type': 'boolean', 'example': True},
             'upload_date': {'type': 'string', 'format': 'date-time', 'nullable': True},
@@ -1086,7 +1092,8 @@ def get_openapi_spec(base_url=''):
                         'from filenames.\n\n'
                         '**Response shape:** a single-file request returns '
                         '`{success, message, model}`; a multi-file request returns '
-                        '`{success, message, uploaded[], errors[]}`.'
+                        '`{success, message, uploaded[], errors[]}`. Duplicate '
+                        'model binaries are rejected by SHA-256 content hash.'
                     ),
                     'security': [{'sessionCookie': []}, {'uploadApiKey': []}],
                     'requestBody': {
@@ -1166,6 +1173,7 @@ def get_openapi_spec(base_url=''):
                         },
                         '400': _error_response('Missing file/name, bad type, too large, or all files failed'),
                         '401': _error_response('Authentication required'),
+                        '409': _error_response('Duplicate model binary'),
                         '500': _error_response('Upload failed'),
                     },
                 }

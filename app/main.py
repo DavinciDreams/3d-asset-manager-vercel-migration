@@ -2,6 +2,7 @@ from flask import Blueprint, render_template, request, redirect, url_for, flash,
 from flask_login import login_required, current_user
 from app.models import ApiKey, Model3D, ModelVariant, User
 from werkzeug.utils import secure_filename
+import hashlib
 import io
 
 main_bp = Blueprint('main', __name__)
@@ -335,10 +336,21 @@ def upload():
             # Read file content
             file_content = file.read()
             file_size = len(file_content)
+            if file_size == 0:
+                flash('File is empty.', 'error')
+                return render_template('upload.html', all_tags=Model3D.get_user_tags(current_user.id), max_upload_mb=max_upload_mb)
             
             # Check file size (100MB limit)
             if file_size > current_app.config['MAX_FILE_BYTES']:
                 flash(f'File too large. Maximum size is {max_upload_mb}MB.', 'error')
+                return render_template('upload.html', all_tags=Model3D.get_user_tags(current_user.id), max_upload_mb=max_upload_mb)
+            content_hash = hashlib.sha256(file_content).hexdigest()
+            duplicate = Model3D.get_by_content_hash(content_hash)
+            if duplicate:
+                if duplicate.is_public or duplicate.user_id == current_user.id:
+                    flash(f'Duplicate model already exists: {duplicate.name}.', 'error')
+                    return redirect(url_for('main.model_detail', model_id=duplicate.id))
+                flash('Duplicate model already exists in the asset library.', 'error')
                 return render_template('upload.html', all_tags=Model3D.get_user_tags(current_user.id), max_upload_mb=max_upload_mb)
             
             # Store file in the configured database-backed file store.
@@ -350,7 +362,8 @@ def upload():
                 metadata={
                     'original_filename': file.filename,
                     'uploaded_by': current_user.id,
-                    'upload_date': Model3D().upload_date
+                    'upload_date': Model3D().upload_date,
+                    'content_hash': content_hash,
                 }
             )
             
@@ -360,6 +373,7 @@ def upload():
                 description=description,
                 file_format=file_extension,
                 file_size=file_size,
+                content_hash=content_hash,
                 original_filename=file.filename,
                 user_id=current_user.id,
                 is_public=is_public,

@@ -20,8 +20,8 @@ def test_profile_counts_uploaded_models():
     client = app.test_client()
     _login(app, client)
 
-    glb = b"glTF" + b"\x00" * 64
     for name in ["One", "Two", "Three"]:
+        glb = b"glTF" + name.encode("utf-8") + b"\x00" * 64
         response = client.post("/api/upload", data={
             "name": name,
             "is_public": "true",

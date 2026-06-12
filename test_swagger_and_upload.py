@@ -15,6 +15,10 @@ from app import create_app
 from app.models import ApiKey, Model3D, User
 
 
+def _glb(label):
+    return b'glTF' + str(label).encode('utf-8') + b'\x00' * 64
+
+
 def _login(app, client, username='swagtester'):
     with app.app_context():
         if not User.get_by_username(username):
@@ -27,7 +31,6 @@ def _login(app, client, username='swagtester'):
 def main():
     app = create_app()
     client = app.test_client()
-    glb = b'glTF' + b'\x00' * 64
 
     # --- OpenAPI spec ---
     r = client.get('/api/openapi.json')
@@ -56,7 +59,7 @@ def main():
 
     # --- Upload API key auth ---
     r = client.post('/api/upload', data={
-        'is_public': 'true', 'file': (io.BytesIO(glb), 'no-auth.glb'),
+        'is_public': 'true', 'file': (io.BytesIO(_glb('no-auth')), 'no-auth.glb'),
     }, content_type='multipart/form-data')
     assert r.status_code == 401, r.get_data(as_text=True)
 
@@ -70,7 +73,7 @@ def main():
 
     r = client.post('/api/upload', headers={'Authorization': f'Bearer {token}'}, data={
         'name': 'API Key Model', 'is_public': 'true',
-        'file': (io.BytesIO(glb), 'api-key-model.glb'),
+        'file': (io.BytesIO(_glb('api-key')), 'api-key-model.glb'),
     }, content_type='multipart/form-data')
     assert r.status_code == 201, r.get_json()
     model_id = r.get_json()['model']['id']
@@ -81,7 +84,7 @@ def main():
 
     r = client.post('/api/upload', headers={'Authorization': f'Bearer {token}'}, data={
         'name': 'Revoked Key Model', 'is_public': 'true',
-        'file': (io.BytesIO(glb), 'revoked-key-model.glb'),
+        'file': (io.BytesIO(_glb('revoked-key')), 'revoked-key-model.glb'),
     }, content_type='multipart/form-data')
     assert r.status_code == 401, r.get_json()
     print('PASS: upload API keys can upload as owner and revoked keys are rejected')
@@ -112,7 +115,7 @@ def main():
     # --- Single-file upload stays backward compatible ---
     r = client.post('/api/upload', data={
         'name': 'Single Model', 'is_public': 'true',
-        'file': (io.BytesIO(glb), 'single.glb'),
+        'file': (io.BytesIO(_glb('single')), 'single.glb'),
     }, content_type='multipart/form-data')
     assert r.status_code == 201, r.get_json()
     j = r.get_json()
@@ -123,7 +126,7 @@ def main():
     # This is the per-file batch case: the web client uploads each file in its
     # own request and omits 'name', so the server must auto-name (not reject).
     r = client.post('/api/upload', data={
-        'is_public': 'true', 'file': (io.BytesIO(glb), 'robot/walk_cycle.glb'),
+        'is_public': 'true', 'file': (io.BytesIO(_glb('walk-cycle')), 'robot/walk_cycle.glb'),
     }, content_type='multipart/form-data')
     assert r.status_code == 201, r.get_json()
     assert r.get_json()['model']['name'] == 'walk cycle', r.get_json()
@@ -133,8 +136,8 @@ def main():
     r = client.post('/api/upload', data={
         'is_public': 'true', 'tags': 'batch',
         'file': [
-            (io.BytesIO(glb), 'robot/walk_cycle.glb'),
-            (io.BytesIO(glb), 'robot/idle-pose.glb'),
+            (io.BytesIO(_glb('batch-walk-cycle')), 'robot/walk_cycle.glb'),
+            (io.BytesIO(_glb('batch-idle-pose')), 'robot/idle-pose.glb'),
             (io.BytesIO(b'x'), 'readme.txt'),  # unsupported -> reported as error
         ],
     }, content_type='multipart/form-data')
@@ -152,7 +155,7 @@ def main():
     for path in batch:
         r = client.post('/api/upload', data={
             'is_public': 'true', 'tags': 'scene',
-            'file': (io.BytesIO(glb), path),
+            'file': (io.BytesIO(_glb(path)), path),
         }, content_type='multipart/form-data')
         assert r.status_code == 201, (path, r.get_json())
         names.append(r.get_json()['model']['name'])
