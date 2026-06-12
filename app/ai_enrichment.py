@@ -70,7 +70,7 @@ def _env_bool(name, default=False):
 
 
 def _provider():
-    return os.environ.get("AI_AUTOTAG_PROVIDER", os.environ.get("AI_PROVIDER", "openai")).strip().lower()
+    return (os.environ.get("AI_AUTOTAG_PROVIDER") or os.environ.get("AI_PROVIDER") or "openai").strip().lower()
 
 
 def _api_key():

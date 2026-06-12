@@ -20,6 +20,7 @@ def test_profile_counts_uploaded_models():
     client = app.test_client()
     _login(app, client)
 
+    model_ids = []
     for name in ["One", "Two", "Three"]:
         glb = b"glTF" + name.encode("utf-8") + b"\x00" * 64
         response = client.post("/api/upload", data={
@@ -28,6 +29,7 @@ def test_profile_counts_uploaded_models():
             "file": (io.BytesIO(glb), f"{name.lower()}.glb"),
         }, content_type="multipart/form-data")
         assert response.status_code == 201, response.get_json()
+        model_ids.append(response.get_json()["model"]["id"])
 
     profile = client.get("/profile")
     assert profile.status_code == 200
@@ -36,3 +38,10 @@ def test_profile_counts_uploaded_models():
     assert "One" in html
     assert "Two" in html
     assert "Three" in html
+
+    detail = client.get(f"/model/{model_ids[0]}")
+    assert detail.status_code == 200
+    detail_html = detail.get_data(as_text=True)
+    assert "Enrich Metadata" in detail_html
+    assert "Catalog Metadata" in detail_html
+    assert "/api/model/" in detail_html and "/ai/autotag" in detail_html
