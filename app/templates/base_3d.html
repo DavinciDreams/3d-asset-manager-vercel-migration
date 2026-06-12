@@ -42,6 +42,26 @@
             });
         }
 
+        // Remove PRE-BAKED fix-up nodes (from a previously-baked variant that was
+        // loaded as the editor base) whose name matches `re`, so re-adding the
+        // same fix-up via the editor doesn't double the geometry. Returns count.
+        function removeBakedNodes(root, re) {
+            const doomed = [];
+            root.traverse((n) => { if (re.test(n.name || '')) doomed.push(n); });
+            // Only remove top-level matches (their children come with them).
+            doomed.forEach((n) => {
+                if (n.parent && !doomed.includes(n.parent)) {
+                    n.parent.remove(n);
+                    n.traverse((c) => {
+                        if (c.geometry) c.geometry.dispose();
+                        const ms = Array.isArray(c.material) ? c.material : [c.material];
+                        ms.filter(Boolean).forEach((m) => m.dispose());
+                    });
+                }
+            });
+            return doomed.length;
+        }
+
         // --- Eye "blinker" builder -------------------------------------------
         // Builds a single eyeball: a sphere with a flat-shaded sclera + iris +
         // pupil painted via VERTEX COLORS (no texture, so the exported GLB stays
@@ -748,6 +768,10 @@
                             // nudges them onto the actual sockets.
                             add(opts = {}) {
                                 if (group) return api2;
+                                // If the loaded model already has baked eyes (from a
+                                // prior fixed variant used as the base), remove them
+                                // so the editor's fresh pair replaces them on re-bake.
+                                if (model) removeBakedNodes(model, /^FixedEyes$/);
                                 refreshModelBounds();
                                 // Default radius as a fraction of the model's
                                 // bounding-sphere diameter. Smaller default (was
@@ -1141,6 +1165,9 @@
 
                             add(opts = {}) {
                                 if (mGroup) return m;
+                                // Remove any baked mouth from a loaded fixed variant
+                                // so the editor's fresh mouth replaces it on re-bake.
+                                if (model) removeBakedNodes(model, /^FixedMouthWrap$/);
                                 refreshBounds();
                                 // Default width as a fraction of the model's
                                 // bounding-sphere diameter. Small default since a
@@ -1383,9 +1410,53 @@
 
                         const exportRoot = new THREE.Scene();
                         const modelParent = model.parent;
+                        // (continued below — node-scan happens after exportRoot is
+                        //  assembled so it sees pre-baked fix-up nodes in `model`)
                         const parents = extras.map((g) => g.parent);
                         exportRoot.add(model);
                         extras.forEach((g) => exportRoot.add(g));
+
+                        // Re-add clips for any PRE-BAKED fix-up nodes already in the
+                        // loaded model (e.g. eyes baked in an earlier session, now
+                        // re-exported while adding a mouth). Without this, baking the
+                        // mouth would drop the eyes' blink clip. Idempotent: skip
+                        // any clip name we already added from a live editor above.
+                        const haveClip = new Set(animations.map((c) => c.name));
+                        const blinkNodes = [];      // FixedEye*Blink groups
+                        const morphMeshes = [];     // FixedMouthLip / FixedMouthCavity with morphs
+                        exportRoot.traverse((n) => {
+                            if (/^FixedEye[LR]Blink$/.test(n.name || '')) blinkNodes.push(n);
+                            if (/^FixedMouth(Lip|Cavity)$/.test(n.name || '')
+                                && n.morphTargetInfluences && n.morphTargetInfluences.length) {
+                                morphMeshes.push(n);
+                            }
+                        });
+                        // Eye blink: one clip squashing each blink node's scale.y.
+                        if (withBlink && blinkNodes.length && !haveClip.has('EyeBlink')) {
+                            const period = 4.0, blink = 0.14;
+                            const times = [0, period - blink, period - blink / 2, period];
+                            const tracks = blinkNodes.map((bn) => new THREE.VectorKeyframeTrack(
+                                `${bn.name}.scale`, times,
+                                [1,1,1, 1,1,1, 1,0.06,1, 1,1,1]));
+                            animations.push(new THREE.AnimationClip('EyeBlink', period, tracks));
+                        }
+                        // Mouth talk: one clip per morph mesh cycling its influences.
+                        if (withTalk) {
+                            morphMeshes.forEach((mesh) => {
+                                const clipName = 'MouthTalk_' + mesh.name;
+                                if (haveClip.has(clipName)) return;
+                                const nT = mesh.morphTargetInfluences.length;
+                                const seq = [-1, 0, -1, Math.min(2, nT-1), Math.min(1, nT-1), -1, nT-1, 0, -1];
+                                const dt = 0.15;
+                                const times = seq.map((_, i) => i * dt);
+                                const values = [];
+                                seq.forEach((sel) => { for (let t = 0; t < nT; t++) values.push(sel === t ? 1 : 0); });
+                                animations.push(new THREE.AnimationClip(
+                                    clipName, seq.length * dt,
+                                    [new THREE.NumberKeyframeTrack(mesh.name + '.morphTargetInfluences', times, values)]));
+                            });
+                        }
+
                         try {
                             const glb = await new Promise((resolve, reject) => {
                                 exporter.parse(exportRoot, resolve, reject, {
