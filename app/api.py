@@ -584,9 +584,20 @@ def post_fixed_eyes(model_id):
             except Exception as e:
                 print(f"Old fixed-eyes blob {old_file_id} not deleted: {e}")
 
+        # Re-run game optimization so the preferred 'game' variant includes the
+        # baked eyes. _run_game_optimizer uses the fixed-eyes GLB as its source;
+        # force=True replaces any existing (eyeless) game variant. Previews
+        # prefer 'game', so once it finishes the small + fixed-eyes file is used.
+        import shutil
+        had_game = ModelVariant.get(model.id, 'game') is not None
+        _maybe_autostart_game_optimization(model, force=True)
+        reoptimizing = bool(shutil.which('gltfpack'))
+
         return jsonify({
             'success': True,
             'variant': variant.to_api() if variant else None,
+            'reoptimizing': reoptimizing,
+            'replaced_game_variant': had_game,
         })
     except Exception as e:
         print(f"API fixed-eyes upload error: {e}")
@@ -1915,22 +1926,28 @@ def _enqueue_game_optimization(model_id, owner_id, settings):
     return job_id
 
 
-def _maybe_autostart_game_optimization(model):
-    """Auto-queue a game-optimized variant right after upload for GLB/GLTF
-    assets (the only formats gltfpack supports), so every uploaded model gets a
-    small, performant preview/download without manual action. Best-effort: any
-    failure is swallowed so it never blocks the upload response. Skipped when
-    gltfpack is unavailable or auto-optimize is disabled via env."""
+def _maybe_autostart_game_optimization(model, force=False):
+    """Auto-queue a game-optimized variant.
+
+    On upload (force=False): only for GLB/GLTF, and skipped if a 'game' variant
+    already exists, so every new mesh upload gets a small preview without manual
+    action. After baking fixed eyes (force=True): re-run even if a 'game'
+    variant exists -- the optimizer prefers the fixed-eyes GLB as its source, so
+    the refreshed 'game' variant includes the eyes (and previews prefer 'game').
+    Best-effort; failures are swallowed so they never block the response."""
     try:
         import shutil
         if os.environ.get('AUTO_GAME_OPTIMIZE', '1').lower() in ('0', 'false', 'no', 'off'):
             return
-        if (model.file_format or '').lower() not in ('glb', 'gltf'):
+        # When forcing (fixed-eyes re-optimize) the source is the baked GLB, so
+        # the original format doesn't matter; otherwise only mesh formats apply.
+        if not force and (model.file_format or '').lower() not in ('glb', 'gltf'):
             return
         if not shutil.which('gltfpack'):
             return
-        # Don't double-optimize if a variant somehow already exists.
-        if ModelVariant.get(model.id, 'game'):
+        # On upload, don't double-optimize an existing variant. When forcing we
+        # WANT to replace it (e.g. eyeless -> with eyes); upsert handles the swap.
+        if not force and ModelVariant.get(model.id, 'game'):
             return
         _enqueue_game_optimization(model.id, model.user_id, dict(GAME_OPTIMIZE_DEFAULTS))
     except Exception as e:
