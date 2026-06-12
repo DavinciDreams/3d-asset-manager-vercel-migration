@@ -1618,6 +1618,12 @@ document.addEventListener('DOMContentLoaded', function() {
     curveEl.addEventListener('input', () => {
         const m = mouth(); if (m) m.setCurve(parseFloat(curveEl.value) / 100);
     });
+    // setCurve rebuilds the lip/cavity geometry, which detaches the live talk
+    // mixer from the old meshes. Re-arm the talk preview once on release so it
+    // rebinds to the new geometry (debounced to slider release, not per-pixel).
+    curveEl.addEventListener('change', () => {
+        const m = mouth(); if (m && talkEl.checked) m.previewTalk(true);
+    });
     lipEl.addEventListener('input', () => {
         const m = mouth(); if (m) m.setColors({ lip: lipEl.value });
     });
