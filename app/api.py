@@ -1233,12 +1233,16 @@ def _serialize_browse_card(model):
     # handles GLB/GLTF incl. Draco/meshopt). VRM/VRMA use other viewers, so we
     # leave those to their thumbnail/icon on browse.
     viewable = bool(model.viewable_file_id) or (model.file_format or '').lower() in ('glb', 'gltf')
-    # Prefer the game-optimized variant for the live browse preview when one
-    # exists -- it's far smaller (e.g. 5MB vs 85MB) so cards load fast and the
-    # gallery stays performant. Falls back to the full model otherwise.
+    # Preview source priority: game-optimized (smallest AND includes any baked
+    # eyes/mouth) -> fixed-eyes (eyes/mouth baked but not yet game-optimized) ->
+    # original. This matches the server-rendered cards + detail page so the live
+    # browse preview always shows the best available (fixed) version.
     game_variant = ModelVariant.get(model.id, 'game') if viewable else None
+    fixed_variant = ModelVariant.get(model.id, 'fixed_eyes') if viewable else None
     if game_variant and game_variant.file_id:
         view_url = url_for('api.get_game_optimized', model_id=model.id)
+    elif fixed_variant and fixed_variant.file_id:
+        view_url = url_for('api.get_fixed_eyes', model_id=model.id)
     elif viewable:
         view_url = url_for('api.view_model', model_id=model.id) + '?viewer=2'
     else:
@@ -1261,6 +1265,7 @@ def _serialize_browse_card(model):
         'viewable': viewable,
         'view_url': view_url,
         'has_game_optimized': bool(game_variant and game_variant.file_id),
+        'has_fixed_eyes': bool(fixed_variant and fixed_variant.file_id),
         'camera_orbit': model.camera_orbit or None,
         'default_animation': model.default_animation or None,
     }
