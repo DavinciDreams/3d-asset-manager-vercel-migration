@@ -207,3 +207,80 @@ def test_hyades_a2a_enrichment_uses_holo_vision(monkeypatch):
     assert enriched["provider"] == "hyades"
     assert enriched["transport"] == "a2a"
     assert enriched["asset_category"] == "building"
+
+
+def test_openai_vision_cloudflare_error_retries_text_only(monkeypatch):
+    from app import ai_enrichment
+
+    calls = []
+    output = {
+        "title": "Stone Lantern",
+        "asset_category": "prop",
+        "asset_styles": ["fantasy"],
+        "asset_types": ["game-ready"],
+        "tags": ["lantern", "stone", "prop"],
+        "description": "A stone lantern prop for a fantasy scene.",
+        "summary": "Fantasy stone lantern.",
+        "categories": ["props"],
+        "quality_notes": [],
+    }
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps({
+                "id": "chatcmpl-1",
+                "choices": [{"message": {"content": json.dumps(output)}}],
+            }).encode("utf-8")
+
+    def fake_urlopen(request, timeout):
+        calls.append(json.loads(request.data.decode("utf-8")))
+        if len(calls) == 1:
+            raise ai_enrichment.urllib.error.HTTPError(
+                request.full_url,
+                520,
+                "Origin Error",
+                {},
+                io.BytesIO(b"<html>The origin web server returned an invalid or incomplete response</html>"),
+            )
+        return FakeResponse()
+
+    class FakeModel:
+        name = "stone_lantern"
+        description = ""
+        original_filename = "stone_lantern.glb"
+        file_format = "glb"
+        file_size = 1234
+        tags = []
+        asset_category = None
+        asset_styles = []
+        asset_types = []
+        approve_game_ready = False
+        approve_asset_store = False
+        conversion_status = None
+        thumbnail_file_id = "thumb"
+
+        def _read_stored_file(self, file_id):
+            assert file_id == "thumb"
+            return b"webp-thumbnail"
+
+    monkeypatch.setenv("AI_AUTOTAG_PROVIDER", "openai")
+    monkeypatch.setenv("AI_AUTOTAG_API_KEY", "openai-key")
+    monkeypatch.setenv("AI_AUTOTAG_USE_VISION", "1")
+    monkeypatch.setenv("AI_AUTOTAG_RETRY_TEXT_ONLY", "1")
+    monkeypatch.setattr(ai_enrichment.urllib.request, "urlopen", fake_urlopen)
+
+    enriched = ai_enrichment.enrich_model(FakeModel())
+
+    assert len(calls) == 2
+    assert isinstance(calls[0]["messages"][1]["content"], list)
+    assert isinstance(calls[1]["messages"][1]["content"], str)
+    assert enriched["vision_fallback"] is True
+    assert enriched["title"] == "Stone Lantern"

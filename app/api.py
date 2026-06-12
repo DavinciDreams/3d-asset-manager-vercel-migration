@@ -1698,6 +1698,7 @@ def _run_ai_enrichment(model, data=None):
         'base_url': enriched.get('base_url'),
         'model': enriched.get('model'),
         'response_id': enriched.get('response_id'),
+        'vision_fallback': enriched.get('vision_fallback', False),
         'updated_at': datetime.utcnow().isoformat(),
     }
     if overwrite:
@@ -2388,6 +2389,7 @@ def autotag_model(model_id):
             model.ai_status = 'failed'
             model.ai_error = str(e)[:500]
             model.save()
+            print(f"API autotag provider error for model {model.id}: {model.ai_error}", flush=True)
             return jsonify({'error': 'AI enrichment failed', 'detail': model.ai_error}), 502
 
         return jsonify({'success': True, 'model': _serialize_model(model), 'enrichment': model.ai_metadata})
