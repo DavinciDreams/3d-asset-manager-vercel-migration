@@ -72,6 +72,16 @@ function pad4(buf, padByte) {
 }
 
 function writeGlb(json, bin) {
+  // A GLB's embedded BIN is buffer 0 with NO uri; ensure buffers[0] exists and
+  // its byteLength covers the (unpadded) BIN, else the file is invalid glTF and
+  // tools like gltfpack reject it. (Real exporters already emit this; we only
+  // guard the edge where it's missing.)
+  if (bin && bin.length > 0) {
+    json.buffers = json.buffers || [];
+    if (!json.buffers[0]) json.buffers[0] = {};
+    delete json.buffers[0].uri; // embedded buffer must not have a uri
+    json.buffers[0].byteLength = bin.length;
+  }
   const jsonBuf = pad4(Buffer.from(JSON.stringify(json), "utf8"), 0x20); // pad with spaces
   const chunks = [];
   // JSON chunk

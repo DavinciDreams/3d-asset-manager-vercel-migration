@@ -78,6 +78,42 @@ A Flask web app for uploading, viewing, browsing, and optimizing 3D assets
 
 ## Recent Changes
 
+### 2026-06-12 — VRM/VRMA API endpoints + rig-safe VRM optimization
+**Three asks:** surface animations + avatars via API, and optimize VRM avatars.
+
+**Endpoints (`api.py`):**
+- `GET /api/vrma` — now also returns a **`clips`** array (external-client
+  contract): `[{ id, name, downloadUrl, source }]`, kept ALONGSIDE the existing
+  `animations`/`view_url` (in-app viewer unchanged). Every item gained a
+  `download_url` + `model_id`.
+- `GET /api/vrm` — NEW. Lists VRM avatars: native `.vrm` uploads + models with a
+  `vrm` variant (glb2vrm). Each `avatars[]` item has view/download/thumbnail
+  URLs, size, and `optimized`/`optimized_url`/`optimized_size`.
+- `POST /api/model/<id>/optimize-vrm` (owner) + `GET .../optimized-vrm` (serve).
+- `models.py`: `list_vrm_for_user` (native .vrm) + `list_with_vrm_variant_for_user`
+  (join on model_variants kind='vrm').
+
+**Rig-safe VRM optimization (`_optimize_vrm_variant`):** a VRM is a GLB, but
+gltfpack `-si` would wreck the skeleton/skin. KEY FINDING (verified): gltfpack
+ALSO STRIPS the unknown `VRMC_vrm` extension even with `-kn -km` — BUT the named
+`mixamorig:*` skeleton survives. So the pipeline is **gltfpack `-cc -kn -km`
+(+ `-tc -tl` textures, NO `-si`) → then RE-INJECT VRMC_vrm via glb2vrm** over the
+compressed file. Stored as `vrm_optimized` variant. Refuses to store if the final
+bytes lack `VRMC_vrm`. Auto-run after every VRM creation (worker auto-VRM branch
++ to-vrm route; best-effort/non-fatal).
+- `glb2vrm-converter.js` `writeGlb` now guarantees `buffers[0].byteLength` for the
+  embedded BIN (else gltfpack-less re-pack could emit invalid glTF). glb2vrm is
+  now reused as a post-gltfpack step.
+
+**Verification:** py_compile (api/conversion/models); no circular import (api
+imported lazily in worker); all 6 vrm endpoints register; `/api/vrma` returns
+`clips` in exact `{id,name,downloadUrl,source}` shape + `/api/vrm` returns
+populated `avatars` with `optimized:true` (seeded sqlite). **End-to-end optimize
+on real gltfpack 1.1: pack (meshopt) → glb2vrm re-inject → 15 humanoid bones
+restored, EXT_meshopt_compression present, skin/mesh intact, all node refs
+valid.** ⚠️ Not yet run through the live worker on Coolify; no browser load of an
+optimized .vrm + VRMA playback yet.
+
 ### 2026-06-12 — GLB→VRM converter + mesh2motion rigging round-trip
 **Why:** "Easily add a humanoid rig." Auto-rigging an unrigged mesh (skinning) is
 hard; we DON'T do it in-app. Instead use the browser auto-rigger

@@ -781,6 +781,46 @@ class Model3D:
         return [Model3D.from_doc(row) for row in rows]
 
     @staticmethod
+    def list_vrm_for_user(user_id=None):
+        """Models uploaded as a native .vrm avatar, visible to the user."""
+        engine = current_app.config["DB_ENGINE"]
+        predicates = [models.c.file_format == "vrm"]
+        if user_id:
+            predicates.append(or_(models.c.is_public.is_(True), models.c.user_id == str(user_id)))
+        else:
+            predicates.append(models.c.is_public.is_(True))
+
+        with engine.begin() as conn:
+            rows = conn.execute(
+                select(models).where(and_(*predicates)).order_by(models.c.name.asc())
+            ).mappings().all()
+        return [Model3D.from_doc(row) for row in rows]
+
+    @staticmethod
+    def list_with_vrm_variant_for_user(user_id=None):
+        """Models that have a derived VRM avatar (a 'vrm' ModelVariant) -- e.g.
+        a rigged GLB converted via glb2vrm. Visible to the user. Joins
+        model_variants so we return the source models (one row each)."""
+        engine = current_app.config["DB_ENGINE"]
+        predicates = [
+            model_variants.c.kind == "vrm",
+            model_variants.c.file_id.is_not(None),
+        ]
+        if user_id:
+            predicates.append(or_(models.c.is_public.is_(True), models.c.user_id == str(user_id)))
+        else:
+            predicates.append(models.c.is_public.is_(True))
+
+        with engine.begin() as conn:
+            rows = conn.execute(
+                select(models)
+                .select_from(models.join(model_variants, model_variants.c.model_id == models.c.id))
+                .where(and_(*predicates))
+                .order_by(models.c.name.asc())
+            ).mappings().all()
+        return [Model3D.from_doc(row) for row in rows]
+
+    @staticmethod
     def get_stats():
         engine = current_app.config["DB_ENGINE"]
         with engine.begin() as conn:

@@ -258,7 +258,7 @@ def process_model_doc(app, doc):
                     content_type="model/gltf-binary",
                     metadata={"derived_for": str(model_id), "kind": "vrm"},
                 )
-                from app.models import ModelVariant
+                from app.models import ModelVariant, Model3D
                 _, old_vrm_id = ModelVariant.upsert(
                     model_id, "vrm", str(vrm_id),
                     file_format="vrm", size=len(vrm_bytes), status="ready",
@@ -268,6 +268,16 @@ def process_model_doc(app, doc):
                         fs.delete(old_vrm_id)
                     except Exception as e:
                         print(f"Old VRM blob {old_vrm_id} not deleted: {e}")
+
+                # Auto-produce the rig-safe optimized avatar. Best-effort:
+                # imported lazily to avoid an api<->conversion import cycle.
+                try:
+                    from app.api import _optimize_vrm_variant
+                    model_obj = Model3D.get_by_id(model_id)
+                    if model_obj:
+                        _optimize_vrm_variant(model_obj)
+                except Exception as e:
+                    print(f"Auto VRM optimization skipped for {model_id}: {e}")
             except Exception as e:
                 print(f"VRM generation failed for {model_id} (non-fatal): {e}")
 
