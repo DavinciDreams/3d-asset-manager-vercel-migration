@@ -80,21 +80,40 @@ asset library.
 ## AI Metadata Enrichment
 
 The asset manager can generate catalog titles, descriptions, and tags from model
-metadata. It accepts OpenAI Chat Completions-compatible endpoints, so the first
-recommended Z.AI Coding Plan setup is:
+metadata and stored preview thumbnails. For Hyades Vision Services, use the A2A
+JSON-RPC endpoint with the `holo` vision model:
 
 ```bash
-AI_AUTOTAG_PROVIDER=zai
-AI_AUTOTAG_API_KEY=your-zai-api-key
-AI_AUTOTAG_BASE_URL=https://api.z.ai/api/coding/paas/v4
-AI_AUTOTAG_MODEL=glm-5.1
+AI_AUTOTAG_PROVIDER=hyades
+AI_AUTOTAG_API_KEY=your-hyades-api-key
+AI_AUTOTAG_BASE_URL=https://hyades.gnostr.cloud/a2a
+AI_AUTOTAG_MODEL=holo
+AI_AUTOTAG_TRANSPORT=a2a
 AI_AUTOTAG_ON_UPLOAD=1
+AI_AUTOTAG_USE_VISION=1
 ```
 
 Without an API key, `/api/model/:id/ai/autotag` falls back to deterministic
 filename/metadata tags for local development and tests. Dashboard rows include a
 robot action that triggers the same enrichment endpoint and updates the visible
 title, description, and tags.
+
+Hyades also exposes an OpenAI-compatible `/v1` surface for chat/image/audio
+models. If you want to use that path instead of A2A, set:
+
+```bash
+AI_AUTOTAG_BASE_URL=https://hyades.gnostr.cloud/v1
+AI_AUTOTAG_TRANSPORT=openai
+```
+
+Z.AI remains supported for text-only Coding Plan enrichment:
+
+```bash
+AI_AUTOTAG_PROVIDER=zai
+AI_AUTOTAG_BASE_URL=https://api.z.ai/api/coding/paas/v4
+AI_AUTOTAG_MODEL=glm-5.1
+AI_AUTOTAG_USE_VISION=0
+```
 
 Z.AI Vision MCP is separate from the Flask app's HTTP enrichment call. For
 Claude Code or another MCP-capable client, configure the local MCP server:
