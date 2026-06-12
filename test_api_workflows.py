@@ -1273,3 +1273,71 @@ def test_ai_enrichment_corrects_house_category_and_title(monkeypatch):
     assert enriched["title"] == "Cottage"
     assert "fauna" not in enriched["asset_category"]
     assert not {"pixal3d", "generated", "image-to-3d", "ai-generated", "glb", "3d-model"}.intersection(enriched["tags"])
+
+
+def test_ai_enrichment_recovers_fountain_metadata_from_vision(monkeypatch):
+    from app import ai_enrichment
+
+    class FakeModel:
+        name = "pixal3d_1781271874905.glb"
+        description = ""
+        original_filename = "pixal3d_1781271874905.glb"
+        file_format = "glb"
+        file_size = 2760000
+        tags = []
+        asset_category = None
+        asset_styles = []
+        asset_types = []
+        runtime_metadata = {}
+        approve_game_ready = False
+        approve_asset_store = False
+        conversion_status = None
+        thumbnail_file_id = "thumb-1"
+
+    def fake_ai_metadata(model, extra_context=None):
+        return {
+            "title": "Unknown AI-Generated 3D Model",
+            "asset_category": "environment",
+            "asset_styles": [],
+            "asset_types": ["static", "light-emitter", "decorative-prop"],
+            "runtime_metadata": {
+                "behaviors": ["light-emitter"],
+                "light": {
+                    "enabled": True,
+                    "type": "point",
+                    "color": "#ffb35a",
+                    "intensity": 1.5,
+                    "range": 8,
+                    "cast_shadow": True,
+                    "attach_to": "",
+                    "offset": [0, 0.6, 0],
+                },
+            },
+            "tags": ["pixal3d", "generated", "image-to-3d", "ai-generated", "glb", "3d-model"],
+            "description": (
+                "An AI-generated 3D model produced via Pixal3D's image-to-3D pipeline. "
+                "No thumbnail is available, so the specific visual subject matter cannot be determined."
+            ),
+            "summary": "Unknown AI-generated model.",
+            "categories": [],
+            "quality_notes": [],
+            "vision_mcp": True,
+            "vision_mcp_analysis": (
+                "This 3D asset preview displays a two-tiered, classical-style fountain. "
+                "The model appears to be made of a stone or marble-like material with an aged, weathered finish. "
+                "The fountain does not display any characteristics of a light emitter. "
+                "There are no glowing elements, emissive textures, or indications that it is designed to cast light."
+            ),
+        }
+
+    monkeypatch.setattr(ai_enrichment, "_ai_metadata", fake_ai_metadata)
+
+    enriched = ai_enrichment.enrich_model(FakeModel())
+
+    assert enriched["title"] == "Classical Stone Fountain"
+    assert enriched["description"].startswith("A classical two-tiered fountain")
+    assert enriched["asset_category"] == "environment"
+    assert {"fountain", "water-feature", "classical", "stone", "weathered"}.issubset(set(enriched["tags"]))
+    assert not {"pixal3d", "generated", "image-to-3d", "ai-generated", "glb", "3d-model"}.intersection(enriched["tags"])
+    assert "light-emitter" not in enriched["asset_types"]
+    assert enriched["runtime_metadata"]["light"]["enabled"] is False

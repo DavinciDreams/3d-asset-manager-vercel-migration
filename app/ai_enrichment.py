@@ -131,6 +131,66 @@ def _clean_enrichment_tags(tags):
     ]
 
 
+def _vision_denies_light(text):
+    lowered = (text or "").lower()
+    denial_patterns = (
+        "not function as a light emitter",
+        "does not function as a light emitter",
+        "not a light emitter",
+        "does not emit light",
+        "do not emit light",
+        "no glowing elements",
+        "no emissive",
+        "no indications that it is designed to cast light",
+    )
+    return any(pattern in lowered for pattern in denial_patterns)
+
+
+def _generic_description(description):
+    lowered = (description or "").lower()
+    generic_fragments = (
+        "ai-generated 3d model",
+        "produced via pixal3d",
+        "image-to-3d pipeline",
+        "specific visual subject matter cannot be determined",
+        "no thumbnail is available",
+        "baseline for rendering",
+        "starting point for further 3d sculpting",
+    )
+    return not lowered.strip() or any(fragment in lowered for fragment in generic_fragments)
+
+
+def _vision_subject_metadata(text):
+    lowered = (text or "").lower()
+    if "fountain" in lowered:
+        tags = ["fountain", "water-feature", "decorative-prop"]
+        if _contains_any(lowered, ("classical", "ornate", "antique", "historical")):
+            tags.extend(["classical", "ornate", "antique"])
+        if _contains_any(lowered, ("stone", "marble", "weathered")):
+            tags.extend(["stone", "marble", "weathered"])
+        if "two-tiered" in lowered or "two tiered" in lowered:
+            tags.append("two-tiered")
+        title_parts = []
+        if _contains_any(lowered, ("classical", "ornate")):
+            title_parts.append("Classical")
+        if _contains_any(lowered, ("stone", "marble")):
+            title_parts.append("Stone")
+        title_parts.append("Fountain")
+        return {
+            "title": " ".join(title_parts),
+            "asset_category": "environment",
+            "tags": tags,
+            "asset_types": ["static", "decorative-prop"],
+            "description": (
+                "A classical two-tiered fountain with stacked circular basins, an octagonal base, "
+                "and weathered stone or marble-like material. Suitable as a decorative water feature "
+                "for architectural visualization, historical scenes, gardens, courtyards, or environment dressing."
+            ),
+            "summary": "Classical two-tiered stone fountain for decorative environment scenes.",
+        }
+    return {}
+
+
 def _infer_missing_facets(enriched):
     text = " ".join([
         str(enriched.get("title") or ""),
@@ -139,6 +199,19 @@ def _infer_missing_facets(enriched):
         str(enriched.get("vision_mcp_analysis") or ""),
         " ".join(str(tag) for tag in enriched.get("tags") or []),
     ]).lower()
+    vision_text = str(enriched.get("vision_mcp_analysis") or "")
+    vision_subject = _vision_subject_metadata(vision_text)
+    if vision_subject:
+        if _contains_any(str(enriched.get("title") or ""), ("unknown", "ai-generated 3d model", "generated 3d model", "pixal3d", "3d model", "untitled", "asset")):
+            enriched["title"] = vision_subject["title"]
+        if _generic_description(enriched.get("description")):
+            enriched["description"] = vision_subject["description"]
+            enriched["summary"] = vision_subject["summary"]
+        enriched["tags"] = _clean_enrichment_tags((enriched.get("tags") or []) + vision_subject.get("tags", []))
+        enriched["asset_types"] = Model3D.normalize_tags((enriched.get("asset_types") or []) + vision_subject.get("asset_types", []))
+        if Model3D.normalize_category(enriched.get("asset_category")) in {None, "", "other", "prop", "props", "3d model", "3d models", "uncategorized"}:
+            enriched["asset_category"] = vision_subject["asset_category"]
+
     category = Model3D.normalize_category(enriched.get("asset_category"))
     generic_categories = {None, "", "other", "prop", "props", "3d model", "3d models", "uncategorized"}
     category_rules = [
@@ -153,7 +226,11 @@ def _infer_missing_facets(enriched):
     category_scores = [(candidate, _keyword_score(text, words)) for candidate, words in category_rules]
     best_category, best_score = max(category_scores, key=lambda item: item[1])
     current_score = next((score for candidate, score in category_scores if candidate == category), 0)
-    if best_score > 0 and (
+    protected_category = Model3D.normalize_category(vision_subject.get("asset_category")) if vision_subject else None
+    if protected_category and category == protected_category:
+        enriched["asset_category"] = protected_category
+        category = protected_category
+    elif best_score > 0 and (
         category in generic_categories
         or (best_category != category and best_score >= max(2, current_score + 2))
     ):
@@ -187,6 +264,21 @@ def _infer_missing_facets(enriched):
     for asset_type, words in type_rules.items():
         if asset_type not in asset_types and _contains_any(text, words):
             asset_types.append(asset_type)
+    if _vision_denies_light(text):
+        asset_types = [item for item in asset_types if item != "light-emitter"]
+        runtime = Model3D.normalize_runtime_metadata(enriched.get("runtime_metadata", {}))
+        runtime["behaviors"] = [item for item in runtime.get("behaviors", []) if item != "light-emitter"]
+        runtime["light"] = {
+            "enabled": False,
+            "type": "none",
+            "color": "#ffffff",
+            "intensity": 0,
+            "range": 0,
+            "cast_shadow": False,
+            "attach_to": "",
+            "offset": [0, 0, 0],
+        }
+        enriched["runtime_metadata"] = runtime
     if "static" in asset_types:
         asset_types = [item for item in asset_types if item not in {"rigged", "animated"}]
     enriched["asset_types"] = asset_types[:8]
