@@ -1,6 +1,7 @@
 import io
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -302,6 +303,13 @@ def test_detail_page_shows_ai_vision_failure_message():
     html = detail.get_data(as_text=True)
     assert "AI vision did not use image" in html
     assert "No thumbnail image is available for MCP analysis." in html
+
+
+def test_detail_page_attempts_thumbnail_capture_before_ai_enrichment():
+    html = Path("app/templates/model_detail.html").read_text(encoding="utf-8")
+    assert "ensureThumbnailForAiVision" in html
+    assert "Capturing a thumbnail for AI vision" in html
+    assert "await ensureThumbnailForAiVision(status);" in html
 
 
 def test_a2a_no_output_error_includes_task_state():

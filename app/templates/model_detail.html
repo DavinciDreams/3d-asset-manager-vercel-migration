@@ -733,7 +733,7 @@ const CAPTURE_ENABLED = false;
 // Saved default view angle for this model (empty string if none set yet).
 const SAVED_CAMERA_ORBIT = {{ model.camera_orbit | tojson }};
 // Whether this model already has a stored thumbnail.
-const HAS_THUMBNAIL = {{ (model.thumbnail_file_id is not none) | tojson }};
+let HAS_THUMBNAIL = {{ (model.thumbnail_file_id is not none) | tojson }};
 // Whether this model already has a stored preview video.
 const HAS_PREVIEW = {{ (model.preview_file_id is not none) | tojson }};
 // Is the current user the owner? Only owners capture/upload thumbnails.
@@ -1044,7 +1044,7 @@ async function captureThumbnail(notify) {
     const viewer = getActiveDetailViewerApi();
     if (!viewer || typeof viewer.toBlob !== 'function') {
         if (notify) alert('Viewer not ready to capture a thumbnail yet.');
-        return;
+        return false;
     }
 
     try {
@@ -1073,9 +1073,14 @@ async function captureThumbnail(notify) {
         } else {
             console.log('Thumbnail auto-captured:', data.success === true);
         }
+        if (data.success) {
+            HAS_THUMBNAIL = true;
+        }
+        return data.success === true;
     } catch (err) {
         console.error('Thumbnail capture error:', err);
         if (notify) alert('Could not capture thumbnail.');
+        return false;
     }
 }
 
@@ -2037,6 +2042,37 @@ function updateAiVisionDiagnostics(model) {
     }
 }
 
+async function ensureThumbnailForAiVision(status) {
+    if (HAS_THUMBNAIL || !IS_OWNER) {
+        return HAS_THUMBNAIL;
+    }
+    const viewer = getActiveDetailViewerApi();
+    if (!viewer || typeof viewer.toBlob !== 'function') {
+        if (status) {
+            status.textContent = 'No thumbnail is saved yet, and the 3D viewer is not ready to capture one. AI vision may run text-only.';
+            status.className = 'mt-2 text-sm text-amber-700';
+            await sleep(1800);
+        }
+        return false;
+    }
+    if (status) {
+        status.textContent = 'Capturing a thumbnail for AI vision...';
+        status.className = 'mt-2 text-sm text-gray-600';
+    }
+    const captured = await captureThumbnail(false);
+    if (status) {
+        if (captured) {
+            status.textContent = 'Thumbnail captured. Starting AI metadata enrichment...';
+            status.className = 'mt-2 text-sm text-green-700';
+        } else {
+            status.textContent = 'Could not capture a thumbnail. AI vision may run text-only.';
+            status.className = 'mt-2 text-sm text-amber-700';
+        }
+        await sleep(captured ? 700 : 1800);
+    }
+    return captured;
+}
+
 async function enrichModelDetails() {
     const btn = document.getElementById('ai-enrich-btn');
     const status = document.getElementById('ai-enrich-status');
@@ -2051,6 +2087,7 @@ async function enrichModelDetails() {
         status.className = 'mt-2 text-sm text-gray-600';
     }
     try {
+        await ensureThumbnailForAiVision(status);
         const response = await fetch('/api/model/{{ model.id }}/ai/autotag', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
