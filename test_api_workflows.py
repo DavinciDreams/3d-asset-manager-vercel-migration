@@ -1341,3 +1341,68 @@ def test_ai_enrichment_recovers_fountain_metadata_from_vision(monkeypatch):
     assert not {"pixal3d", "generated", "image-to-3d", "ai-generated", "glb", "3d-model"}.intersection(enriched["tags"])
     assert "light-emitter" not in enriched["asset_types"]
     assert enriched["runtime_metadata"]["light"]["enabled"] is False
+
+
+def test_ai_enrichment_removes_contradictory_facets(monkeypatch):
+    from app import ai_enrichment
+
+    class FakeModel:
+        name = "storybook_cottage.glb"
+        description = ""
+        original_filename = "storybook_cottage.glb"
+        file_format = "glb"
+        file_size = 2760000
+        tags = []
+        asset_category = None
+        asset_styles = []
+        asset_types = []
+        runtime_metadata = {}
+        approve_game_ready = False
+        approve_asset_store = False
+        conversion_status = None
+        thumbnail_file_id = "thumb-1"
+
+    def fake_ai_metadata(model, extra_context=None):
+        return {
+            "title": "Storybook Cottage",
+            "asset_category": "building",
+            "asset_styles": ["stylized", "cartoon", "painted", "painterly", "fantasy", "realistic"],
+            "asset_types": ["static-mesh", "high-poly", "building", "static", "light-emitter", "low-poly"],
+            "runtime_metadata": {
+                "behaviors": ["light-emitter"],
+                "light": {
+                    "enabled": True,
+                    "type": "point",
+                    "color": "#ffb35a",
+                    "intensity": 1.5,
+                    "range": 8,
+                    "cast_shadow": True,
+                    "attach_to": "",
+                    "offset": [0, 0.6, 0],
+                },
+            },
+            "tags": ["cottage", "storybook", "building"],
+            "description": "A stylized cartoon fantasy cottage with a painterly hand-painted look and high detail.",
+            "summary": "Stylized fantasy cottage.",
+            "categories": [],
+            "quality_notes": [],
+            "vision_mcp": True,
+            "vision_mcp_analysis": (
+                "The preview shows a stylized cartoon fantasy cottage with a painted, painterly look. "
+                "It does not function as a light emitter and has no glowing elements."
+            ),
+        }
+
+    monkeypatch.setattr(ai_enrichment, "_ai_metadata", fake_ai_metadata)
+
+    enriched = ai_enrichment.enrich_model(FakeModel())
+
+    assert enriched["asset_category"] == "building"
+    assert "realistic" not in enriched["asset_styles"]
+    assert "painted" not in enriched["asset_styles"]
+    assert {"stylized", "cartoon", "painterly", "fantasy"}.issubset(set(enriched["asset_styles"]))
+    assert "building" not in enriched["asset_types"]
+    assert "static-mesh" not in enriched["asset_types"]
+    assert "static" in enriched["asset_types"]
+    assert "light-emitter" not in enriched["asset_types"]
+    assert {"high-poly", "low-poly"} != set(enriched["asset_types"]).intersection({"high-poly", "low-poly"})

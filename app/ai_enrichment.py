@@ -191,6 +191,41 @@ def _vision_subject_metadata(text):
     return {}
 
 
+def _resolve_style_conflicts(styles, text):
+    styles = Model3D.normalize_tags(styles)
+    if "painted" in styles and "painterly" in styles:
+        styles = [style for style in styles if style != "painted"]
+    stylized_family = {"stylized", "cartoon", "painted", "painterly", "watercolor", "hand-painted"}
+    has_stylized_family = any(style in styles for style in stylized_family)
+    if "realistic" in styles and has_stylized_family and not _contains_any(text, ("photorealistic", "lifelike", "real-world scan")):
+        styles = [style for style in styles if style != "realistic"]
+    return styles[:6]
+
+
+def _resolve_type_conflicts(asset_types, category, text):
+    normalized = []
+    for asset_type in Model3D.normalize_tags(asset_types):
+        if asset_type == "static-mesh":
+            asset_type = "static"
+        if asset_type not in normalized:
+            normalized.append(asset_type)
+
+    category_terms = {
+        "building", "flora", "fauna", "person", "people", "vehicle", "environment", "material",
+        "animation", "other", "prop", "props", "3d-model", "3d-models",
+    }
+    normalized = [item for item in normalized if item not in category_terms and item != category]
+
+    if "static" in normalized:
+        normalized = [item for item in normalized if item not in {"rigged", "animated"}]
+    if "high-poly" in normalized and "low-poly" in normalized:
+        high_score = _keyword_score(text, ("high-poly", "high poly", "100,000", "100000", "dense", "high detail"))
+        low_score = _keyword_score(text, ("low-poly", "low poly", "optimized", "simple mesh"))
+        remove = "high-poly" if low_score > high_score else "low-poly"
+        normalized = [item for item in normalized if item != remove]
+    return normalized[:8]
+
+
 def _infer_missing_facets(enriched):
     text = " ".join([
         str(enriched.get("title") or ""),
@@ -248,7 +283,7 @@ def _infer_missing_facets(enriched):
     for style, words in style_rules.items():
         if style not in styles and _contains_any(text, words):
             styles.append(style)
-    enriched["asset_styles"] = styles[:6]
+    enriched["asset_styles"] = _resolve_style_conflicts(styles, text)
 
     asset_types = Model3D.normalize_tags(enriched.get("asset_types", []))
     type_rules = {
@@ -281,7 +316,7 @@ def _infer_missing_facets(enriched):
         enriched["runtime_metadata"] = runtime
     if "static" in asset_types:
         asset_types = [item for item in asset_types if item not in {"rigged", "animated"}]
-    enriched["asset_types"] = asset_types[:8]
+    enriched["asset_types"] = _resolve_type_conflicts(asset_types, category, text)
 
     title = str(enriched.get("title") or "").strip()
     generic_title = _contains_any(
@@ -1141,7 +1176,7 @@ def _ai_metadata(model, extra_context=None):
                 "type": "array",
                 "items": {"type": "string"},
                 "maxItems": 8,
-                "description": "Technical/use traits such as static, rigged, animated, game-ready, modular, decorative-prop, pbr, tileable, vrm, optimized, light-emitter, high-poly, low-poly.",
+                "description": "Technical/use traits such as static, rigged, animated, game-ready, modular, decorative-prop, pbr, tileable, vrm, optimized, light-emitter, high-poly, low-poly. Do not include broad category labels such as building, flora, fauna, person, vehicle, environment, material, or prop.",
             },
             "runtime_metadata": {
                 "type": "object",
@@ -1236,10 +1271,12 @@ def _ai_metadata(model, extra_context=None):
         "Prefer concrete visible or file-derived details over generic filler. "
         "Write the title as a concise product/catalog name for the visible subject and style; never use the "
         "generator/provider name or generic source labels as the title. "
-        "Do not leave asset_category, asset_styles, or asset_types empty when visual analysis provides evidence. "
-        "Use asset_category for the broad subject bucket, asset_styles for aesthetic/genre/medium, "
-        "and asset_types for technical/use traits. "
-        "If visual analysis is unavailable, say only what can be inferred from the filename and asset fields, "
+            "Do not leave asset_category, asset_styles, or asset_types empty when visual analysis provides evidence. "
+            "Use asset_category for the broad subject bucket, asset_styles for aesthetic/genre/medium, "
+            "and asset_types for technical/use traits. Avoid contradictory facet pairs such as realistic with "
+            "cartoon/painterly/stylized, high-poly with low-poly, or static with rigged/animated unless the "
+            "asset truly contains both distinct components. "
+            "If visual analysis is unavailable, say only what can be inferred from the filename and asset fields, "
         "and avoid pretending to know the object's appearance.\n\n"
         + json.dumps(prompt, sort_keys=True)
     )
@@ -1336,8 +1373,15 @@ def enrich_model(model, extra_context=None):
     enriched = _infer_missing_facets(enriched)
     enriched["title"] = (enriched.get("title") or "").strip()
     enriched["asset_category"] = Model3D.normalize_category(enriched.get("asset_category"))
-    enriched["asset_styles"] = Model3D.normalize_tags(enriched.get("asset_styles", []))
-    enriched["asset_types"] = Model3D.normalize_tags(enriched.get("asset_types", []))
+    cleanup_text = " ".join([
+        str(enriched.get("title") or ""),
+        str(enriched.get("description") or ""),
+        str(enriched.get("summary") or ""),
+        str(enriched.get("vision_mcp_analysis") or ""),
+        " ".join(str(tag) for tag in enriched.get("tags") or []),
+    ]).lower()
+    enriched["asset_styles"] = _resolve_style_conflicts(enriched.get("asset_styles", []), cleanup_text)
+    enriched["asset_types"] = _resolve_type_conflicts(enriched.get("asset_types", []), enriched["asset_category"], cleanup_text)
     enriched["runtime_metadata"] = Model3D.normalize_runtime_metadata(
         enriched.get("runtime_metadata", _default_runtime_metadata(False))
     )
