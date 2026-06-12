@@ -238,6 +238,20 @@ def _extract_json_object_text(text):
     return text
 
 
+def _looks_like_provider_error_output(text):
+    lowered = (text or "").lower()
+    markers = [
+        "retry failed after",
+        "no route to host",
+        "connection refused",
+        "connection reset",
+        "upstream",
+        "service unavailable",
+        "gateway timeout",
+    ]
+    return any(marker in lowered for marker in markers)
+
+
 def _parse_enrichment_json(output_text, provider=None, transport=None):
     candidate = _extract_json_object_text(output_text)
     try:
@@ -247,6 +261,11 @@ def _parse_enrichment_json(output_text, provider=None, transport=None):
         if transport:
             label = f"{label}/{transport}"
         detail = _compact_response_detail(output_text)
+        if _looks_like_provider_error_output(output_text):
+            raise RuntimeError(
+                f"AI enrichment provider returned error output for {label}. "
+                f"Output: {detail or 'empty response'}"
+            ) from error
         raise RuntimeError(
             f"AI enrichment returned non-JSON output from {label}: {error.msg}. "
             f"Output: {detail or 'empty response'}"

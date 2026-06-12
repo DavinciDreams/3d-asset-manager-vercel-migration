@@ -320,6 +320,22 @@ def test_ai_output_parser_reports_non_json_text():
     assert "I can describe this lantern" in message
 
 
+def test_ai_output_parser_reports_provider_error_text():
+    from app import ai_enrichment
+
+    with pytest.raises(RuntimeError) as exc:
+        ai_enrichment._parse_enrichment_json(
+            "Retry failed after 4 tries. "
+            "(No route to host (192.168.1.187:8008))",
+            provider="hyades",
+            transport="a2a",
+        )
+
+    message = str(exc.value)
+    assert "AI enrichment provider returned error output for hyades/a2a" in message
+    assert "No route to host" in message
+
+
 def test_hyades_a2a_empty_message_polls_task(monkeypatch):
     from app import ai_enrichment
 
