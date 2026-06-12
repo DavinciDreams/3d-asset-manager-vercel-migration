@@ -319,16 +319,23 @@ def list_models():
         per_page = min(request.args.get('per_page', 20, type=int), 100)  # Max 100 per page
         search = request.args.get('search', '').strip()
         user_only = request.args.get('user_only', 'false').lower() == 'true'
+        category = request.args.get('category')
+        styles = Model3D.normalize_tags(request.args.getlist('style'))
+        asset_types = Model3D.normalize_tags(request.args.getlist('type'))
         
         principal, service = _api_principal()
         if user_only and principal:
             # Get user's models
-            models, total = Model3D.get_user_models(principal.id, page=page, per_page=per_page)
+            models, total = Model3D.get_user_models(
+                principal.id, page=page, per_page=per_page,
+                category=category, style=styles or None, asset_type=asset_types or None)
         elif user_only and service:
             return jsonify({'error': 'API token is valid, but no API upload user is configured.'}), 409
         else:
             # Get public models
-            models, total = Model3D.get_public_models(page=page, per_page=per_page, search=search if search else None)
+            models, total = Model3D.get_public_models(
+                page=page, per_page=per_page, search=search if search else None,
+                category=category, style=styles or None, asset_type=asset_types or None)
         
         # Convert models to JSON-serializable format
         models_data = []
@@ -348,7 +355,11 @@ def list_models():
                 'has_viewable': bool(model.viewable_file_id),
                 'has_vrma': bool(model.vrma_file_id),
                 'tags': model.tags,
+                'asset_category': model.asset_category,
+                'asset_styles': model.asset_styles,
+                'asset_types': model.asset_types,
                 'ai_status': model.ai_status,
+                'ai_title': (model.ai_metadata or {}).get('title'),
                 'ai_description': model.ai_description,
                 'ai_tags': model.ai_tags,
                 'approve_game_ready': model.approve_game_ready,
@@ -889,6 +900,12 @@ def update_model(model_id):
 
         if 'tags' in data:
             model.tags = Model3D.normalize_tags(data.get('tags'))
+        if 'asset_category' in data:
+            model.asset_category = Model3D.normalize_category(data.get('asset_category'))
+        if 'asset_styles' in data:
+            model.asset_styles = Model3D.normalize_tags(data.get('asset_styles'))
+        if 'asset_types' in data:
+            model.asset_types = Model3D.normalize_tags(data.get('asset_types'))
 
         if 'default_animation' in data:
             # Embedded-clip name to auto-play; empty clears it.
@@ -915,6 +932,9 @@ def update_model(model_id):
                 'is_public': model.is_public,
                 'camera_orbit': model.camera_orbit,
                 'tags': model.tags,
+                'asset_category': model.asset_category,
+                'asset_styles': model.asset_styles,
+                'asset_types': model.asset_types,
                 'default_animation': model.default_animation,
                 'default_vrma_id': model.default_vrma_id,
             }
@@ -1255,6 +1275,9 @@ def _serialize_browse_card(model):
         'download_count': model.download_count,
         'owner_username': getattr(model, 'owner_username', None) or 'Unknown',
         'tags': model.tags or [],
+        'asset_category': model.asset_category,
+        'asset_styles': model.asset_styles or [],
+        'asset_types': model.asset_types or [],
         'has_preview': bool(model.preview_file_id),
         'has_thumbnail': bool(model.thumbnail_file_id),
         'preview_url': url_for('api.get_preview', model_id=model.id) if model.preview_file_id else None,
@@ -1286,11 +1309,15 @@ def list_public_models():
         per_page = max(1, min(per_page, 60))
         sort = request.args.get('sort', 'newest')
         tags = Model3D.normalize_tags(request.args.getlist('tag'))
+        category = request.args.get('category')
+        styles = Model3D.normalize_tags(request.args.getlist('style'))
+        asset_types = Model3D.normalize_tags(request.args.getlist('type'))
 
         models_list, total = Model3D.get_public_models(
             page=page, per_page=per_page,
             search=search or None, sort=sort,
-            tag=tags or None)
+            tag=tags or None, category=category, style=styles or None,
+            asset_type=asset_types or None)
 
         for model in models_list:
             user = User.get_by_id(model.user_id)
@@ -1441,7 +1468,12 @@ def get_user_models():
         page = request.args.get('page', 1, type=int)
         per_page = min(request.args.get('per_page', 20, type=int), 100)
         
-        models, total = Model3D.get_user_models(principal.id, page=page, per_page=per_page)
+        category = request.args.get('category')
+        styles = Model3D.normalize_tags(request.args.getlist('style'))
+        asset_types = Model3D.normalize_tags(request.args.getlist('type'))
+        models, total = Model3D.get_user_models(
+            principal.id, page=page, per_page=per_page,
+            category=category, style=styles or None, asset_type=asset_types or None)
         
         models_data = []
         for model in models:
@@ -1459,7 +1491,11 @@ def get_user_models():
                 'has_viewable': bool(model.viewable_file_id),
                 'has_vrma': bool(model.vrma_file_id),
                 'tags': model.tags,
+                'asset_category': model.asset_category,
+                'asset_styles': model.asset_styles,
+                'asset_types': model.asset_types,
                 'ai_status': model.ai_status,
+                'ai_title': (model.ai_metadata or {}).get('title'),
                 'ai_description': model.ai_description,
                 'ai_tags': model.ai_tags,
                 'approve_game_ready': model.approve_game_ready,
@@ -1497,7 +1533,8 @@ def _name_from_filename(original_filename):
     return cleaned or base
 
 
-def _store_one_upload(file, base_name, description, is_public, tags, allowed_extensions, fs, max_bytes, owner_id=None):
+def _store_one_upload(file, base_name, description, is_public, tags, allowed_extensions, fs, max_bytes,
+                      owner_id=None, asset_category=None, asset_styles=None, asset_types=None):
     """Validate and persist a single uploaded file as a Model3D.
 
     Returns (model, None) on success or (None, error_message) on failure.
@@ -1547,7 +1584,10 @@ def _store_one_upload(file, base_name, description, is_public, tags, allowed_ext
         user_id=owner_id,
         is_public=is_public,
         gridfs_file_id=str(gridfs_file_id),
-        tags=tags
+        tags=tags,
+        asset_category=asset_category,
+        asset_styles=asset_styles,
+        asset_types=asset_types,
     )
     from app.conversion import enqueue
     enqueue(model, enabled=current_app.config.get('ENABLE_CONVERSION', True))
@@ -1555,6 +1595,7 @@ def _store_one_upload(file, base_name, description, is_public, tags, allowed_ext
     # Auto-generate a game-optimized variant for GLB/GLTF uploads so every
     # asset gets a small, performant browse preview/download by default.
     _maybe_autostart_game_optimization(model)
+    _maybe_autotag_on_upload(model, context={'source': 'api_upload'})
     return model, None
 
 
@@ -1572,7 +1613,11 @@ def _serialize_model(model):
         'has_viewable': bool(model.viewable_file_id),
         'has_vrma': bool(model.vrma_file_id),
         'tags': model.tags,
+        'asset_category': model.asset_category,
+        'asset_styles': model.asset_styles,
+        'asset_types': model.asset_types,
         'ai_status': model.ai_status,
+        'ai_title': (model.ai_metadata or {}).get('title'),
         'ai_description': model.ai_description,
         'ai_tags': model.ai_tags,
         'approve_game_ready': model.approve_game_ready,
@@ -1616,6 +1661,72 @@ def _merge_tags(*tag_lists):
             if tag not in merged:
                 merged.append(tag)
     return merged
+
+
+def _run_ai_enrichment(model, data=None):
+    data = data or {}
+    overwrite = _as_bool(data.get('overwrite', True))
+    include_title = _as_bool(data.get('include_title', True))
+    include_description = _as_bool(data.get('include_description', True))
+
+    from app.ai_enrichment import enrich_model
+    enriched = enrich_model(model, extra_context=data.get('context') or {})
+
+    model.ai_status = 'done'
+    model.ai_error = None
+    model.ai_tags = Model3D.normalize_tags(enriched.get('tags', []))
+    model.ai_description = enriched.get('description') or None
+    model.ai_metadata = {
+        'title': enriched.get('title'),
+        'asset_category': enriched.get('asset_category'),
+        'asset_styles': enriched.get('asset_styles', []),
+        'asset_types': enriched.get('asset_types', []),
+        'summary': enriched.get('summary'),
+        'categories': enriched.get('categories', []),
+        'quality_notes': enriched.get('quality_notes', []),
+        'provider': enriched.get('provider'),
+        'base_url': enriched.get('base_url'),
+        'model': enriched.get('model'),
+        'response_id': enriched.get('response_id'),
+        'updated_at': datetime.utcnow().isoformat(),
+    }
+    if overwrite:
+        model.tags = _merge_tags(model.ai_tags)
+        model.asset_category = enriched.get('asset_category') or model.asset_category
+        model.asset_styles = Model3D.normalize_tags(enriched.get('asset_styles', []))
+        model.asset_types = Model3D.normalize_tags(enriched.get('asset_types', []))
+        if include_title and enriched.get('title'):
+            model.name = enriched['title']
+        if include_description and model.ai_description:
+            model.description = model.ai_description
+    else:
+        model.tags = _merge_tags(model.tags, model.ai_tags)
+        if enriched.get('asset_category') and not model.asset_category:
+            model.asset_category = enriched.get('asset_category')
+        model.asset_styles = _merge_tags(model.asset_styles, enriched.get('asset_styles', []))
+        model.asset_types = _merge_tags(model.asset_types, enriched.get('asset_types', []))
+        if include_title and not model.name and enriched.get('title'):
+            model.name = enriched['title']
+        if include_description and not model.description and model.ai_description:
+            model.description = model.ai_description
+    model.save()
+    return enriched
+
+
+def _maybe_autotag_on_upload(model, context=None):
+    if not _as_bool(os.environ.get('AI_AUTOTAG_ON_UPLOAD', '0')):
+        return
+    try:
+        _run_ai_enrichment(model, {
+            'overwrite': os.environ.get('AI_AUTOTAG_OVERWRITE_ON_UPLOAD', '1'),
+            'include_title': os.environ.get('AI_AUTOTAG_INCLUDE_TITLE', '1'),
+            'include_description': os.environ.get('AI_AUTOTAG_INCLUDE_DESCRIPTION', '1'),
+            'context': context or {},
+        })
+    except Exception as e:
+        model.ai_status = 'failed'
+        model.ai_error = str(e)[:500]
+        model.save()
 
 
 def _optimize_game_int(data, key, default, allowed=None):
@@ -2156,6 +2267,9 @@ def upload_model():
         description = request.form.get('description', '').strip()
         is_public = request.form.get('is_public') == 'true'
         tags = Model3D.normalize_tags(request.form.get('tags', ''))
+        asset_category = Model3D.normalize_category(request.form.get('asset_category'))
+        asset_styles = Model3D.normalize_tags(request.form.get('asset_styles', ''))
+        asset_types = Model3D.normalize_tags(request.form.get('asset_types', ''))
 
         # Collect all uploaded files (supports repeated 'file' fields).
         files = [f for f in request.files.getlist('file') if f and f.filename]
@@ -2182,7 +2296,9 @@ def upload_model():
         for file in files:
             model, err = _store_one_upload(
                 file, base_name, description, is_public, tags,
-                allowed_extensions, fs, max_bytes, owner_id=owner_id
+                allowed_extensions, fs, max_bytes, owner_id=owner_id,
+                asset_category=asset_category, asset_styles=asset_styles,
+                asset_types=asset_types,
             )
             if model:
                 uploaded.append(model)
@@ -2254,41 +2370,15 @@ def autotag_model(model_id):
             return jsonify({'error': 'Access denied'}), 403
 
         data = _payload()
-        overwrite = _as_bool(data.get('overwrite', True))
-        include_description = _as_bool(data.get('include_description', True))
 
         try:
-            from app.ai_enrichment import enrich_model
-            enriched = enrich_model(model, extra_context=data.get('context') or {})
-            model.ai_status = 'done'
-            model.ai_error = None
+            _run_ai_enrichment(model, data)
         except Exception as e:
-            enriched = {}
             model.ai_status = 'failed'
             model.ai_error = str(e)[:500]
             model.save()
             return jsonify({'error': 'AI enrichment failed', 'detail': model.ai_error}), 502
 
-        model.ai_tags = Model3D.normalize_tags(enriched.get('tags', []))
-        model.ai_description = enriched.get('description') or None
-        model.ai_metadata = {
-            'summary': enriched.get('summary'),
-            'categories': enriched.get('categories', []),
-            'quality_notes': enriched.get('quality_notes', []),
-            'provider': enriched.get('provider'),
-            'model': enriched.get('model'),
-            'response_id': enriched.get('response_id'),
-            'updated_at': datetime.utcnow().isoformat(),
-        }
-        if overwrite:
-            model.tags = _merge_tags(model.ai_tags)
-            if include_description and model.ai_description:
-                model.description = model.ai_description
-        else:
-            model.tags = _merge_tags(model.tags, model.ai_tags)
-            if include_description and not model.description and model.ai_description:
-                model.description = model.ai_description
-        model.save()
         return jsonify({'success': True, 'model': _serialize_model(model), 'enrichment': model.ai_metadata})
     except Exception as e:
         print(f"API autotag error: {e}")

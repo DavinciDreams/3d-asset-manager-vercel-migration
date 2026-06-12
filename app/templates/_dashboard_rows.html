@@ -4,7 +4,10 @@
    _live_previews.html observers (the page wires them after appends). #}
 {% for model in user_models %}
 <tr class="hover:bg-gray-50 model-row" data-model-id="{{ model.id }}"
-    data-model-name="{{ model.name }}" data-model-tags="{{ model.tags | join(',') }}">
+    data-model-name="{{ model.name }}" data-model-tags="{{ model.tags | join(',') }}"
+    data-asset-category="{{ model.asset_category or '' }}"
+    data-asset-styles="{{ model.asset_styles | join(',') }}"
+    data-asset-types="{{ model.asset_types | join(',') }}">
     <td class="px-3 py-4 align-top">
         <input type="checkbox" class="row-check h-4 w-4 text-indigo-600 border-gray-300 rounded cursor-pointer mt-1"
                value="{{ model.id }}" onclick="onRowCheck()">
@@ -42,7 +45,7 @@
             <i class="fas fa-cube text-indigo-600 mr-3 hidden sm:block"></i>
             <div class="min-w-0">
                 <div class="text-sm font-medium text-gray-900 model-title">
-                    {{ model.name }}
+                    <span id="model-title-{{ model.id }}">{{ model.name }}</span>
                     {% if model.conversion_status in ['pending', 'processing'] %}
                     <span class="ml-1 px-2 py-0.5 text-xs font-medium bg-yellow-100 text-yellow-800 rounded-full">
                         <i class="fas fa-spinner fa-spin mr-1"></i>Processing
@@ -55,13 +58,24 @@
                     {% endif %}
                 </div>
                 <div class="text-sm text-gray-500">{{ model.file_extension.upper() }}</div>
-                {% if model.tags %}
-                <div class="flex flex-wrap gap-1 mt-1">
+                <div id="model-facets-{{ model.id }}" class="flex flex-wrap gap-1 mt-1 {% if not (model.asset_category or model.asset_styles or model.asset_types) %}hidden{% endif %}">
+                    {% if model.asset_category %}
+                    <span class="bg-gray-100 text-gray-700 text-xs px-2 py-0.5 rounded">{{ model.asset_category|title }}</span>
+                    {% endif %}
+                    {% for s in model.asset_styles %}
+                    <span class="bg-purple-50 text-purple-700 text-xs px-2 py-0.5 rounded">{{ s }}</span>
+                    {% endfor %}
+                    {% for t in model.asset_types %}
+                    <span class="bg-teal-50 text-teal-700 text-xs px-2 py-0.5 rounded">{{ t }}</span>
+                    {% endfor %}
+                </div>
+                <div id="model-tags-{{ model.id }}" class="flex flex-wrap gap-1 mt-1 {% if not model.tags %}hidden{% endif %}">
+                    {% if model.tags %}
                     {% for t in model.tags %}
                     <span class="bg-indigo-50 text-indigo-700 text-xs px-2 py-0.5 rounded">{{ t }}</span>
                     {% endfor %}
+                    {% endif %}
                 </div>
-                {% endif %}
             </div>
         </div>
     </td>
@@ -94,6 +108,11 @@
             <button type="button" onclick="toggleQuickEdit('{{ model.id }}')"
                     class="row-action text-blue-600 hover:text-blue-900" title="Edit">
                 <i class="fas fa-pen"></i>
+            </button>
+            <button type="button" onclick="enrichModel('{{ model.id }}', this)"
+                    class="row-action text-purple-600 hover:text-purple-900"
+                    title="AI title, description, and tags">
+                <i class="fas fa-robot"></i>
             </button>
             {% if model.file_format in ['glb', 'gltf'] %}
             <button type="button" onclick="optimizeModel('{{ model.id }}', this)"
@@ -135,6 +154,26 @@
                 <label class="block text-xs font-semibold text-gray-700 mb-1">Description</label>
                 <textarea id="qe-desc-{{ model.id }}" rows="2"
                           class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">{{ model.description or '' }}</textarea>
+            </div>
+            <div class="grid md:grid-cols-3 gap-3">
+                <div>
+                    <label class="block text-xs font-semibold text-gray-700 mb-1">Category</label>
+                    <input type="text" id="qe-category-{{ model.id }}" value="{{ model.asset_category or '' }}"
+                           placeholder="flora, fauna, building"
+                           class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                </div>
+                <div>
+                    <label class="block text-xs font-semibold text-gray-700 mb-1">Styles</label>
+                    <input type="text" id="qe-styles-{{ model.id }}" value="{{ model.asset_styles | join(', ') }}"
+                           placeholder="fantasy, stylized"
+                           class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                </div>
+                <div>
+                    <label class="block text-xs font-semibold text-gray-700 mb-1">Types</label>
+                    <input type="text" id="qe-types-{{ model.id }}" value="{{ model.asset_types | join(', ') }}"
+                           placeholder="rigged, animated"
+                           class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                </div>
             </div>
             <div class="relative">
                 <label class="block text-xs font-semibold text-gray-700 mb-1">Tags (comma-separated)</label>

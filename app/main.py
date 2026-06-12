@@ -98,17 +98,23 @@ def dashboard():
         page = request.args.get('page', 1, type=int)
         # Support multiple ?tag= values (AND-matched).
         tags = Model3D.normalize_tags(request.args.getlist('tag'))
+        category = Model3D.normalize_category(request.args.get('category'))
+        styles = Model3D.normalize_tags(request.args.getlist('style'))
+        asset_types = Model3D.normalize_tags(request.args.getlist('type'))
 
         # Paginate the table (infinite scroll loads more); the headline stat
         # cards use account-wide aggregates so they don't depend on the page.
         per_page = DASHBOARD_PER_PAGE
         user_models, total_filtered = Model3D.get_user_models(
             current_user.id, page=page, per_page=per_page,
-            sort=sort, tag=tags if tags else None)
+            sort=sort, tag=tags if tags else None,
+            category=category, style=styles if styles else None,
+            asset_type=asset_types if asset_types else None)
         _enrich_dashboard_models(user_models)
 
         stats = Model3D.get_user_stats(current_user.id)
         all_tags = Model3D.get_user_tags(current_user.id)
+        facets = Model3D.get_user_facets(current_user.id)
         has_next = page * per_page < total_filtered
 
         return render_template('dashboard.html',
@@ -117,6 +123,8 @@ def dashboard():
                              total_downloads=stats['total_downloads'],
                              public_models=stats['public_models'],
                              sort=sort, tags=tags, all_tags=all_tags,
+                             category=category, styles=styles,
+                             asset_types=asset_types, facets=facets,
                              page=page, has_next=has_next)
     except Exception as e:
         print(f"Dashboard error: {e}")
@@ -128,6 +136,8 @@ def dashboard():
                              total_downloads=0,
                              public_models=0,
                              sort='newest', tags=[], all_tags=[],
+                             category=None, styles=[], asset_types=[],
+                             facets={'categories': [], 'styles': [], 'types': []},
                              page=1, has_next=False,
                              error=str(e))
 
@@ -151,10 +161,15 @@ def dashboard_rows():
         sort = request.args.get('sort', 'newest')
         page = request.args.get('page', 1, type=int)
         tags = Model3D.normalize_tags(request.args.getlist('tag'))
+        category = Model3D.normalize_category(request.args.get('category'))
+        styles = Model3D.normalize_tags(request.args.getlist('style'))
+        asset_types = Model3D.normalize_tags(request.args.getlist('type'))
         per_page = DASHBOARD_PER_PAGE
         user_models, total_filtered = Model3D.get_user_models(
             current_user.id, page=page, per_page=per_page,
-            sort=sort, tag=tags if tags else None)
+            sort=sort, tag=tags if tags else None,
+            category=category, style=styles if styles else None,
+            asset_type=asset_types if asset_types else None)
         _enrich_dashboard_models(user_models)
         has_next = page * per_page < total_filtered
         rows_html = render_template('_dashboard_rows.html', user_models=user_models)
@@ -176,6 +191,9 @@ def browse():
         sort = request.args.get('sort', 'newest')
         # Support multiple ?tag= values (AND-matched).
         tags = Model3D.normalize_tags(request.args.getlist('tag'))
+        category = Model3D.normalize_category(request.args.get('category'))
+        styles = Model3D.normalize_tags(request.args.getlist('style'))
+        asset_types = Model3D.normalize_tags(request.args.getlist('type'))
 
         # Get public models with pagination. Page size matches the /api/models
         # endpoint used by the browse page's infinite scroll so page 1 (rendered
@@ -184,7 +202,9 @@ def browse():
         models, total = Model3D.get_public_models(
             page=page, per_page=per_page,
             search=search if search else None,
-            sort=sort, tag=tags if tags else None)
+            sort=sort, tag=tags if tags else None,
+            category=category, style=styles if styles else None,
+            asset_type=asset_types if asset_types else None)
 
         # Add owner username + variant flags (browse prefers the game-optimized
         # file, then fixed-eyes, for the live preview). Batched variant queries.
@@ -199,6 +219,7 @@ def browse():
 
         pagination = Pagination(models, total, page, per_page)
         all_tags = Model3D.get_public_tags()
+        facets = Model3D.get_public_facets()
         # Only load the (heavy) VRM viewer module if a VRM card is on the page.
         has_vrm = any(m.file_format == 'vrm' for m in models)
 
@@ -211,12 +232,19 @@ def browse():
         sort = 'newest'
         tags = []
         all_tags = []
+        category = None
+        styles = []
+        asset_types = []
+        facets = {'categories': [], 'styles': [], 'types': []}
         has_vrm = False
 
     # Render outside the try so a template error surfaces instead of being
     # silently swallowed into a misleading "No Models Found" page.
     return render_template('browse.html', models=pagination, search=search,
-                           sort=sort, tags=tags, all_tags=all_tags, has_vrm=has_vrm)
+                           sort=sort, tags=tags, all_tags=all_tags,
+                           category=category, styles=styles,
+                           asset_types=asset_types, facets=facets,
+                           has_vrm=has_vrm)
 
 
 @main_bp.route('/local-assets')
@@ -280,6 +308,9 @@ def upload():
             description = request.form.get('description', '').strip()
             is_public = request.form.get('is_public') == 'on'
             tags = Model3D.normalize_tags(request.form.get('tags', ''))
+            asset_category = Model3D.normalize_category(request.form.get('asset_category'))
+            asset_styles = Model3D.normalize_tags(request.form.get('asset_styles', ''))
+            asset_types = Model3D.normalize_tags(request.form.get('asset_types', ''))
 
             # Get uploaded file
             file = request.files.get('file')
@@ -333,17 +364,21 @@ def upload():
                 user_id=current_user.id,
                 is_public=is_public,
                 gridfs_file_id=str(gridfs_file_id),
-                tags=tags
+                tags=tags,
+                asset_category=asset_category,
+                asset_styles=asset_styles,
+                asset_types=asset_types,
             )
 
             from app.conversion import enqueue
             enqueue(model, enabled=current_app.config.get('ENABLE_CONVERSION', True))
             model.save()
             # Auto-generate a game-optimized variant for GLB/GLTF uploads.
-            from app.api import _maybe_autostart_game_optimization
+            from app.api import _maybe_autostart_game_optimization, _maybe_autotag_on_upload
             _maybe_autostart_game_optimization(model)
+            _maybe_autotag_on_upload(model, context={'source': 'web_upload'})
 
-            flash(f'Model "{name}" uploaded successfully!', 'success')
+            flash(f'Model "{model.name}" uploaded successfully!', 'success')
             return redirect(url_for('main.model_detail', model_id=model.id))
             
         except Exception as e:

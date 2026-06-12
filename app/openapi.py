@@ -26,6 +26,9 @@ def _model_summary_schema():
             'upload_date': {'type': 'string', 'format': 'date-time', 'nullable': True},
             'download_count': {'type': 'integer', 'example': 12},
             'tags': {'type': 'array', 'items': {'type': 'string'}},
+            'asset_category': {'type': 'string', 'nullable': True, 'example': 'building'},
+            'asset_styles': {'type': 'array', 'items': {'type': 'string'}, 'example': ['fantasy', 'stylized']},
+            'asset_types': {'type': 'array', 'items': {'type': 'string'}, 'example': ['rigged', 'animated']},
             'conversion_status': {
                 'type': 'string',
                 'nullable': True,
@@ -34,6 +37,7 @@ def _model_summary_schema():
             'has_viewable': {'type': 'boolean'},
             'has_vrma': {'type': 'boolean'},
             'ai_status': {'type': 'string', 'nullable': True, 'enum': ['done', 'failed', None]},
+            'ai_title': {'type': 'string', 'nullable': True},
             'ai_description': {'type': 'string', 'nullable': True},
             'ai_tags': {'type': 'array', 'items': {'type': 'string'}},
             'approve_game_ready': {'type': 'boolean'},
@@ -961,6 +965,7 @@ def get_openapi_spec(base_url=''):
                                     'type': 'object',
                                     'properties': {
                                         'overwrite': {'type': 'boolean', 'default': True},
+                                        'include_title': {'type': 'boolean', 'default': True},
                                         'include_description': {'type': 'boolean', 'default': True},
                                         'context': {'type': 'object'},
                                     },
