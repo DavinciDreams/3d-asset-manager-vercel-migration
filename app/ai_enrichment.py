@@ -275,9 +275,12 @@ def _a2a_image_part(model):
     if len(stored) > max_bytes:
         return None
     return {
-        "raw": base64.b64encode(stored).decode("ascii"),
-        "filename": "thumbnail.webp",
-        "mediaType": "image/webp",
+        "kind": "file",
+        "file": {
+            "bytes": base64.b64encode(stored).decode("ascii"),
+            "name": "thumbnail.webp",
+            "mimeType": "image/webp",
+        },
     }
 
 
@@ -352,6 +355,7 @@ def _post_json(url, body, headers, provider=None, transport=None):
 def _a2a_metadata(model, provider, api_key, schema, user_text):
     parts = [
         {
+            "kind": "text",
             "text": (
                 "You enrich 3D asset store records. Return concise JSON only. "
                 "Tags should be lowercase marketplace/search tags, not sentences. "
