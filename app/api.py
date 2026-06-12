@@ -698,6 +698,134 @@ def get_fixed_eyes(model_id):
         return jsonify({'error': 'Fixed-eyes fetch failed'}), 500
 
 
+# A rigged GLB can be large; cap generously above any real avatar.
+TO_VRM_MAX_BYTES = 200 * 1024 * 1024
+
+
+@api_bp.route('/model/<model_id>/to-vrm', methods=['POST'])
+@login_required
+def post_to_vrm(model_id):
+    """Convert this model's rigged GLB into a VRM avatar by injecting the
+    VRMC_vrm humanoid extension (via tools/glb2vrm-converter.js), and store it as
+    the model's 'vrm' variant. Intended for GLBs rigged in mesh2motion and
+    exported with Mixamo bone naming -- the mesh/skeleton are preserved; only VRM
+    humanoid metadata is added. The resulting VRM works in the VRM viewer and can
+    play the VRMA clips produced by the FBX/BVH pipeline."""
+    import shutil
+    import tempfile
+    from app.conversion import glb_to_vrm, tool_paths
+    try:
+        model = Model3D.get_by_id(model_id)
+        if not model:
+            return jsonify({'error': 'Model not found'}), 404
+        if not (current_user.is_authenticated and model.user_id == current_user.id):
+            return jsonify({'error': 'Only the owner can convert this model to VRM.'}), 403
+
+        # Source bytes: the rigged GLB. Prefer the viewable GLB (covers FBX→GLB
+        # uploads); fall back to the original file. Must be a binary glTF.
+        data, fmt = model.get_viewable_data()
+        if data is None:
+            return jsonify({'error': 'Model has no GLB data to convert.'}), 400
+        if (fmt or '').lower() not in ('glb', 'gltf') or data[:4] != b'glTF':
+            return jsonify({
+                'error': 'VRM conversion needs a binary GLB. Rig the model first '
+                         '(e.g. in mesh2motion) and upload the rigged .glb.'
+            }), 400
+        if len(data) > TO_VRM_MAX_BYTES:
+            return jsonify({'error': 'Model is too large to convert.'}), 413
+
+        paths = tool_paths(current_app)
+        author = current_user.username if current_user.is_authenticated else None
+        workdir = tempfile.mkdtemp(prefix='to_vrm_')
+        try:
+            in_path = os.path.join(workdir, 'input.glb')
+            out_path = os.path.join(workdir, 'avatar.vrm')
+            with open(in_path, 'wb') as f:
+                f.write(data)
+            try:
+                glb_to_vrm(
+                    paths['node'], paths['fbx2vrma_dir'], in_path, out_path,
+                    name=(model.name or None), author=author,
+                )
+            except RuntimeError as e:
+                # glb2vrm exits non-zero with a human-readable reason (e.g. the
+                # GLB isn't rigged / required bones unmapped). Surface it.
+                return jsonify({'error': f'VRM conversion failed: {e}'}), 422
+            with open(out_path, 'rb') as f:
+                vrm_bytes = f.read()
+        finally:
+            shutil.rmtree(workdir, ignore_errors=True)
+
+        if not vrm_bytes or vrm_bytes[:4] != b'glTF':
+            return jsonify({'error': 'Converter produced an invalid VRM.'}), 500
+
+        fs = current_app.config['FILE_STORE']
+        filename = f'{_safe_stem(model)}.vrm'
+        file_id = fs.put(
+            vrm_bytes,
+            filename=filename,
+            content_type=_mime_for('vrm'),
+            metadata={'kind': 'vrm', 'source_model_id': model.id, 'size': len(vrm_bytes)},
+        )
+        variant, old_file_id = ModelVariant.upsert(
+            model.id, 'vrm', str(file_id),
+            file_format='vrm', size=len(vrm_bytes), status='ready',
+        )
+        if old_file_id and old_file_id != str(file_id):
+            try:
+                fs.delete(old_file_id)
+            except Exception as e:
+                print(f"Old VRM blob {old_file_id} not deleted: {e}")
+
+        return jsonify({'success': True, 'variant': variant.to_api() if variant else None})
+    except Exception as e:
+        print(f"API to-vrm error: {e}")
+        return jsonify({'error': 'Could not convert model to VRM.'}), 500
+
+
+@api_bp.route('/model/<model_id>/vrm', methods=['GET'])
+def get_vrm_variant(model_id):
+    """Serve the converted VRM variant. Inline by default; ?download=1 for an
+    attachment. Mirrors get_fixed_eyes (ETag + immutable cache)."""
+    try:
+        model = Model3D.get_by_id(model_id)
+        if not model:
+            return jsonify({'error': 'Model not found'}), 404
+        if not _can_access_model(model):
+            return jsonify({'error': 'Access denied'}), 403
+
+        variant = ModelVariant.get(model.id, 'vrm')
+        if not variant or not variant.file_id:
+            return jsonify({'error': 'No VRM variant'}), 404
+
+        data = variant.read_data()
+        if data is None:
+            return jsonify({'error': 'Variant file not found'}), 404
+
+        etag = f'"vrm-{variant.file_id}"'
+        cache_control = 'public, max-age=31536000, immutable'
+        if request.if_none_match and etag in request.if_none_match:
+            resp = make_response('', 304)
+            resp.headers['ETag'] = etag
+            resp.headers['Cache-Control'] = cache_control
+            return resp
+
+        response = make_response(data)
+        response.headers['Content-Type'] = _mime_for('vrm')
+        response.headers['Content-Length'] = str(len(data))
+        response.headers['Accept-Ranges'] = 'bytes'
+        response.headers['ETag'] = etag
+        response.headers['Cache-Control'] = cache_control
+        if request.args.get('download') in ('1', 'true', 'yes'):
+            response.headers['Content-Disposition'] = (
+                f'attachment; filename="{_safe_stem(model)}.vrm"'
+            )
+        return response
+    except Exception as e:
+        print(f"API get-vrm error: {e}")
+        return jsonify({'error': 'VRM fetch failed'}), 500
+
+
 @api_bp.route('/model/<model_id>/status')
 def conversion_status(model_id):
     try:

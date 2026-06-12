@@ -100,6 +100,23 @@ def bvh_to_vrma(node_bin, converter_dir, input_path, output_path, clip_name=None
     return output_path
 
 
+def glb_to_vrm(node_bin, converter_dir, input_path, output_path,
+               name=None, author=None, timeout=120):
+    """Turn a rigged GLB (humanoid/mixamorig skeleton, e.g. from mesh2motion)
+    into a VRM by injecting the VRMC_vrm humanoid extension. Pure JS; the mesh
+    and binary buffer are preserved untouched."""
+    script = os.path.join(converter_dir, "glb2vrm-converter.js")
+    cmd = [node_bin, script, "-i", input_path, "-o", output_path]
+    if name:
+        cmd += ["--name", name]
+    if author:
+        cmd += ["--author", author]
+    _run(cmd, timeout)
+    if not os.path.exists(output_path):
+        raise RuntimeError("glb2vrm produced no output")
+    return output_path
+
+
 def gltf_node_names(glb_or_gltf_path):
     try:
         with open(glb_or_gltf_path, "rb") as f:
@@ -222,6 +239,37 @@ def process_model_doc(app, doc):
                 ))
             except Exception as e:
                 print(f"VRMA generation failed for {model_id} (non-fatal): {e}")
+
+            # The viewable GLB from a humanoid (Mixamo-rigged) FBX already has a
+            # mixamorig:* skeleton -- exactly what glb2vrm needs. Auto-produce a
+            # VRM avatar variant so the model can play VRMA clips in the VRM
+            # viewer. Non-fatal: a non-humanoid-enough GLB just won't get a VRM.
+            try:
+                vrm_path = os.path.join(workdir, "avatar.vrm")
+                glb_to_vrm(
+                    paths["node"], paths["fbx2vrma_dir"], glb_path, vrm_path,
+                    name=(doc.get("name") or None),
+                )
+                with open(vrm_path, "rb") as f:
+                    vrm_bytes = f.read()
+                vrm_id = fs.put(
+                    vrm_bytes,
+                    filename=f"avatar_{model_id}.vrm",
+                    content_type="model/gltf-binary",
+                    metadata={"derived_for": str(model_id), "kind": "vrm"},
+                )
+                from app.models import ModelVariant
+                _, old_vrm_id = ModelVariant.upsert(
+                    model_id, "vrm", str(vrm_id),
+                    file_format="vrm", size=len(vrm_bytes), status="ready",
+                )
+                if old_vrm_id and old_vrm_id != str(vrm_id):
+                    try:
+                        fs.delete(old_vrm_id)
+                    except Exception as e:
+                        print(f"Old VRM blob {old_vrm_id} not deleted: {e}")
+            except Exception as e:
+                print(f"VRM generation failed for {model_id} (non-fatal): {e}")
 
         fields["conversion_status"] = "done"
         patch_model(app, model_id, **fields)

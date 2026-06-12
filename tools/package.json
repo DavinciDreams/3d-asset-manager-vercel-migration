@@ -6,6 +6,7 @@
   "bin": {
     "fbx2vrma": "./fbx2vrma-converter.js",
     "bvh2vrma": "./bvh2vrma-converter.js",
+    "glb2vrm": "./glb2vrm-converter.js",
     "convert-raw-to-vrma": "./convert-raw-to-vrma.js",
     "download-mixamo": "./download-mixamo.js"
   },

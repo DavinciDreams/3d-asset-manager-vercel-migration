@@ -12,8 +12,16 @@ These files support `app/conversion.py` and the Mixamo animation library.
   data-URI buffer). Auto-detects common skeletons (Mixamo-named, CMU, Rokoko,
   3ds Max Biped, `Character1_` prefixes); pass `--map overrides.json`
   (`{ "JointName": "vrmBoneName" | null }`) for custom rigs.
-- **`vrm-bone-map.js`** — shared joint→VRM-bone vocabulary used by both
-  converters. Fix a mapping here and both pipelines benefit.
+- **`glb2vrm-converter.js`** — turns a **rigged GLB** (humanoid/`mixamorig:*`
+  skeleton — e.g. a Mixamo FBX's converted GLB, or a GLB rigged in mesh2motion
+  and exported with "Mixamo" bone naming) into a **VRM** by injecting the
+  `VRMC_vrm` humanoid extension. Parses the GLB container and rewrites only the
+  JSON chunk; the mesh, skin weights, and BIN buffer are preserved byte-for-byte.
+  Refuses to emit unless the VRM-required humanoid bones are mapped (`--lenient`
+  to override; `--map overrides.json` for odd skeletons). Does **not** rig/skin —
+  it only adds the VRM metadata a rigged GLB lacks.
+- **`vrm-bone-map.js`** — shared joint→VRM-bone vocabulary used by all three
+  converters. Fix a mapping here and every pipeline benefits.
 
 `FBX2glTF` and `assimp` are installed by the Dockerfile. Tool paths can be
 overridden with `FBX2GLTF_BIN`, `ASSIMP_BIN`, `NODE_BIN`, and `FBX2VRMA_DIR`.
@@ -23,8 +31,23 @@ overridden with `FBX2GLTF_BIN`, `ASSIMP_BIN`, `NODE_BIN`, and `FBX2VRMA_DIR`.
 | Uploaded format        | Result                                                        |
 |------------------------|--------------------------------------------------------------|
 | glb / gltf / vrm       | native viewable, conversion skipped                          |
-| fbx / obj / stl / dae / ply / 3ds | converted to a viewable GLB; **humanoid FBX** also gets a VRMA (`vrma_file_id`) |
+| fbx / obj / stl / dae / ply / 3ds | converted to a viewable GLB; **humanoid (Mixamo-rigged) FBX** also gets a VRMA clip (`vrma_file_id`) **and** an auto-generated **VRM avatar variant** (kind `vrm`) |
 | **bvh**                | converted **directly to a VRMA** clip (animation-only, no mesh) |
+
+### Rigging round-trip (unrigged mesh → VRM avatar)
+
+This app does **not** auto-rig/skin an unrigged mesh — that's done in the
+browser-based [mesh2motion](https://app.mesh2motion.org/) auto-rigger (it imports
+FBX/GLB directly). The flow, surfaced on the model detail page (owner only):
+
+1. **Rig in mesh2motion** button → download the GLB, open mesh2motion, fit the
+   skeleton, auto-skin, and **export GLB with "Mixamo" bone naming**.
+2. Upload that rigged GLB back here.
+3. **Make VRM avatar** button → `POST /api/model/<id>/to-vrm` runs `glb2vrm` and
+   stores a `vrm` variant (downloadable from the Export menu).
+
+A **Mixamo-rigged FBX skips steps 1–2**: it's already rigged, so the worker
+auto-produces the VRM variant on upload.
 
 Any model with `vrma_file_id` set automatically appears in the VRMA library
 served by `GET /api/vrma` (via `list_generated_vrma_for_user`) and can be

@@ -284,10 +284,14 @@ def model_detail(model_id):
         # Fixed-eyes variant (if any): owner-baked GLB with blinker eyeballs
         # covering reconstruction holes; surfaces its own toggle + download.
         fixed_eyes_variant = ModelVariant.get(model.id, 'fixed_eyes')
+        # VRM variant (if any): a rigged GLB converted to a VRM avatar via
+        # glb2vrm; lets the owner play VRMA clips on it.
+        vrm_variant = ModelVariant.get(model.id, 'vrm')
 
         return render_template('model_detail.html', model=model, owner=owner,
                                all_tags=all_tags, game_variant=game_variant,
-                               fixed_eyes_variant=fixed_eyes_variant)
+                               fixed_eyes_variant=fixed_eyes_variant,
+                               vrm_variant=vrm_variant)
         
     except Exception as e:
         print(f"Model detail error: {e}")

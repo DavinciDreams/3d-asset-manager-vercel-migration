@@ -78,6 +78,45 @@ A Flask web app for uploading, viewing, browsing, and optimizing 3D assets
 
 ## Recent Changes
 
+### 2026-06-12 — GLB→VRM converter + mesh2motion rigging round-trip
+**Why:** "Easily add a humanoid rig." Auto-rigging an unrigged mesh (skinning) is
+hard; we DON'T do it in-app. Instead use the browser auto-rigger
+**mesh2motion** (app.mesh2motion.org) and kill the format friction around it.
+mesh2motion imports FBX/GLB directly but exports **GLB only** (no VRM) — so the
+real gap is **rigged GLB → VRM**. A VRM is just a GLB + `VRMC_vrm` humanoid
+metadata, and a mesh2motion "Mixamo"-named export (or a Mixamo FBX's GLB) already
+has `mixamorig:*` bones — exactly what `vrm-bone-map.js` maps.
+
+**New: `tools/glb2vrm-converter.js`** — parses the GLB container, injects
+`VRMC_vrm` (humanoid bone map from joints referenced by `skin.joints`, + minimal
+VRM meta), and re-packs **preserving the BIN buffer byte-for-byte** (no mesh/skin
+surgery). Refuses unless all VRM-required bones map (`--lenient`/`--map` escape
+hatches). Reuses `vrm-bone-map.js` (+ new `VRM_REQUIRED_BONES`).
+
+**Wiring:**
+- `conversion.py` — `glb_to_vrm()` helper. Humanoid-FBX branch now ALSO
+  auto-produces a **VRM variant** (kind `vrm`) from the rigged viewable GLB via
+  `ModelVariant.upsert` (runs under app_context in `drain_once`).
+- `api.py` — `POST /api/model/<id>/to-vrm` (owner-only: reads the model's
+  viewable GLB, runs glb2vrm, stores `vrm` variant; 422 with actionable message
+  if not rigged) + `GET /api/model/<id>/vrm` (serve/download, ETag).
+- `main.py` — `model_detail` passes `vrm_variant`.
+- `model_detail.html` — owner buttons **"Rig in mesh2motion"** (opens
+  app.mesh2motion.org) + **"Make VRM avatar"** (`make-vrm-btn`, calls to-vrm,
+  reveals Export-menu VRM link). Export menu gets a **VRM avatar** download.
+- `tools/`: package.json `glb2vrm` bin; README "Rigging round-trip" section.
+
+**Round-trip:** unrigged mesh → Rig in mesh2motion (fit + auto-skin + export GLB
+w/ Mixamo naming) → upload rigged GLB → Make VRM avatar. **Mixamo-rigged FBX
+skips the rigger** — worker auto-makes the VRM on upload.
+
+**Verification:** node --check all 6 tools; py_compile api/conversion/main/init;
+routes register (`post_to_vrm`,`get_vrm_variant`); Jinja render of model_detail
+(anon + owner) shows all new markup; glb2vrm CLI: 15-bone GLB→valid VRM (BIN
+preserved, mesh-node named "Head" correctly excluded), under-rigged GLB refused
+with named-missing-bones error. ⚠️ NOT live-tested through real upload/worker on
+Coolify; no browser load of a converted .vrm + VRMA playback yet.
+
 ### 2026-06-12 — BVH→VRMA converter + Mixamo animation library tooling
 **Why:** Extend animation support beyond humanoid FBX. Add BVH (mocap) → VRMA,
 and tooling to build a curated Mixamo VRMA library. Inspired by DavinciDreams/3dchat.

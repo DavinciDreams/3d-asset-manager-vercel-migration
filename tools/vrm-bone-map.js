@@ -149,10 +149,31 @@ function jointToVrmBone(rawName, overrides) {
 // a usable humanoid clip. Mirrors HUMANOID_BONE_THRESHOLD in conversion.py.
 const HUMANOID_BONE_THRESHOLD = 6;
 
+// The five bones VRM 1.0 requires every humanoid to define. A converted VRM is
+// invalid without all of them, so glb2vrm refuses to emit if any are missing.
+const VRM_REQUIRED_BONES = [
+  "hips",
+  "spine",
+  "head",
+  "leftUpperLeg",
+  "rightUpperLeg",
+  "leftLowerLeg",
+  "rightLowerLeg",
+  "leftFoot",
+  "rightFoot",
+  "leftUpperArm",
+  "rightUpperArm",
+  "leftLowerArm",
+  "rightLowerArm",
+  "leftHand",
+  "rightHand",
+];
+
 module.exports = {
   MIXAMO_TO_VRM,
   ALIAS_TO_MIXAMO_KEY,
   normalizeJointName,
   jointToVrmBone,
   HUMANOID_BONE_THRESHOLD,
+  VRM_REQUIRED_BONES,
 };
