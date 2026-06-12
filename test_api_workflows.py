@@ -552,6 +552,58 @@ def test_zai_openai_transport_does_not_send_image_parts(monkeypatch):
     assert enriched["vision_mcp"] is True
 
 
+def test_zai_mcp_discovers_image_capable_tool(monkeypatch):
+    from app import ai_enrichment
+
+    tools = [
+        {
+            "name": "read_file",
+            "description": "Read a local file.",
+            "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}}},
+        },
+        {
+            "name": "analyze_image",
+            "description": "Analyze and describe a visual image.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string"},
+                    "instructions": {"type": "string"},
+                },
+            },
+        },
+    ]
+
+    tool = ai_enrichment._choose_mcp_tool(tools)
+
+    assert tool["name"] == "analyze_image"
+    assert ai_enrichment._choose_mcp_argument(
+        tool,
+        "AI_AUTOTAG_MCP_IMAGE_ARG",
+        ("image_path", "file_path", "path", "image", "image_file", "file"),
+        "image_path",
+    ) == "file_path"
+    assert ai_enrichment._choose_mcp_argument(
+        tool,
+        "AI_AUTOTAG_MCP_PROMPT_ARG",
+        ("prompt", "query", "question", "instructions", "text"),
+        "prompt",
+    ) == "instructions"
+
+
+def test_zai_mcp_reports_available_tools_when_no_image_tool():
+    from app import ai_enrichment
+
+    tools = [
+        {"name": "list_models", "description": "List coding models."},
+        {"name": "chat", "description": "Send a text message."},
+    ]
+
+    assert ai_enrichment._choose_mcp_tool(tools) is None
+    names = ", ".join(str(item.get("name")) for item in tools if item.get("name"))
+    assert names == "list_models, chat"
+
+
 def test_zai_mcp_records_missing_thumbnail(monkeypatch):
     from app import ai_enrichment
 

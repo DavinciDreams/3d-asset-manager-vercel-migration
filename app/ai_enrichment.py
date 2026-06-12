@@ -505,6 +505,70 @@ def _extract_mcp_text(payload):
     return "\n".join(texts).strip()
 
 
+def _mcp_tools(payload):
+    if payload.get("error"):
+        error = payload["error"]
+        message = error.get("message") if isinstance(error, dict) else str(error)
+        raise RuntimeError(f"MCP tools/list failed: {message or 'unknown error'}")
+    result = payload.get("result") or {}
+    tools = result.get("tools") if isinstance(result, dict) else None
+    return tools if isinstance(tools, list) else []
+
+
+def _mcp_tool_properties(tool):
+    if not isinstance(tool, dict):
+        return {}
+    schema = tool.get("inputSchema") or tool.get("input_schema") or {}
+    properties = schema.get("properties") if isinstance(schema, dict) else None
+    return properties if isinstance(properties, dict) else {}
+
+
+def _choose_mcp_tool(tools):
+    configured = os.environ.get("AI_AUTOTAG_MCP_TOOL")
+    if configured:
+        return {"name": configured}
+    best = None
+    best_score = -1
+    for tool in tools:
+        if not isinstance(tool, dict) or not tool.get("name"):
+            continue
+        name = str(tool.get("name") or "")
+        description = str(tool.get("description") or "")
+        haystack = f"{name} {description}".lower()
+        score = 0
+        for word in ("image", "vision", "visual", "thumbnail", "screenshot"):
+            if word in haystack:
+                score += 4
+        for word in ("analyze", "analysis", "describe", "caption", "inspect"):
+            if word in haystack:
+                score += 2
+        properties = _mcp_tool_properties(tool)
+        if any("image" in key.lower() for key in properties):
+            score += 3
+        if any(key.lower() in {"path", "file_path", "image_path"} for key in properties):
+            score += 2
+        if score > best_score:
+            best = tool
+            best_score = score
+    return best if best_score > 0 else None
+
+
+def _choose_mcp_argument(tool, env_name, candidates, fallback):
+    configured = os.environ.get(env_name)
+    if configured:
+        return configured
+    properties = _mcp_tool_properties(tool)
+    lowered = {key.lower(): key for key in properties}
+    for candidate in candidates:
+        if candidate in lowered:
+            return lowered[candidate]
+    for key in properties:
+        low = key.lower()
+        if any(candidate in low for candidate in candidates):
+            return key
+    return fallback
+
+
 def _zai_mcp_enabled(provider):
     if provider != "zai" or not _env_bool("AI_AUTOTAG_USE_VISION", True):
         return False
@@ -530,9 +594,6 @@ def _zai_mcp_visual_context_result(model, provider, api_key):
         }
 
     timeout = int(os.environ.get("AI_AUTOTAG_MCP_TIMEOUT", os.environ.get("AI_AUTOTAG_TIMEOUT", "120")))
-    tool_name = os.environ.get("AI_AUTOTAG_MCP_TOOL", "image_analysis")
-    image_arg = os.environ.get("AI_AUTOTAG_MCP_IMAGE_ARG", "image_path")
-    prompt_arg = os.environ.get("AI_AUTOTAG_MCP_PROMPT_ARG", "prompt")
     prompt = os.environ.get(
         "AI_AUTOTAG_MCP_PROMPT",
         "Describe this 3D asset preview for catalog metadata. Mention visible subject, style, materials, "
@@ -587,9 +648,37 @@ def _zai_mcp_visual_context_result(model, provider, api_key):
         })
         _mcp_read_json_line(proc, responses, timeout)
         _mcp_write(proc, {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}})
+        if os.environ.get("AI_AUTOTAG_MCP_TOOL"):
+            tool = _choose_mcp_tool([])
+        else:
+            _mcp_write(proc, {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/list",
+                "params": {},
+            })
+            tools = _mcp_tools(_mcp_read_json_line(proc, responses, timeout))
+            tool = _choose_mcp_tool(tools)
+            if not tool:
+                names = ", ".join(str(item.get("name")) for item in tools if isinstance(item, dict) and item.get("name"))
+                detail = f" Available tools: {names}." if names else ""
+                return {"enabled": True, "analysis": None, "error": f"No image-capable MCP tool was found.{detail}"}
+        tool_name = tool["name"]
+        image_arg = _choose_mcp_argument(
+            tool,
+            "AI_AUTOTAG_MCP_IMAGE_ARG",
+            ("image_path", "file_path", "path", "image", "image_file", "file"),
+            "image_path",
+        )
+        prompt_arg = _choose_mcp_argument(
+            tool,
+            "AI_AUTOTAG_MCP_PROMPT_ARG",
+            ("prompt", "query", "question", "instructions", "text"),
+            "prompt",
+        )
         _mcp_write(proc, {
             "jsonrpc": "2.0",
-            "id": 2,
+            "id": 3,
             "method": "tools/call",
             "params": {
                 "name": tool_name,
