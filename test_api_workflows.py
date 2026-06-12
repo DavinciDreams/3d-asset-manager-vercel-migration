@@ -291,6 +291,35 @@ def test_a2a_no_output_error_includes_task_state():
     assert "working" in ai_enrichment._summarize_provider_payload(payload)
 
 
+def test_ai_output_parser_extracts_json_from_wrapped_text():
+    from app import ai_enrichment
+
+    parsed = ai_enrichment._parse_enrichment_json(
+        "Here is the catalog metadata:\n"
+        '{"title": "Wrapped Lantern", "tags": ["lantern"]}\n'
+        "Hope that helps.",
+        provider="hyades",
+        transport="a2a",
+    )
+
+    assert parsed["title"] == "Wrapped Lantern"
+
+
+def test_ai_output_parser_reports_non_json_text():
+    from app import ai_enrichment
+
+    with pytest.raises(RuntimeError) as exc:
+        ai_enrichment._parse_enrichment_json(
+            "I can describe this lantern, but I cannot emit JSON.",
+            provider="hyades",
+            transport="a2a",
+        )
+
+    message = str(exc.value)
+    assert "AI enrichment returned non-JSON output from hyades/a2a" in message
+    assert "I can describe this lantern" in message
+
+
 def test_hyades_a2a_empty_message_polls_task(monkeypatch):
     from app import ai_enrichment
 

@@ -222,6 +222,42 @@ def _strip_json_fence(text):
     return text.strip()
 
 
+def _extract_json_object_text(text):
+    text = _strip_json_fence(text)
+    if not text:
+        return ""
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(text):
+        if char not in "{[":
+            continue
+        try:
+            _, end = decoder.raw_decode(text[index:])
+            return text[index:index + end]
+        except json.JSONDecodeError:
+            continue
+    return text
+
+
+def _parse_enrichment_json(output_text, provider=None, transport=None):
+    candidate = _extract_json_object_text(output_text)
+    try:
+        parsed = json.loads(candidate)
+    except json.JSONDecodeError as error:
+        label = f"{provider or 'ai provider'}"
+        if transport:
+            label = f"{label}/{transport}"
+        detail = _compact_response_detail(output_text)
+        raise RuntimeError(
+            f"AI enrichment returned non-JSON output from {label}: {error.msg}. "
+            f"Output: {detail or 'empty response'}"
+        ) from error
+    if not isinstance(parsed, dict):
+        raise RuntimeError(
+            f"AI enrichment returned JSON {type(parsed).__name__}, expected object."
+        )
+    return parsed
+
+
 def _extract_chat_output(payload):
     choices = payload.get("choices") or []
     if not choices:
@@ -539,7 +575,7 @@ def _a2a_metadata(model, provider, api_key, schema, user_text):
             f"AI enrichment returned no A2A output text (task state: {state}; task id: {task}). "
             f"Response: {detail or 'empty response'}"
         )
-    enriched = json.loads(output_text)
+    enriched = _parse_enrichment_json(output_text, provider=provider, transport="a2a")
     enriched["provider"] = provider
     enriched["transport"] = "a2a"
     enriched["base_url"] = _base_url(provider)
@@ -727,7 +763,7 @@ def _ai_metadata(model, extra_context=None):
             f"Response shape: {_chat_payload_summary(payload)}. "
             f"Response: {_summarize_provider_payload(payload) or 'empty response'}"
         )
-    enriched = json.loads(output_text)
+    enriched = _parse_enrichment_json(output_text, provider=provider, transport="openai")
     enriched["provider"] = provider
     enriched["transport"] = "openai"
     enriched["base_url"] = _base_url(provider)
