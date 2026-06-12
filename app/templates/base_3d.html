@@ -598,13 +598,30 @@
                         clips.forEach((clip) => {
                             actionsByName[clip.name] = mixer.clipAction(clip);
                         });
-                        // Play the owner's saved default clip if it exists,
-                        // otherwise the first clip (the detail controls may
-                        // switch it after). This keeps the chosen default on
-                        // the browse cards too.
+                        // "Fix-up" ambient clips (baked eye blink + mouth talk)
+                        // ALWAYS play additively and loop, independent of the main
+                        // animation — they animate only the added eye/mouth nodes,
+                        // so they coexist with the model's own body animation and
+                        // with each other. (There can be several: EyeBlink,
+                        // MouthTalk_<lip>, MouthTalk_<cavity>.)
+                        const isFixupClip = (name) => /^(EyeBlink|MouthTalk)/.test(name || '');
+                        const fixupNames = clips.map((c) => c.name).filter(isFixupClip);
+                        fixupNames.forEach((name) => {
+                            const action = actionsByName[name];
+                            if (action) {
+                                action.reset();
+                                action.setLoop(THREE.LoopRepeat, Infinity);
+                                action.play();
+                            }
+                        });
+                        // The MAIN clip uses the normal single-clip logic. Prefer
+                        // the owner's saved default, else the first NON-fixup clip,
+                        // else (a model with only fix-up clips) nothing extra.
+                        const mainClips = clips.filter((c) => !isFixupClip(c.name));
                         const wanted = options.defaultAnimation;
-                        const startClip = (wanted && actionsByName[wanted]) ? wanted : clips[0].name;
-                        playClip(startClip);
+                        const startClip = (wanted && actionsByName[wanted]) ? wanted
+                            : (mainClips[0] && mainClips[0].name);
+                        if (startClip) playClip(startClip);
                     }
                     // NOTE: options.onLoad is deferred until after the api object
                     // is assigned to container.__threeViewer below, so callers'
@@ -645,7 +662,10 @@
                     setCameraOrbit,
                     // --- glTF animation controls -----------------------------
                     get availableAnimations() {
-                        return clips.map((clip) => clip.name);
+                        // Hide the always-on fix-up clips (eye blink / mouth talk)
+                        // from the user-facing animation picker — they're ambient.
+                        return clips.map((clip) => clip.name)
+                            .filter((n) => !/^(EyeBlink|MouthTalk)/.test(n));
                     },
                     get animationName() {
                         return currentClipName;
