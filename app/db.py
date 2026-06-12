@@ -86,6 +86,7 @@ models = Table(
     Column("description", Text, nullable=False, default=""),
     Column("file_format", String(20), nullable=False),
     Column("file_size", Integer, nullable=False, default=0),
+    Column("content_hash", String(64), unique=True, index=True),
     Column("original_filename", String(500), nullable=False, default=""),
     Column("user_id", String(36), ForeignKey("users.id"), index=True),
     Column("is_public", Boolean, nullable=False, default=False, index=True),
@@ -431,6 +432,7 @@ def _ensure_model_columns(engine):
         "approve_asset_store": "BOOLEAN NOT NULL DEFAULT FALSE",
         "approval_notes": "TEXT",
         "approval_updated_at": "TIMESTAMP",
+        "content_hash": "VARCHAR(64)",
     }
     with engine.begin() as conn:
         for column, ddl_type in desired.items():
@@ -440,6 +442,10 @@ def _ensure_model_columns(engine):
                 except OperationalError as error:
                     if not _ignore_duplicate_column(error):
                         raise
+        if engine.dialect.name == "postgresql":
+            conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_models_content_hash ON models (content_hash)"))
+        else:
+            conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_models_content_hash ON models (content_hash)"))
 
 
 def _ensure_bundle_table(engine):

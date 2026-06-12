@@ -39,6 +39,14 @@ def test_bearer_upload_enrich_approve_and_bundle():
     assert upload.get_json()["model"]["asset_category"] == "prop"
     assert upload.get_json()["model"]["asset_styles"] == ["fantasy", "stylized"]
     assert upload.get_json()["model"]["asset_types"] == ["rigged", "animated"]
+    assert len(upload.get_json()["model"]["content_hash"]) == 64
+
+    duplicate = client.post("/api/upload", headers=headers, data={
+        "is_public": "false",
+        "file": (io.BytesIO(glb), "warehouse_crate_copy.glb"),
+    }, content_type="multipart/form-data")
+    assert duplicate.status_code == 409, duplicate.get_json()
+    assert "duplicate model" in duplicate.get_json()["error"].lower()
 
     enrich = client.post(
         f"/api/model/{model_id}/ai/autotag",
@@ -115,6 +123,7 @@ def test_openapi_documents_workflow_and_bearer_auth():
     assert "asset_category" in model_props
     assert "asset_styles" in model_props
     assert "asset_types" in model_props
+    assert "content_hash" in model_props
 
 
 def test_hyades_a2a_enrichment_uses_holo_vision(monkeypatch):

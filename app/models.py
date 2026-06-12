@@ -213,6 +213,7 @@ class ApiKey:
 class Model3D:
     def __init__(self, name=None, description=None, file_format=None, file_size=None,
                  original_filename=None, user_id=None, is_public=True, _id=None,
+                 content_hash=None,
                  upload_date=None, download_count=0, gridfs_file_id=None,
                  camera_orbit=None, thumbnail_file_id=None, tags=None,
                  asset_category=None, asset_styles=None, asset_types=None,
@@ -228,6 +229,7 @@ class Model3D:
         self.description = description
         self.file_format = file_format
         self.file_size = file_size
+        self.content_hash = content_hash
         self.original_filename = original_filename
         self.user_id = user_id
         self.is_public = is_public
@@ -267,6 +269,7 @@ class Model3D:
             "description": self.description or "",
             "file_format": self.file_format or "",
             "file_size": self.file_size or 0,
+            "content_hash": self.content_hash,
             "original_filename": self.original_filename or "",
             "user_id": self.user_id,
             "is_public": bool(self.is_public),
@@ -434,6 +437,7 @@ class Model3D:
             description=model_data.get("description", ""),
             file_format=model_data.get("file_format", ""),
             file_size=model_data.get("file_size", 0),
+            content_hash=model_data.get("content_hash"),
             original_filename=model_data.get("original_filename", ""),
             user_id=model_data.get("user_id"),
             is_public=model_data.get("is_public", False),
@@ -498,6 +502,20 @@ class Model3D:
             return Model3D.from_doc(row) if row else None
         except Exception as e:
             print(f"Error getting model by ID: {e}")
+            return None
+
+    @staticmethod
+    def get_by_content_hash(content_hash):
+        digest = str(content_hash or "").strip().lower()
+        if not digest:
+            return None
+        try:
+            engine = current_app.config["DB_ENGINE"]
+            with engine.begin() as conn:
+                row = conn.execute(select(models).where(models.c.content_hash == digest)).mappings().first()
+            return Model3D.from_doc(row) if row else None
+        except Exception as e:
+            print(f"Error getting model by content hash: {e}")
             return None
 
     SORT_OPTIONS = {

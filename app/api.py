@@ -6,6 +6,7 @@ from sqlalchemy import select, update
 from app.db import asset_files, optimization_jobs
 from app.models import ApiKey, AssetBundle, Model3D, ModelVariant, User, WorldState
 from app.openapi import get_openapi_spec
+import hashlib
 import hmac
 import io
 import json
@@ -1558,6 +1559,12 @@ def _store_one_upload(file, base_name, description, is_public, tags, allowed_ext
     if file_size > max_bytes:
         limit_mb = max_bytes // (1024 * 1024)
         return None, f'File too large. Maximum size is {limit_mb}MB.'
+    content_hash = hashlib.sha256(file_content).hexdigest()
+    duplicate = Model3D.get_by_content_hash(content_hash)
+    if duplicate:
+        if duplicate.is_public or duplicate.user_id == owner_id:
+            return None, f'Duplicate model already exists: {duplicate.name} ({duplicate.id}).'
+        return None, 'Duplicate model already exists in the asset library.'
 
     # Per-file name: when a shared base name is given AND multiple files are
     # involved, the caller passes base_name="" so each model is named from its
@@ -1571,7 +1578,8 @@ def _store_one_upload(file, base_name, description, is_public, tags, allowed_ext
         metadata={
             'original_filename': file.filename,
             'uploaded_by': owner_id,
-            'upload_date': Model3D().upload_date
+            'upload_date': Model3D().upload_date,
+            'content_hash': content_hash,
         }
     )
 
@@ -1580,6 +1588,7 @@ def _store_one_upload(file, base_name, description, is_public, tags, allowed_ext
         description=description,
         file_format=file_extension,
         file_size=file_size,
+        content_hash=content_hash,
         original_filename=file.filename,
         user_id=owner_id,
         is_public=is_public,
@@ -1606,6 +1615,7 @@ def _serialize_model(model):
         'description': model.description,
         'file_format': model.file_format,
         'file_size': model.file_size,
+        'content_hash': model.content_hash,
         'original_filename': model.original_filename,
         'is_public': model.is_public,
         'upload_date': model.upload_date.isoformat() if model.upload_date else None,
@@ -2314,7 +2324,8 @@ def upload_model():
                     'message': f'Model "{model.name}" uploaded successfully!',
                     'model': _serialize_model(model)
                 }), 201
-            return jsonify({'error': errors[0]['error']}), 400
+            status = 409 if 'duplicate model' in errors[0]['error'].lower() else 400
+            return jsonify({'error': errors[0]['error']}), status
 
         # Multi-file path: report per-file outcomes.
         status = 201 if uploaded else 400
