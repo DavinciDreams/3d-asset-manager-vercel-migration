@@ -1334,12 +1334,11 @@ document.addEventListener('DOMContentLoaded', function() {
             if (!resp.ok || !data.success) {
                 throw new Error(data.error || ('Upload failed (HTTP ' + resp.status + ').'));
             }
-            // If a game-optimized variant already exists, it's now stale (it was
-            // built from the eyeless original) — nudge the user to re-optimize.
-            const gameBtn = document.getElementById('variant-btn-game');
-            const gameExists = gameBtn && !gameBtn.classList.contains('hidden');
-            setStatus(gameExists
-                ? 'Done! Fixed-eyes saved. Tip: re-run "Optimize for Game" to fold the eyes into the game version.'
+            // The server auto-re-runs game optimization using the fixed-eyes
+            // version as its source, so the small "game" preview will include
+            // the eyes once it finishes (previews prefer the game variant).
+            setStatus(data.reoptimizing
+                ? 'Done! Fixed-eyes saved. Optimizing the game version with your eyes now — it’ll update shortly.'
                 : 'Done! Fixed-eyes version saved.');
             revealFixedEyes(data.variant && data.variant.size);
             // Swap the viewer to the freshly baked variant so you see the result.
