@@ -28,6 +28,10 @@ HYADES_A2A_BASE_URL = "https://hyades.gnostr.cloud/a2a"
 HYADES_OPENAI_BASE_URL = "https://hyades.gnostr.cloud/v1"
 HYADES_DEFAULT_MODEL = "holo"
 DEFAULT_USER_AGENT = "3d-asset-manager/1.0 (+https://github.com/DavinciDreams/3d-asset-manager-vercel-migration)"
+NOISY_ENRICHMENT_TAGS = {
+    "3d", "3d-asset", "3d-model", "ai", "ai-generated", "asset", "generated", "generation",
+    "glb", "gltf", "fbx", "obj", "stl", "vrm", "image-to-3d", "model", "pixal3d",
+}
 
 
 class AIProviderTransientError(RuntimeError):
@@ -115,6 +119,18 @@ def _contains_any(text, words):
     return any(word in lowered for word in words)
 
 
+def _keyword_score(text, words):
+    lowered = (text or "").lower()
+    return sum(1 for word in words if word in lowered)
+
+
+def _clean_enrichment_tags(tags):
+    return [
+        tag for tag in Model3D.normalize_tags(tags)
+        if tag not in NOISY_ENRICHMENT_TAGS
+    ]
+
+
 def _infer_missing_facets(enriched):
     text = " ".join([
         str(enriched.get("title") or ""),
@@ -126,19 +142,23 @@ def _infer_missing_facets(enriched):
     category = Model3D.normalize_category(enriched.get("asset_category"))
     generic_categories = {None, "", "other", "prop", "props", "3d model", "3d models", "uncategorized"}
     category_rules = [
+        ("building", ("building", "house", "cottage", "tower", "castle", "temple", "hut", "cabin", "wall", "roof", "architecture", "timber-framed", "half-timbered", "tudor", "cupola", "balcony")),
         ("flora", ("flower", "flowers", "floral", "bouquet", "bloom", "blooms", "leaf", "leaves", "stem", "stems", "plant", "plants", "tree", "trees", "grass", "moss", "vine", "vines")),
         ("fauna", ("animal", "creature", "bird", "fish", "insect", "horse", "cat", "dog", "wolf", "dragon")),
-        ("building", ("building", "house", "tower", "castle", "temple", "hut", "cabin", "wall", "roof", "architecture")),
         ("person", ("person", "human", "character", "humanoid", "man", "woman", "figure")),
         ("vehicle", ("vehicle", "car", "truck", "ship", "boat", "aircraft", "spaceship", "wagon")),
         ("environment", ("terrain", "landscape", "scene", "environment", "diorama", "level")),
         ("material", ("material", "texture", "tileable", "surface", "fabric", "shader")),
     ]
-    if category in generic_categories:
-        for candidate, words in category_rules:
-            if _contains_any(text, words):
-                enriched["asset_category"] = candidate
-                break
+    category_scores = [(candidate, _keyword_score(text, words)) for candidate, words in category_rules]
+    best_category, best_score = max(category_scores, key=lambda item: item[1])
+    current_score = next((score for candidate, score in category_scores if candidate == category), 0)
+    if best_score > 0 and (
+        category in generic_categories
+        or (best_category != category and best_score >= max(2, current_score + 2))
+    ):
+        enriched["asset_category"] = best_category
+        category = best_category
     styles = Model3D.normalize_tags(enriched.get("asset_styles", []))
     style_rules = {
         "watercolor": ("watercolor", "translucent wash", "color blending"),
@@ -186,10 +206,24 @@ def _infer_missing_facets(enriched):
         enriched["title"] = " ".join(title_parts).title()
     elif generic_title and category and category not in generic_categories:
         subject = category
-        for tag in Model3D.normalize_tags(enriched.get("tags", [])):
-            if tag not in {"glb", "gltf", "fbx", "3d-model", "ai-generated", "static"}:
+        skip_title_tags = {
+            "glb", "gltf", "fbx", "3d-model", "ai-generated", "static", "stylized", "fantasy",
+            "storybook", "medieval", "painterly", "watercolor", "environment-prop", "decorative-prop",
+        }
+        preferred_subject_tags = {
+            "house", "cottage", "tower", "castle", "building", "lantern", "lamp", "flower", "flowers",
+            "bouquet", "tree", "character", "vehicle",
+        }
+        tags = Model3D.normalize_tags(enriched.get("tags", []))
+        for tag in tags:
+            if tag in preferred_subject_tags:
                 subject = tag
                 break
+        else:
+            for tag in tags:
+                if tag not in skip_title_tags:
+                    subject = tag
+                    break
         enriched["title"] = subject.replace("-", " ").title()
     return enriched
 
@@ -899,6 +933,8 @@ def _a2a_metadata(model, provider, api_key, schema, user_text):
         "text": (
             "You enrich 3D asset store records. Return concise JSON only. "
             "Tags should be lowercase marketplace/search tags, not sentences. "
+            "Do not use generator names, file formats, source pipeline labels, or generic tags like "
+            "pixal3d, generated, image-to-3d, ai-generated, glb, or 3d-model. "
             "Descriptions should help a human understand what the asset is and how it may be used.\n\n"
             + user_text
             + "\n\nJSON schema:\n"
@@ -1126,6 +1162,8 @@ def _ai_metadata(model, extra_context=None):
                     "content": (
                         "You enrich 3D asset store records. Return concise JSON only. "
                         "Tags should be lowercase marketplace/search tags, not sentences. "
+                        "Do not use generator names, file formats, source pipeline labels, or generic tags like "
+                        "pixal3d, generated, image-to-3d, ai-generated, glb, or 3d-model. "
                         "Descriptions should help a human understand what the asset is and how it may be used."
                     ),
                 },
@@ -1202,6 +1240,7 @@ def enrich_model(model, extra_context=None):
     if enriched is None:
         enriched = _heuristic_metadata(model)
         enriched["provider"] = "heuristic"
+    enriched["tags"] = _clean_enrichment_tags(enriched.get("tags", []))
     enriched = _infer_missing_facets(enriched)
     enriched["title"] = (enriched.get("title") or "").strip()
     enriched["asset_category"] = Model3D.normalize_category(enriched.get("asset_category"))
@@ -1210,7 +1249,7 @@ def enrich_model(model, extra_context=None):
     enriched["runtime_metadata"] = Model3D.normalize_runtime_metadata(
         enriched.get("runtime_metadata", _default_runtime_metadata(False))
     )
-    enriched["tags"] = Model3D.normalize_tags(enriched.get("tags", []))
+    enriched["tags"] = _clean_enrichment_tags(enriched.get("tags", []))
     enriched["description"] = (enriched.get("description") or "").strip()
     enriched["summary"] = (enriched.get("summary") or "").strip()
     enriched.setdefault("categories", [])
