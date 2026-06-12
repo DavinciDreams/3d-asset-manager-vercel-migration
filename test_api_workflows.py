@@ -604,6 +604,22 @@ def test_zai_mcp_reports_available_tools_when_no_image_tool():
     assert names == "list_models, chat"
 
 
+def test_zai_mcp_converts_thumbnail_to_png(monkeypatch):
+    from app import ai_enrichment
+    from PIL import Image
+
+    source = io.BytesIO()
+    Image.new("RGBA", (2, 2), (255, 0, 0, 255)).save(source, format="WEBP")
+
+    monkeypatch.delenv("AI_AUTOTAG_MCP_IMAGE_SUFFIX", raising=False)
+    converted, suffix = ai_enrichment._mcp_image_file_bytes(source.getvalue())
+
+    assert suffix == ".png"
+    with Image.open(io.BytesIO(converted)) as image:
+        assert image.format == "PNG"
+        assert image.size == (2, 2)
+
+
 def test_zai_mcp_records_missing_thumbnail(monkeypatch):
     from app import ai_enrichment
 
