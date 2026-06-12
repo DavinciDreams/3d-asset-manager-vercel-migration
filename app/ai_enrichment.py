@@ -3,8 +3,10 @@ import base64
 import json
 import os
 import re
+import socket
 import uuid
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from app.models import Model3D
@@ -17,6 +19,11 @@ ZAI_DEFAULT_MODEL = "glm-5.1"
 HYADES_A2A_BASE_URL = "https://hyades.gnostr.cloud/a2a"
 HYADES_OPENAI_BASE_URL = "https://hyades.gnostr.cloud/v1"
 HYADES_DEFAULT_MODEL = "holo"
+DEFAULT_USER_AGENT = "3d-asset-manager/1.0 (+https://github.com/DavinciDreams/3d-asset-manager-vercel-migration)"
+
+
+class AIProviderTransientError(RuntimeError):
+    """Raised for provider failures that may succeed on a lighter retry."""
 
 
 def _tokens(*parts):
@@ -274,20 +281,72 @@ def _a2a_image_part(model):
     }
 
 
-def _post_json(url, body, headers):
+def _compact_response_detail(detail):
+    detail = re.sub(r"<[^>]+>", " ", detail or "")
+    detail = re.sub(r"\s+", " ", detail).strip()
+    return detail[:500]
+
+
+def _provider_label(url, provider=None, transport=None):
+    parsed = urllib.parse.urlparse(url)
+    host = parsed.netloc or parsed.path or "unknown endpoint"
+    label = provider or "ai provider"
+    if transport:
+        label = f"{label}/{transport}"
+    return f"{label} at {host}"
+
+
+def _is_transient_provider_failure(status_code, detail):
+    if status_code in {502, 503, 504, 520, 522, 524}:
+        return True
+    lowered = (detail or "").lower()
+    return "origin web server returned an invalid or incomplete response" in lowered
+
+
+def _request_headers(headers):
+    merged = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": os.environ.get("AI_AUTOTAG_USER_AGENT", DEFAULT_USER_AGENT),
+    }
+    merged.update(headers or {})
+    return merged
+
+
+def _post_json(url, body, headers, provider=None, transport=None):
     request = urllib.request.Request(
         url,
         data=json.dumps(body).encode("utf-8"),
-        headers=headers,
+        headers=_request_headers(headers),
         method="POST",
     )
+    label = _provider_label(url, provider=provider, transport=transport)
     try:
         timeout = int(os.environ.get("AI_AUTOTAG_TIMEOUT", os.environ.get("OPENAI_AUTOTAG_TIMEOUT", "30")))
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
+            raw = response.read().decode("utf-8", errors="ignore")
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError as error:
+                detail = _compact_response_detail(raw)
+                raise RuntimeError(
+                    f"AI enrichment returned invalid JSON from {label} (HTTP {response.status}). "
+                    f"Response: {detail or 'empty response'}"
+                ) from error
     except urllib.error.HTTPError as error:
-        detail = error.read().decode("utf-8", errors="ignore")[:500]
-        raise RuntimeError(f"AI enrichment failed ({error.code}): {detail}") from error
+        detail = _compact_response_detail(error.read().decode("utf-8", errors="ignore"))
+        message = (
+            f"AI enrichment provider request failed for {label} "
+            f"(HTTP {error.code}). Response: {detail or error.reason or 'empty response'}"
+        )
+        if _is_transient_provider_failure(error.code, detail):
+            raise AIProviderTransientError(message) from error
+        raise RuntimeError(message) from error
+    except (urllib.error.URLError, TimeoutError, socket.timeout) as error:
+        reason = getattr(error, "reason", error)
+        raise AIProviderTransientError(
+            f"AI enrichment provider request failed for {label}: {reason}"
+        ) from error
 
 
 def _a2a_metadata(model, provider, api_key, schema, user_text):
@@ -331,6 +390,8 @@ def _a2a_metadata(model, provider, api_key, schema, user_text):
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         },
+        provider=provider,
+        transport="a2a",
     )
     output_text = _strip_json_fence(_extract_a2a_output(payload))
     if not output_text:
@@ -456,40 +517,63 @@ def _ai_metadata(model, extra_context=None):
     )
     if _transport(provider) == "a2a":
         return _a2a_metadata(model, provider, api_key, schema, user_text)
+    def build_body(content):
+        return {
+            "model": _model_name(provider),
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You enrich 3D asset store records. Return concise JSON only. "
+                        "Tags should be lowercase marketplace/search tags, not sentences. "
+                        "Descriptions should help a human understand what the asset is and how it may be used."
+                    ),
+                },
+                {"role": "user", "content": content},
+            ],
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "asset_enrichment",
+                    "strict": True,
+                    "schema": schema,
+                },
+            },
+        }
+
     content = user_text
     image = _image_part(model)
     if image:
         content = [{"type": "text", "text": user_text}, image]
-    body = {
-        "model": _model_name(provider),
-        "messages": [
+
+    body = build_body(content)
+    vision_fallback = False
+    try:
+        payload = _post_json(
+            _request_url(_base_url(provider)),
+            body,
             {
-                "role": "system",
-                "content": (
-                    "You enrich 3D asset store records. Return concise JSON only. "
-                    "Tags should be lowercase marketplace/search tags, not sentences. "
-                    "Descriptions should help a human understand what the asset is and how it may be used."
-                ),
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
             },
-            {"role": "user", "content": content},
-        ],
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "asset_enrichment",
-                "strict": True,
-                "schema": schema,
+            provider=provider,
+            transport="openai",
+        )
+    except AIProviderTransientError:
+        if not image or not _env_bool("AI_AUTOTAG_RETRY_TEXT_ONLY", True):
+            raise
+        vision_fallback = True
+        body = build_body(user_text)
+        payload = _post_json(
+            _request_url(_base_url(provider)),
+            body,
+            {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
             },
-        },
-    }
-    payload = _post_json(
-        _request_url(_base_url(provider)),
-        body,
-        {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-    )
+            provider=provider,
+            transport="openai-text",
+        )
 
     output_text = _strip_json_fence(_extract_chat_output(payload))
     if not output_text:
@@ -500,6 +584,7 @@ def _ai_metadata(model, extra_context=None):
     enriched["base_url"] = _base_url(provider)
     enriched["model"] = body["model"]
     enriched["response_id"] = payload.get("id")
+    enriched["vision_fallback"] = vision_fallback
     return enriched
 
 

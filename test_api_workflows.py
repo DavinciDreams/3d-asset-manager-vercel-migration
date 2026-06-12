@@ -134,18 +134,60 @@ def test_openapi_documents_workflow_and_bearer_auth():
     app = create_app()
     spec = app.test_client().get("/api/openapi.json").get_json()
     assert "bearerAuth" in spec["components"]["securitySchemes"]
+    assert "get" in spec["paths"]["/model/{model_id}"]
     assert "/model/{model_id}/ai/autotag" in spec["paths"]
     assert "/model/{model_id}/approval" in spec["paths"]
     assert "/bundles" in spec["paths"]
     props = spec["paths"]["/model/{model_id}/ai/autotag"]["post"]["requestBody"]["content"]["application/json"]["schema"]["properties"]
     assert "include_title" in props
+    assert "async" in props
     model_props = spec["components"]["schemas"]["ModelSummary"]["properties"]
     assert "asset_category" in model_props
     assert "asset_styles" in model_props
     assert "asset_types" in model_props
+    assert "ai_error" in model_props
     assert "content_hash" in model_props
     assert "runtime_metadata" in model_props
     assert "RuntimeMetadata" in spec["components"]["schemas"]
+
+
+def test_async_enrichment_queues_and_model_status_endpoint(monkeypatch):
+    from app import api as api_module
+
+    app = create_app()
+    client = app.test_client()
+    headers = {"Authorization": "Bearer test-token"}
+    glb = b"glTF" + b"\x01" * 64
+    upload = client.post("/api/upload", headers=headers, data={
+        "file": (io.BytesIO(glb), "async_crate.glb"),
+    }, content_type="multipart/form-data")
+    assert upload.status_code == 201, upload.get_json()
+    model_id = upload.get_json()["model"]["id"]
+    captured = {}
+
+    def fake_enqueue(model, data):
+        captured["model_id"] = model.id
+        captured["data"] = dict(data)
+        model.ai_status = "processing"
+        model.ai_error = None
+        model.save()
+
+    monkeypatch.setattr(api_module, "_enqueue_ai_enrichment", fake_enqueue)
+
+    queued = client.post(
+        f"/api/model/{model_id}/ai/autotag",
+        headers=headers,
+        json={"async": True, "overwrite": True, "context": {"source": "test"}},
+    )
+    assert queued.status_code == 202, queued.get_json()
+    assert queued.get_json()["status"] == "queued"
+    assert queued.get_json()["model"]["ai_status"] == "processing"
+    assert captured["model_id"] == model_id
+    assert captured["data"]["context"]["source"] == "test"
+
+    status = client.get(f"/api/model/{model_id}", headers=headers)
+    assert status.status_code == 200, status.get_json()
+    assert status.get_json()["model"]["ai_status"] == "processing"
 
 
 def test_hyades_a2a_enrichment_uses_holo_vision(monkeypatch):
@@ -235,6 +277,8 @@ def test_hyades_a2a_enrichment_uses_holo_vision(monkeypatch):
 
     assert captured["url"] == "https://hyades.gnostr.cloud/a2a"
     assert captured["headers"]["Authorization"] == "Bearer hyades-key"
+    assert captured["headers"]["Accept"] == "application/json"
+    assert captured["headers"]["User-agent"].startswith("3d-asset-manager/")
     assert captured["body"]["method"] == "message/send"
     assert captured["body"]["params"]["metadata"]["model"] == "holo"
     parts = captured["body"]["params"]["message"]["parts"]
@@ -244,3 +288,80 @@ def test_hyades_a2a_enrichment_uses_holo_vision(monkeypatch):
     assert enriched["transport"] == "a2a"
     assert enriched["asset_category"] == "building"
     assert enriched["runtime_metadata"]["light"]["enabled"] is True
+
+
+def test_openai_vision_cloudflare_error_retries_text_only(monkeypatch):
+    from app import ai_enrichment
+
+    calls = []
+    output = {
+        "title": "Stone Lantern",
+        "asset_category": "prop",
+        "asset_styles": ["fantasy"],
+        "asset_types": ["game-ready"],
+        "tags": ["lantern", "stone", "prop"],
+        "description": "A stone lantern prop for a fantasy scene.",
+        "summary": "Fantasy stone lantern.",
+        "categories": ["props"],
+        "quality_notes": [],
+    }
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps({
+                "id": "chatcmpl-1",
+                "choices": [{"message": {"content": json.dumps(output)}}],
+            }).encode("utf-8")
+
+    def fake_urlopen(request, timeout):
+        calls.append(json.loads(request.data.decode("utf-8")))
+        if len(calls) == 1:
+            raise ai_enrichment.urllib.error.HTTPError(
+                request.full_url,
+                520,
+                "Origin Error",
+                {},
+                io.BytesIO(b"<html>The origin web server returned an invalid or incomplete response</html>"),
+            )
+        return FakeResponse()
+
+    class FakeModel:
+        name = "stone_lantern"
+        description = ""
+        original_filename = "stone_lantern.glb"
+        file_format = "glb"
+        file_size = 1234
+        tags = []
+        asset_category = None
+        asset_styles = []
+        asset_types = []
+        approve_game_ready = False
+        approve_asset_store = False
+        conversion_status = None
+        thumbnail_file_id = "thumb"
+
+        def _read_stored_file(self, file_id):
+            assert file_id == "thumb"
+            return b"webp-thumbnail"
+
+    monkeypatch.setenv("AI_AUTOTAG_PROVIDER", "openai")
+    monkeypatch.setenv("AI_AUTOTAG_API_KEY", "openai-key")
+    monkeypatch.setenv("AI_AUTOTAG_USE_VISION", "1")
+    monkeypatch.setenv("AI_AUTOTAG_RETRY_TEXT_ONLY", "1")
+    monkeypatch.setattr(ai_enrichment.urllib.request, "urlopen", fake_urlopen)
+
+    enriched = ai_enrichment.enrich_model(FakeModel())
+
+    assert len(calls) == 2
+    assert isinstance(calls[0]["messages"][1]["content"], list)
+    assert isinstance(calls[1]["messages"][1]["content"], str)
+    assert enriched["vision_fallback"] is True
+    assert enriched["title"] == "Stone Lantern"
