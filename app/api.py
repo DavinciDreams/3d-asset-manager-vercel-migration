@@ -1730,6 +1730,9 @@ def _run_ai_enrichment(model, data=None):
         'response_id': enriched.get('response_id'),
         'vision_fallback': enriched.get('vision_fallback', False),
         'vision_mcp': enriched.get('vision_mcp', False),
+        'vision_mcp_attempted': enriched.get('vision_mcp_attempted', False),
+        'vision_mcp_analysis': enriched.get('vision_mcp_analysis'),
+        'vision_mcp_error': enriched.get('vision_mcp_error'),
         'updated_at': datetime.utcnow().isoformat(),
     }
     if overwrite:
