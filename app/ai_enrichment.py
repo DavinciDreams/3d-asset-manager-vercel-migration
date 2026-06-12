@@ -428,6 +428,13 @@ def _image_part(model):
     }
 
 
+def _openai_transport_supports_image_parts(provider):
+    configured = os.environ.get("AI_AUTOTAG_OPENAI_IMAGE_PARTS")
+    if configured is not None:
+        return _env_bool("AI_AUTOTAG_OPENAI_IMAGE_PARTS", True)
+    return provider != "zai"
+
+
 def _a2a_image_part(model):
     if not _env_bool("AI_AUTOTAG_USE_VISION", True):
         return None
@@ -925,7 +932,7 @@ def _ai_metadata(model, extra_context=None):
         }
 
     content = user_text
-    image = _image_part(model)
+    image = _image_part(model) if _openai_transport_supports_image_parts(provider) else None
     if image:
         content = [{"type": "text", "text": user_text}, image]
 

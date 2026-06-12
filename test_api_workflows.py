@@ -469,6 +469,89 @@ def test_zai_mcp_analysis_is_added_to_metadata_prompt(monkeypatch):
     assert enriched["vision_mcp_error"] is None
 
 
+def test_zai_openai_transport_does_not_send_image_parts(monkeypatch):
+    from app import ai_enrichment
+
+    class FakeModel:
+        name = "lantern"
+        description = ""
+        original_filename = "lantern.glb"
+        file_format = "glb"
+        file_size = 123
+        tags = []
+        asset_category = None
+        asset_styles = []
+        asset_types = []
+        runtime_metadata = {}
+        approve_game_ready = False
+        approve_asset_store = False
+        conversion_status = None
+        thumbnail_file_id = "thumb"
+
+        def _read_stored_file(self, file_id):
+            return b"webp-thumbnail"
+
+    captured = {}
+
+    def fake_post_json(url, body, headers, provider=None, transport=None):
+        captured["body"] = body
+        return {
+            "id": "zai-test",
+            "choices": [{
+                "message": {
+                    "content": json.dumps({
+                        "title": "Lantern Prop",
+                        "asset_category": "prop",
+                        "asset_styles": ["fantasy"],
+                        "asset_types": ["light-emitter"],
+                        "runtime_metadata": {
+                            "behaviors": ["light-emitter"],
+                            "light": {
+                                "enabled": True,
+                                "type": "point",
+                                "color": "#ffb35a",
+                                "intensity": 1.5,
+                                "range": 8,
+                                "cast_shadow": True,
+                                "attach_to": "",
+                                "offset": [0, 0.6, 0],
+                            },
+                        },
+                        "tags": ["lantern", "fantasy", "prop"],
+                        "description": "A fantasy lantern prop.",
+                        "summary": "Fantasy lantern.",
+                        "categories": ["props"],
+                        "quality_notes": [],
+                    })
+                }
+            }],
+        }
+
+    monkeypatch.setenv("AI_AUTOTAG_PROVIDER", "zai")
+    monkeypatch.setenv("AI_AUTOTAG_API_KEY", "zai-key")
+    monkeypatch.setenv("AI_AUTOTAG_BASE_URL", "https://api.z.ai/api/coding/paas/v4")
+    monkeypatch.setenv("AI_AUTOTAG_MODEL", "glm-5.1")
+    monkeypatch.setenv("AI_AUTOTAG_TRANSPORT", "openai")
+    monkeypatch.setattr(
+        ai_enrichment,
+        "_zai_mcp_visual_context_result",
+        lambda model, provider, api_key: {
+            "enabled": True,
+            "analysis": "Visible fantasy lantern with warm glow.",
+            "error": None,
+        },
+    )
+    monkeypatch.setattr(ai_enrichment, "_post_json", fake_post_json)
+
+    enriched = ai_enrichment._ai_metadata(FakeModel())
+
+    user_content = captured["body"]["messages"][1]["content"]
+    assert isinstance(user_content, str)
+    assert "image_url" not in user_content
+    assert "Visible fantasy lantern with warm glow." in user_content
+    assert enriched["vision_mcp"] is True
+
+
 def test_zai_mcp_records_missing_thumbnail(monkeypatch):
     from app import ai_enrichment
 
