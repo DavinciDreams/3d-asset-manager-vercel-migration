@@ -1,5 +1,6 @@
 """AI-assisted metadata enrichment for uploaded 3D assets."""
 import base64
+import io
 import json
 import os
 import re
@@ -463,6 +464,32 @@ def _thumbnail_bytes(model):
         return None
 
 
+def _mcp_image_file_bytes(stored):
+    suffix = os.environ.get("AI_AUTOTAG_MCP_IMAGE_SUFFIX", ".png")
+    if not suffix.startswith("."):
+        suffix = f".{suffix}"
+    if suffix.lower() in {".jpg", ".jpeg", ".png"}:
+        try:
+            from PIL import Image
+
+            out = io.BytesIO()
+            with Image.open(io.BytesIO(stored)) as image:
+                if suffix.lower() in {".jpg", ".jpeg"}:
+                    if image.mode in ("RGBA", "LA") or (image.mode == "P" and "transparency" in image.info):
+                        background = Image.new("RGB", image.size, (255, 255, 255))
+                        background.paste(image.convert("RGBA"), mask=image.convert("RGBA").split()[-1])
+                        image = background
+                    else:
+                        image = image.convert("RGB")
+                    image.save(out, format="JPEG", quality=90)
+                else:
+                    image.save(out, format="PNG")
+            return out.getvalue(), suffix
+        except Exception:
+            pass
+    return stored, suffix
+
+
 def _mcp_command():
     configured = os.environ.get("AI_AUTOTAG_MCP_COMMAND") or os.environ.get("ZAI_MCP_COMMAND")
     return shlex.split(configured or ZAI_MCP_COMMAND)
@@ -599,12 +626,12 @@ def _zai_mcp_visual_context_result(model, provider, api_key):
         "Describe this 3D asset preview for catalog metadata. Mention visible subject, style, materials, "
         "whether it appears rigged or animated if inferable, and whether it looks like a light emitter.",
     )
-    suffix = os.environ.get("AI_AUTOTAG_MCP_IMAGE_SUFFIX", ".webp")
+    image_bytes, suffix = _mcp_image_file_bytes(stored)
 
     temp_path = None
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as handle:
-            handle.write(stored)
+            handle.write(image_bytes)
             temp_path = handle.name
 
         env = os.environ.copy()
