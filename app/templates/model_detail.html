@@ -158,7 +158,7 @@
             </div>
         {% endif %}
 
-            <div class="mt-4 flex flex-col sm:flex-row gap-3">
+            <div class="mt-4 flex flex-col sm:flex-row sm:flex-wrap gap-3">
                 <a href="{{ url_for('api.download_model', model_id=model.id) }}"
                    class="flex-1 bg-green-600 text-white py-3 px-6 rounded-lg hover:bg-green-700 transition flex items-center justify-center">
                     <i class="fas fa-download mr-2"></i>
@@ -207,6 +207,10 @@
                 <button type="button" id="fix-eyes-toggle"
                         class="w-full sm:w-auto bg-purple-600 text-white py-3 px-6 rounded-lg hover:bg-purple-700 transition flex items-center justify-center">
                     <i class="fas fa-eye mr-2"></i>Fix Eyes
+                </button>
+                <button type="button" id="fix-mouth-toggle"
+                        class="w-full sm:w-auto bg-pink-600 text-white py-3 px-6 rounded-lg hover:bg-pink-700 transition flex items-center justify-center">
+                    <i class="fas fa-comment mr-2"></i>Fix Mouth
                 </button>
                 {% endif %}
             </div>
@@ -372,6 +376,103 @@
                     </div>
                 </div>
                 <p id="fix-eyes-status" class="mt-3 text-sm text-gray-600"></p>
+            </div>
+
+            <!-- Fix Mouth panel: parametric viseme mouth over the mouth hole.
+                 Floating overlay like Fix Eyes. Phase 1 = place + preview shapes;
+                 the phoneme driver comes in a later phase. -->
+            <div id="fix-mouth-panel"
+                 class="hidden fixed top-24 right-4 z-40 w-80 max-h-[80vh] overflow-y-auto border border-pink-200 bg-pink-50 rounded-lg p-4 shadow-2xl">
+                <div class="flex items-center justify-between mb-2">
+                    <h3 class="font-semibold text-pink-800"><i class="fas fa-comment mr-1"></i>Fix Mouth</h3>
+                    <button type="button" id="fix-mouth-close" class="text-gray-400 hover:text-gray-700" title="Close">
+                        <i class="fas fa-times"></i>
+                    </button>
+                </div>
+                <p class="text-sm text-gray-700 mb-3">
+                    <i class="fas fa-info-circle text-pink-500 mr-1"></i>
+                    Add a mouth over the hole. Click <b>Add Mouth</b>, drag it onto the mouth,
+                    tune size/position, and preview viseme shapes. (Phoneme animation comes next.)
+                </p>
+                <div id="fix-mouth-step1">
+                    <button type="button" id="fix-mouth-add"
+                            class="bg-pink-600 text-white px-4 py-2 rounded hover:bg-pink-700 transition">
+                        <i class="fas fa-plus mr-1"></i>Add Mouth
+                    </button>
+                </div>
+
+                <div id="fix-mouth-step2" class="hidden">
+                    <label class="block text-sm mb-3">
+                        <span class="text-gray-700 font-medium">Preview viseme</span>
+                        <select id="mouth-viseme"
+                                class="w-full border border-gray-300 rounded px-3 py-2 bg-white mt-1"></select>
+                    </label>
+
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+                        <label class="block">
+                            <span class="text-gray-700">Mouth size</span>
+                            <input type="range" id="mouth-size" min="0.1" max="2.5" step="0.01" value="1" class="w-full">
+                        </label>
+                        <label class="block">
+                            <span class="text-gray-700">Width vs height</span>
+                            <input type="range" id="mouth-aspect" min="0.5" max="2" step="0.01" value="1" class="w-full">
+                        </label>
+                        <label class="block">
+                            <span class="text-gray-700">Left / right</span>
+                            <input type="range" id="mouth-horiz" min="0" max="100" step="1" value="50" class="w-full">
+                        </label>
+                        <label class="block">
+                            <span class="text-gray-700">Height (up/down)</span>
+                            <input type="range" id="mouth-height" min="0" max="100" step="1" value="50" class="w-full">
+                        </label>
+                        <label class="block">
+                            <span class="text-gray-700">Depth (in/out)</span>
+                            <input type="range" id="mouth-depth" min="0" max="100" step="1" value="50" class="w-full">
+                        </label>
+                        <label class="block">
+                            <span class="text-gray-700">Tilt (up/down)</span>
+                            <input type="range" id="mouth-tilt" min="-45" max="45" step="1" value="0" class="w-full">
+                        </label>
+                        <label class="block">
+                            <span class="text-gray-700">Curve (convex)</span>
+                            <input type="range" id="mouth-curve" min="0" max="100" step="1" value="40" class="w-full">
+                        </label>
+                        <label class="block">
+                            <span class="text-gray-700">Lip color</span>
+                            <input type="color" id="mouth-lip" value="#a85d52" class="w-full h-9 rounded border border-gray-300">
+                        </label>
+                    </div>
+
+                    <div class="flex items-center gap-2 mt-3 text-sm">
+                        <button type="button" id="mouth-flip"
+                                class="px-3 py-1 rounded border border-pink-300 bg-white text-pink-700 hover:bg-pink-50">
+                            <i class="fas fa-arrows-rotate mr-1"></i>Flip facing
+                        </button>
+                        <span class="text-gray-500 text-xs">if the mouth faces the wrong way</span>
+                    </div>
+
+                    <label class="flex items-center mt-3 text-sm text-gray-700">
+                        <input type="checkbox" id="mouth-talk" checked
+                               class="h-4 w-4 text-pink-600 border-gray-300 rounded mr-2">
+                        Add a looping talk animation (bakes a glTF clip into the file)
+                    </label>
+
+                    <div class="flex flex-wrap gap-2 mt-4">
+                        <button type="button" id="fix-mouth-bake"
+                                class="bg-pink-700 text-white px-4 py-2 rounded hover:bg-pink-800 transition">
+                            <i class="fas fa-save mr-1"></i>Bake &amp; Save
+                        </button>
+                        <button type="button" id="fix-mouth-undo" disabled
+                                class="bg-white border border-gray-300 text-gray-700 px-4 py-2 rounded hover:bg-gray-50 transition disabled:opacity-40 disabled:cursor-not-allowed">
+                            <i class="fas fa-rotate-left mr-1"></i>Undo
+                        </button>
+                        <button type="button" id="fix-mouth-cancel"
+                                class="bg-gray-300 text-gray-800 px-4 py-2 rounded hover:bg-gray-400 transition">
+                            Cancel
+                        </button>
+                    </div>
+                </div>
+                <p id="fix-mouth-status" class="mt-3 text-sm text-gray-600"></p>
             </div>
             {% endif %}
         </div>
@@ -1322,7 +1423,12 @@ document.addEventListener('DOMContentLoaded', function() {
         bakeBtn.classList.add('opacity-70', 'cursor-not-allowed');
         setStatus('Baking eyes into the model…');
         try {
-            const blob = await e.exportGLB({ withBlink: blinkEl.checked });
+            // Use the shared exporter so a baked file includes BOTH eyes and the
+            // mouth (if one was added) — they share the single "fixed" variant.
+            const v = viewer();
+            const blob = (v && v.exportFixups)
+                ? await v.exportFixups({ withBlink: blinkEl.checked, withTalk: true })
+                : await e.exportGLB({ withBlink: blinkEl.checked });
             setStatus('Uploading fixed model (' + (blob.size / 1024 / 1024).toFixed(2) + ' MB)…');
             const fd = new FormData();
             fd.append('file', blob, 'fixed-eyes.glb');
@@ -1343,6 +1449,231 @@ document.addEventListener('DOMContentLoaded', function() {
             revealFixedEyes(data.variant && data.variant.size);
             // Swap the viewer to the freshly baked variant so you see the result.
             e.remove();
+            loadDetailModel(MODEL_ID, 'fixed_eyes');
+            step2.classList.add('hidden');
+            step1.classList.remove('hidden');
+        } catch (err) {
+            setStatus(err.message || 'Bake failed.', true);
+        } finally {
+            bakeBtn.disabled = false;
+            bakeBtn.classList.remove('opacity-70', 'cursor-not-allowed');
+        }
+    });
+})();
+
+// --- Fix Mouth: add a parametric viseme mouth, preview shapes, bake ----------
+(function () {
+    const toggle = document.getElementById('fix-mouth-toggle');
+    const panel = document.getElementById('fix-mouth-panel');
+    if (!toggle || !panel) return;  // not owner / not a GLB
+
+    const MODEL_ID = '{{ model.id }}';
+    const step1 = document.getElementById('fix-mouth-step1');
+    const step2 = document.getElementById('fix-mouth-step2');
+    const statusEl = document.getElementById('fix-mouth-status');
+    const addBtn = document.getElementById('fix-mouth-add');
+    const bakeBtn = document.getElementById('fix-mouth-bake');
+    const cancelBtn = document.getElementById('fix-mouth-cancel');
+    const undoBtn = document.getElementById('fix-mouth-undo');
+    const closeBtn = document.getElementById('fix-mouth-close');
+    const visemeEl = document.getElementById('mouth-viseme');
+    const sizeEl = document.getElementById('mouth-size');
+    const aspectEl = document.getElementById('mouth-aspect');
+    const horizEl = document.getElementById('mouth-horiz');
+    const heightEl = document.getElementById('mouth-height');
+    const depthEl = document.getElementById('mouth-depth');
+    const tiltEl = document.getElementById('mouth-tilt');
+    const curveEl = document.getElementById('mouth-curve');
+    const lipEl = document.getElementById('mouth-lip');
+    const flipBtn = document.getElementById('mouth-flip');
+    const talkEl = document.getElementById('mouth-talk');
+
+    function viewer() {
+        const c = document.getElementById('viewer-detail-' + MODEL_ID);
+        return c && c.__threeViewer ? c.__threeViewer : null;
+    }
+    function mouth() {
+        const v = viewer();
+        return v && v.mouth ? v.mouth : null;
+    }
+    function setStatus(msg, isError) {
+        statusEl.textContent = msg || '';
+        statusEl.className = 'mt-3 text-sm ' + (isError ? 'text-red-600' : 'text-gray-600');
+    }
+    function refreshUndo() {
+        const m = mouth();
+        if (undoBtn) undoBtn.disabled = !(m && m.active && m.canUndo);
+    }
+    let flipped = true;  // default faces -Z like the eyes
+
+    toggle.addEventListener('click', () => {
+        if (!viewer()) { loadDetailModel(MODEL_ID, 'original'); }
+        panel.classList.toggle('hidden');
+    });
+
+    addBtn.addEventListener('click', () => {
+        const m = mouth();
+        if (!m) { setStatus('3D viewer is still loading — try again in a moment.', true); return; }
+        m.add({ lip: lipEl.value });
+        // Default to facing the model's front (-Z) like the eyes.
+        flipped = true; m.setLook(180, 0);
+        // Populate the viseme dropdown.
+        visemeEl.replaceChildren();
+        m.visemes.forEach(({ key, label }) => {
+            const opt = document.createElement('option');
+            opt.value = key; opt.textContent = label;
+            visemeEl.appendChild(opt);
+        });
+        visemeEl.value = m.viseme;
+        // Capture starting center for height/depth slider math.
+        const g = m.group;
+        window.__mouthBaseY = g ? g.position.y : 0;
+        window.__mouthBaseZ = g ? g.position.z : 0;
+        window.__mouthBaseX = g ? g.position.x : 0;
+        // Span for position sliders: roughly the model's vertical extent so the
+        // nudge range covers the face. Derived from the front offset (z ~ half
+        // depth); fall back to 1.
+        window.__mouthBaseSpan = g ? Math.max(Math.abs(g.position.z) * 2, 0.5) : 1;
+        sizeEl.value = 1; aspectEl.value = 1;
+        horizEl.value = 50; heightEl.value = 50; depthEl.value = 50;
+        tiltEl.value = 0; curveEl.value = 40;
+        step1.classList.add('hidden');
+        step2.classList.remove('hidden');
+        setStatus('Drag the mouth onto the hole, then tune. Try the viseme dropdown.');
+        wireDrag();
+        refreshUndo();
+        // Start the talk preview so you can see it animate immediately.
+        talkEl.checked = true;
+        m.previewTalk(true);
+    });
+
+    function wireDrag() {
+        const v = viewer();
+        if (!v || !v.canvas || v.__mouthDragWired) return;
+        const canvas = v.canvas;
+        v.__mouthDragWired = true;
+        const toNDC = (ev) => {
+            const r = canvas.getBoundingClientRect();
+            return [((ev.clientX - r.left) / r.width) * 2 - 1,
+                    -((ev.clientY - r.top) / r.height) * 2 + 1];
+        };
+        canvas.addEventListener('pointerdown', (ev) => {
+            const m = mouth(); if (!m || !m.active) return;
+            const [x, y] = toNDC(ev);
+            if (m.beginDrag(x, y)) { canvas.setPointerCapture(ev.pointerId); refreshUndo(); }
+        });
+        canvas.addEventListener('pointermove', (ev) => {
+            const m = mouth(); if (!m || !m.active) return;
+            const [x, y] = toNDC(ev);
+            m.drag(x, y);
+        });
+        canvas.addEventListener('pointerup', (ev) => {
+            const m = mouth(); if (m) m.endDrag();
+            try { canvas.releasePointerCapture(ev.pointerId); } catch (_) {}
+        });
+    }
+
+    visemeEl.addEventListener('change', () => {
+        const m = mouth(); if (!m) return;
+        // Manually previewing a viseme stops the talk loop so you can see the
+        // single shape; re-check Talk to resume.
+        if (talkEl.checked) { talkEl.checked = false; m.previewTalk(false); }
+        m.pushHistory(); m.setViseme(visemeEl.value); refreshUndo();
+    });
+    talkEl.addEventListener('change', () => {
+        const m = mouth(); if (m) m.previewTalk(talkEl.checked);
+    });
+    function applySize() {
+        const m = mouth(); if (!m) return;
+        // size * aspect handled in the editor as a single scalar for now; aspect
+        // tweaks width by scaling the group X. Keep it simple: scale uniformly by
+        // size, then stretch X by aspect via group.scale.
+        m.setSizeScale(parseFloat(sizeEl.value));
+        const g = m.group;
+        if (g) g.scale.x = parseFloat(sizeEl.value) * parseFloat(aspectEl.value);
+    }
+    [sizeEl, aspectEl, horizEl, heightEl, depthEl, tiltEl, curveEl].forEach((el) => {
+        el.addEventListener('pointerdown', () => { const m = mouth(); if (m) { m.pushHistory(); refreshUndo(); } });
+    });
+    sizeEl.addEventListener('input', applySize);
+    aspectEl.addEventListener('input', applySize);
+    horizEl.addEventListener('input', () => {
+        const m = mouth(); if (!m) return;
+        const span = Math.max(0.0001, (window.__mouthBaseSpan || 1));
+        m.setHoriz((window.__mouthBaseX || 0) + ((horizEl.value - 50) / 50) * span * 0.3);
+    });
+    heightEl.addEventListener('input', () => {
+        const m = mouth(); if (!m) return;
+        const span = Math.max(0.0001, (window.__mouthBaseSpan || 1));
+        m.setVertical((window.__mouthBaseY || 0) + ((heightEl.value - 50) / 50) * span * 0.3);
+    });
+    depthEl.addEventListener('input', () => {
+        const m = mouth(); if (!m) return;
+        const span = Math.max(0.0001, (window.__mouthBaseSpan || 1));
+        m.setDepth((window.__mouthBaseZ || 0) + ((depthEl.value - 50) / 50) * span * 0.3);
+    });
+    tiltEl.addEventListener('input', () => {
+        const m = mouth(); if (m) m.setTilt(parseFloat(tiltEl.value));
+    });
+    curveEl.addEventListener('input', () => {
+        const m = mouth(); if (m) m.setCurve(parseFloat(curveEl.value) / 100);
+    });
+    // setCurve rebuilds the lip/cavity geometry, which detaches the live talk
+    // mixer from the old meshes. Re-arm the talk preview once on release so it
+    // rebinds to the new geometry (debounced to slider release, not per-pixel).
+    curveEl.addEventListener('change', () => {
+        const m = mouth(); if (m && talkEl.checked) m.previewTalk(true);
+    });
+    lipEl.addEventListener('input', () => {
+        const m = mouth(); if (m) m.setColors({ lip: lipEl.value });
+    });
+    flipBtn.addEventListener('click', () => {
+        const m = mouth(); if (!m) return;
+        m.pushHistory();
+        flipped = !flipped;
+        m.setLook(flipped ? 180 : 0, 0);
+        refreshUndo();
+    });
+
+    function closeEditor() {
+        const m = mouth(); if (m) m.remove();
+        step2.classList.add('hidden');
+        step1.classList.remove('hidden');
+        panel.classList.add('hidden');
+        setStatus('');
+    }
+    cancelBtn.addEventListener('click', closeEditor);
+    if (closeBtn) closeBtn.addEventListener('click', closeEditor);
+
+    undoBtn.addEventListener('click', () => {
+        const m = mouth(); if (m && m.canUndo) { m.undo(); visemeEl.value = m.viseme; refreshUndo(); }
+    });
+
+    bakeBtn.addEventListener('click', async () => {
+        const v = viewer();
+        const m = mouth();
+        if (!v || !m || !m.active) { setStatus('Add a mouth first.', true); return; }
+        bakeBtn.disabled = true;
+        bakeBtn.classList.add('opacity-70', 'cursor-not-allowed');
+        setStatus('Baking mouth into the model…');
+        try {
+            // Shared exporter bakes model + eyes (if any) + mouth into one GLB.
+            // prepForBake() inside sets the mouth's mid-open base + neutral scale.
+            const blob = await v.exportFixups({ withBlink: true, withTalk: talkEl.checked });
+            setStatus('Uploading fixed model (' + (blob.size / 1024 / 1024).toFixed(2) + ' MB)…');
+            const fd = new FormData();
+            fd.append('file', blob, 'fixed.glb');
+            fd.append('blink', '1');
+            const resp = await fetch('/api/model/' + MODEL_ID + '/fixed-eyes', { method: 'POST', body: fd });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok || !data.success) {
+                throw new Error(data.error || ('Upload failed (HTTP ' + resp.status + ').'));
+            }
+            setStatus(data.reoptimizing
+                ? 'Done! Fixed version saved (now includes the mouth). Optimizing the game version now — it’ll update shortly.'
+                : 'Done! Fixed version saved (now includes the mouth).');
+            if (typeof revealFixedEyes === 'function') revealFixedEyes(data.variant && data.variant.size);
+            m.remove();
             loadDetailModel(MODEL_ID, 'fixed_eyes');
             step2.classList.add('hidden');
             step1.classList.remove('hidden');

@@ -80,6 +80,333 @@
             return mesh;
         }
 
+        // --- Parametric viseme mouth -----------------------------------------
+        // Viseme table: each entry shapes the mouth OPENING as fractions of the
+        // mouth's base size — w (width), h (height), round (0=wide/flat .. 1=O),
+        // and lipPush (how far lips purse forward, for O/U/F). These are the
+        // standard ~visemes used by lip-sync (Oculus/Preston-Blair-ish).
+        const VISEMES = {
+            sil:  { label: 'Silence/closed', w: 0.55, h: 0.02, round: 0.0, lip: 0.0 },
+            PP:   { label: 'P B M (closed)', w: 0.55, h: 0.02, round: 0.0, lip: 0.0 },
+            FF:   { label: 'F V',            w: 0.55, h: 0.10, round: 0.0, lip: 0.2 },
+            TH:   { label: 'TH',             w: 0.55, h: 0.18, round: 0.0, lip: 0.1 },
+            DD:   { label: 'D T N',          w: 0.50, h: 0.28, round: 0.1, lip: 0.0 },
+            kk:   { label: 'K G',            w: 0.50, h: 0.30, round: 0.1, lip: 0.0 },
+            CH:   { label: 'CH J SH',        w: 0.42, h: 0.26, round: 0.5, lip: 0.4 },
+            SS:   { label: 'S Z',            w: 0.55, h: 0.12, round: 0.0, lip: 0.0 },
+            nn:   { label: 'L N',            w: 0.48, h: 0.30, round: 0.1, lip: 0.0 },
+            RR:   { label: 'R',              w: 0.42, h: 0.28, round: 0.5, lip: 0.5 },
+            aa:   { label: 'AH (open)',      w: 0.56, h: 0.62, round: 0.2, lip: 0.0 },
+            E:    { label: 'EH',             w: 0.58, h: 0.40, round: 0.0, lip: 0.0 },
+            I:    { label: 'EE (wide)',      w: 0.62, h: 0.26, round: 0.0, lip: 0.0 },
+            O:    { label: 'OH (round)',     w: 0.40, h: 0.48, round: 0.9, lip: 0.6 },
+            U:    { label: 'OO (pursed)',    w: 0.30, h: 0.32, round: 1.0, lip: 0.9 },
+        };
+
+        // Build the mouth opening's outline (an ellipse blended toward a rounder
+        // shape) as a closed loop of N points in the XY plane, given a viseme.
+        function _mouthOutline(THREE, baseW, baseH, vis, segments) {
+            const pts = [];
+            const halfW = baseW * vis.w * 0.5;
+            const halfH = baseH * vis.h * 0.5;
+            for (let i = 0; i < segments; i++) {
+                const a = (i / segments) * Math.PI * 2;
+                // round=0 → ellipse; round=1 → superellipse-ish circle. Blend the
+                // horizontal squash so high round pulls the corners inward (O/U).
+                const cx = Math.cos(a), cy = Math.sin(a);
+                const cornerPull = 1 - vis.round * 0.45 * Math.abs(cx);
+                pts.push(new THREE.Vector2(cx * halfW * cornerPull, cy * halfH));
+            }
+            return pts;
+        }
+
+        // Build a full mouth patch for a viseme: lip rim + dark cavity + teeth +
+        // tongue, all parented to a returned Group facing +Z (caller orients it).
+        // Painted via vertex colors so the GLB stays texture-free.
+        function buildMouthGroup(THREE, opts = {}) {
+            const baseW = opts.width || 1;       // overall mouth width (world units)
+            const baseH = opts.height || (baseW * 0.6);
+            const lipColor = new THREE.Color(opts.lip || '#a85d52');
+            const cavityColor = new THREE.Color(opts.cavity || '#241015');
+            const teethColor = new THREE.Color(opts.teeth || '#f3efe7');
+            const tongueColor = new THREE.Color(opts.tongue || '#b5675f');
+            const segments = 48;
+            const vis = opts.viseme || VISEMES.sil;
+
+            const group = new THREE.Group();
+            group.name = opts.name || 'FixedMouth';
+
+            const flatMat = (color, side = THREE.FrontSide) => new THREE.MeshStandardMaterial({
+                color, roughness: 0.6, metalness: 0.0, side,
+            });
+
+            // Tube cross-section radius (lip thickness) relative to mouth size.
+            const lipR = Math.min(baseW, baseH) * 0.12;
+            // The cavity/teeth/tongue sit just BEHIND the lip plane (z=0), tucked
+            // right behind the lips. Kept shallow (0.6×lipR) so the teeth/tongue
+            // read as right behind the lips, not deep in the head.
+            const backZ = -lipR * 0.6;
+
+            // Convexity: keep the mouth OPENING on the face plane (z≈0) and curve
+            // the OUTER edges BACKWARD (−Z) into the head, so the lip rim tucks
+            // behind the surrounding mesh instead of the whole patch popping
+            // forward off the face. domeAmt 0 = flat; ~0.5 = strong wrap-back.
+            let domeAmt = opts.curve != null ? opts.curve : 0.4;
+            const domeZ = (x, y) => {
+                // Anisotropic dome: faces curve away much harder HORIZONTALLY
+                // (cheeks) than vertically, and the corners are where the real
+                // lips poke through. Weight x recession ~2.2× the y recession so
+                // the corners tuck back aggressively while top/bottom stay near
+                // the face plane.
+                const nx = x / (baseW * 0.6 || 1);
+                const ny = y / (baseH * 0.7 || 1);
+                const recede = (nx * nx) * 2.2 + (ny * ny) * 0.8;
+                return -domeAmt * baseW * 1.4 * Math.min(recede, 2.5);
+            };
+
+            // 1) Dark cavity: a filled ellipse right behind the lips. REBUILT per
+            //    viseme to exactly match the current opening, so it can never be
+            //    taller/wider than the hole — fully hidden when the lips close.
+            const cavity = new THREE.Mesh(new THREE.BufferGeometry(), flatMat(cavityColor, THREE.DoubleSide));
+            cavity.position.z = backZ;
+            cavity.name = group.name + 'Cavity';
+            group.add(cavity);
+
+            // 2) Teeth: thin light strip at the top of the opening (rebuilt too).
+            const teeth = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), flatMat(teethColor, THREE.DoubleSide));
+            teeth.name = group.name + 'Teeth';
+            group.add(teeth);
+
+            // 3) Tongue: small pink plane at the bottom of the opening (rebuilt).
+            const tongue = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), flatMat(tongueColor, THREE.DoubleSide));
+            tongue.name = group.name + 'Tongue';
+            group.add(tongue);
+
+            // 4) Lips: a TUBE swept along the opening outline (rounded upper +
+            //    lower lips with real thickness). The tube sits on the opening
+            //    edge at z=0 so it reads as a 3D lip rim.
+            const lip = new THREE.Mesh(new THREE.BufferGeometry(), flatMat(lipColor, THREE.DoubleSide));
+            lip.name = group.name + 'Lip';
+            group.add(lip);
+
+            // Per-point lip thickness around the loop, so the lips aren't a
+            // uniform "hot dog" tube. Angle a: 0=right corner, π/2=top, π=left
+            // corner, 3π/2=bottom. Thin at the corners, fuller at top & bottom,
+            // with the BOTTOM lip a touch fuller than the top (like real lips).
+            const lipRadiusAt = (a) => {
+                const top = Math.max(0, Math.sin(a));      // 1 at top, 0 at sides/bottom
+                const bot = Math.max(0, -Math.sin(a));     // 1 at bottom
+                const corner = Math.abs(Math.cos(a));      // 1 at corners
+                // Keep the corners reasonably THICK (small boost, not a reduction)
+                // so the upper & lower lip tubes meet and seal the commissures —
+                // otherwise a hairline of dark cavity shows through at the corners.
+                const fullness = 0.7 + 0.9 * top + 1.15 * bot + 0.25 * corner;
+                return lipR * Math.max(0.5, fullness);
+            };
+
+            const buildLipTube = (v) => {
+                const outline = _mouthOutline(THREE, baseW, baseH, v, segments);
+                // Dome z sampled from a FIXED face ring (widest viseme) so every
+                // viseme's lips sit on the same face curve at the same depth.
+                const refRing = _mouthOutline(THREE, baseW, baseH, VISEMES.aa, segments);
+                const path = outline.map((p, i) =>
+                    new THREE.Vector3(p.x, p.y, domeZ(refRing[i].x, refRing[i].y)));
+
+                // Manual swept tube with a VARIABLE cross-section radius so the
+                // lips have realistic fullness instead of a constant tube.
+                const radial = 12;
+                const N = path.length;
+                const positions = [];
+                const indices = [];
+                const up = new THREE.Vector3(0, 0, 1);
+                for (let i = 0; i < N; i++) {
+                    const cur = path[i];
+                    const nxt = path[(i + 1) % N];
+                    const prv = path[(i - 1 + N) % N];
+                    const tangent = new THREE.Vector3().subVectors(nxt, prv).normalize();
+                    // Frame: normal points outward in XY-ish; binormal via tangent.
+                    let normal = new THREE.Vector3().crossVectors(tangent, up);
+                    if (normal.lengthSq() < 1e-6) normal.set(1, 0, 0);
+                    normal.normalize();
+                    const binormal = new THREE.Vector3().crossVectors(tangent, normal).normalize();
+                    const a = (i / N) * Math.PI * 2;
+                    const rad = lipRadiusAt(a);
+                    for (let j = 0; j < radial; j++) {
+                        const th = (j / radial) * Math.PI * 2;
+                        const off = new THREE.Vector3()
+                            .addScaledVector(normal, Math.cos(th) * rad)
+                            .addScaledVector(binormal, Math.sin(th) * rad);
+                        positions.push(cur.x + off.x, cur.y + off.y, cur.z + off.z);
+                    }
+                }
+                for (let i = 0; i < N; i++) {
+                    for (let j = 0; j < radial; j++) {
+                        const a0 = i * radial + j;
+                        const a1 = i * radial + ((j + 1) % radial);
+                        const b0 = ((i + 1) % N) * radial + j;
+                        const b1 = ((i + 1) % N) * radial + ((j + 1) % radial);
+                        indices.push(a0, b0, a1, a1, b0, b1);
+                    }
+                }
+                const g = new THREE.BufferGeometry();
+                g.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+                g.setIndex(indices);
+                g.computeVertexNormals();
+                return g;
+            };
+
+            // Apply a viseme: rebuild the lip tube AND the back layer to the new
+            // opening size. The cavity/teeth/tongue are inset slightly inside the
+            // tube's inner edge so they sit fully behind the lips at every viseme
+            // (and vanish to a slit when closed).
+            const setViseme = (v) => {
+                const oldLip = lip.geometry; lip.geometry = buildLipTube(v); if (oldLip) oldLip.dispose();
+
+                // Opening half-extents for this viseme (for teeth/tongue sizing).
+                const halfW = Math.max(baseW * v.w * 0.5 - lipR, 0.0001);
+                const halfH = Math.max(baseH * v.h * 0.5 - lipR, 0.0001);
+
+                // Cavity: a LENS / eye shape (pointed at both ends) that pinches to
+                // zero well before the mouth corners, so the dark opening never
+                // reaches the thin-lipped commissures where the gaps appeared.
+                // x sweeps corner→corner; the lens height profile sqrt(1-x²)
+                // tapers smoothly to points at the ends. Width pulled in to 0.8.
+                const cw = halfW * 0.62;
+                const ch = halfH * 1.0;
+                const half = Math.floor(segments / 2);
+                const top = [], bot = [];
+                for (let i = 0; i <= half; i++) {
+                    const u = (i / half) * 2 - 1;           // -1 → 1 across the width
+                    const x = u * cw;
+                    const prof = Math.sqrt(Math.max(0, 1 - u * u));  // lens taper
+                    top.push(new THREE.Vector2(x, prof * ch));
+                    bot.push(new THREE.Vector2(x, -prof * ch));
+                }
+                // Closed loop: top edge left→right, then bottom edge right→left.
+                const pts = top.concat(bot.reverse());
+                const oldCav = cavity.geometry;
+                cavity.geometry = new THREE.ShapeGeometry(new THREE.Shape(pts), segments);
+                if (oldCav) oldCav.dispose();
+                // Sit the cavity behind the domed center so the bulging lips hide
+                // its rim. backZ is relative to the dome's forward center height.
+                const centerDome = domeZ(0, 0);
+                cavity.position.z = centerDome + backZ;
+
+                // Teeth: a strip across the top portion of the opening, clipped to
+                // the opening so it's hidden when closed.
+                teeth.scale.set(halfW * 1.6, halfH * 0.5, 1);
+                teeth.position.set(0, halfH * 0.45, centerDome + backZ + 0.0005);
+                teeth.visible = halfH > lipR * 0.6;  // hide entirely when nearly shut
+
+                // Tongue: a small patch at the bottom of the opening.
+                tongue.scale.set(halfW * 1.1, halfH * 0.5, 1);
+                tongue.position.set(0, -halfH * 0.5, centerDome + backZ + 0.0008);
+                tongue.visible = halfH > lipR * 0.6;
+
+                group.userData.lipPush = v.lip || 0;
+                group.userData.lastViseme = v;
+            };
+            setViseme(vis);
+
+            // Adjust convexity live: store the amount and rebuild current viseme.
+            const setCurve = (amt) => {
+                domeAmt = Math.max(0, amt);
+                setViseme(group.userData.lastViseme || vis);
+                buildMorphTargets();  // morph deltas depend on the dome → rebuild
+            };
+
+            // --- Morph targets for baked talk animation ----------------------
+            // The lip + cavity are rebuilt to a BASE (closed) shape, then each
+            // talk viseme is stored as a position-delta morph target. A baked
+            // clip animates morphTargetInfluences so the mouth opens/closes with
+            // the lips keeping their thickness (the gap opens, not the whole
+            // mouth scaling). Proven to export via GLTFExporter (targets+weights).
+            const TALK_VISEMES = ['sil', 'aa', 'I', 'O', 'E'];  // closed + a few opens
+            const buildCavityGeoPositions = (v) => {
+                // Mirror setViseme's cavity lens, returning a flat positions array
+                // at a FIXED vertex count so morphs line up.
+                const halfW = Math.max(baseW * v.w * 0.5 - lipR, 0.0001);
+                const halfH = Math.max(baseH * v.h * 0.5 - lipR, 0.0001);
+                const cw = halfW * 0.62, ch = halfH;
+                const half = Math.floor(segments / 2);
+                const top = [], bot = [];
+                for (let i = 0; i <= half; i++) {
+                    const u = (i / half) * 2 - 1;
+                    const x = u * cw, prof = Math.sqrt(Math.max(0, 1 - u * u));
+                    top.push(new THREE.Vector2(x, prof * ch));
+                    bot.push(new THREE.Vector2(x, -prof * ch));
+                }
+                return top.concat(bot.reverse());
+            };
+
+            // Build morph targets on the lip (and cavity) for the talk visemes,
+            // with the BASE = closed (sil). Safe to call repeatedly.
+            const buildMorphTargets = () => {
+                // Base lip geometry = closed shape; this is the rest pose.
+                const baseLipGeo = buildLipTube(VISEMES.sil);
+                const oldLip = lip.geometry; lip.geometry = baseLipGeo; if (oldLip && oldLip !== baseLipGeo) oldLip.dispose();
+                const basePos = baseLipGeo.attributes.position.array;
+                const lipMorphs = [];
+                TALK_VISEMES.forEach((key) => {
+                    if (key === 'sil') return;  // base, no morph
+                    const g = buildLipTube(VISEMES[key]);
+                    const p = g.attributes.position.array;
+                    const delta = new Float32Array(p.length);
+                    for (let i = 0; i < p.length; i++) delta[i] = p[i] - basePos[i];
+                    const attr = new THREE.Float32BufferAttribute(delta, 3);
+                    attr.name = key;
+                    lipMorphs.push(attr);
+                    g.dispose();
+                });
+                lip.geometry.morphAttributes.position = lipMorphs;
+                lip.geometry.morphTargetsRelative = true;
+                lip.updateMorphTargets();
+
+                // Cavity morphs (same fixed lens vertex count).
+                const baseCavPts = buildCavityGeoPositions(VISEMES.sil);
+                const baseCavGeo = new THREE.ShapeGeometry(new THREE.Shape(baseCavPts), segments);
+                const oldCav = cavity.geometry; cavity.geometry = baseCavGeo; if (oldCav && oldCav !== baseCavGeo) oldCav.dispose();
+                const baseCavPos = baseCavGeo.attributes.position.array;
+                const cavMorphs = [];
+                TALK_VISEMES.forEach((key) => {
+                    if (key === 'sil') return;
+                    const pts = buildCavityGeoPositions(VISEMES[key]);
+                    const g = new THREE.ShapeGeometry(new THREE.Shape(pts), segments);
+                    const p = g.attributes.position.array;
+                    // Guard: ShapeGeometry vertex count must match the base.
+                    if (p.length === baseCavPos.length) {
+                        const delta = new Float32Array(p.length);
+                        for (let i = 0; i < p.length; i++) delta[i] = p[i] - baseCavPos[i];
+                        const attr = new THREE.Float32BufferAttribute(delta, 3);
+                        attr.name = key;
+                        cavMorphs.push(attr);
+                    }
+                    g.dispose();
+                });
+                if (cavMorphs.length === lipMorphs.length) {
+                    cavity.geometry.morphAttributes.position = cavMorphs;
+                    cavity.geometry.morphTargetsRelative = true;
+                    cavity.updateMorphTargets();
+                }
+                // Teeth/tongue sit at a fixed mid-open size behind the lips.
+                const midH = Math.max(baseH * VISEMES.aa.h * 0.5 - lipR, 0.0001);
+                const midW = Math.max(baseW * VISEMES.aa.w * 0.5 - lipR, 0.0001);
+                const cz = domeZ(0, 0) + backZ;
+                teeth.scale.set(midW * 1.2, midH * 0.5, 1);
+                teeth.position.set(0, midH * 0.45, cz + 0.0005); teeth.visible = true;
+                tongue.scale.set(midW * 0.9, midH * 0.5, 1);
+                tongue.position.set(0, -midH * 0.5, cz + 0.0008); tongue.visible = true;
+                group.userData.talkTargets = TALK_VISEMES.filter((k) => k !== 'sil');
+            };
+
+            group.userData.setViseme = setViseme;
+            group.userData.setCurve = setCurve;
+            group.userData.buildMorphTargets = buildMorphTargets;
+            group.userData.parts = { cavity, teeth, tongue, lip };
+            group.userData.base = { w: baseW, h: baseH };
+            return group;
+        }
+
         function frameObject(camera, controls, object, width, height, padding) {
             const box = new THREE.Box3().setFromObject(object);
             if (box.isEmpty()) return;
@@ -221,6 +548,8 @@
                 // so it never interferes with the model's own animation mixer.
                 let eyeMixer = null;
                 let eyeBlinkAction = null;
+                // And a separate mixer for the live mouth "talk" preview.
+                let mouthMixer = null;
 
                 const resize = () => {
                     if (disposed) return;
@@ -294,6 +623,7 @@
                     const delta = clock.getDelta();
                     if (mixer && !animPaused) mixer.update(delta);
                     if (eyeMixer) eyeMixer.update(delta);
+                    if (mouthMixer) mouthMixer.update(delta);
                     controls.update();
                     renderer.render(scene, camera);
                     animationId = requestAnimationFrame(animate);
@@ -451,6 +781,8 @@
                             },
 
                             get baseRadius() { return baseRadius; },
+                            // The eyes' THREE.Group (for the shared exporter).
+                            get group() { return group; },
                             // Set the SELECTED eye's size as a multiplier of the
                             // default radius (1 == default). Both eyes start equal;
                             // selecting + sliding lets you tune one if needed.
@@ -754,6 +1086,298 @@
                         };
                         return api2;
                     })(),
+
+                    // --- Fix-Mouth editor ------------------------------------
+                    // Parallels api.eyes: drops a parametric viseme mouth over the
+                    // mouth hole, lets the owner place/size/recolor it and preview
+                    // each viseme shape. Driver (clips/lip-sync) comes later — for
+                    // now setViseme() shows any shape, and the shapes/morph are
+                    // what the future driver will animate.
+                    mouth: (() => {
+                        let mGroup = null;       // wrapper (position + size)
+                        let mouthObj = null;     // the buildMouthGroup() result
+                        let raycaster = null;
+                        let dragging = false;
+                        let currentViseme = 'sil';
+                        let wasAutoRotating = false;
+                        const mBox = new THREE.Box3();
+                        const mSize = new THREE.Vector3();
+                        const mCenter = new THREE.Vector3();
+                        const mHistory = [];
+
+                        const refreshBounds = () => {
+                            if (!model) return;
+                            mBox.setFromObject(model);
+                            mBox.getSize(mSize);
+                            mBox.getCenter(mCenter);
+                        };
+
+                        const m = {
+                            get active() { return mGroup != null; },
+                            get visemes() {
+                                return Object.keys(VISEMES).map((k) => ({ key: k, label: VISEMES[k].label }));
+                            },
+                            get viseme() { return currentViseme; },
+
+                            add(opts = {}) {
+                                if (mGroup) return m;
+                                refreshBounds();
+                                // Default width as a fraction of the model's
+                                // bounding-sphere diameter. Small default since a
+                                // face's mouth is little; size slider scales it.
+                                const w = (opts.width || 0.07) * Math.max(mSize.length(), 0.001);
+                                // Mouth sits below center-front by default (typical
+                                // face placement); owner drags it onto the hole.
+                                const y = mCenter.y - mSize.y * (opts.vertical != null ? opts.vertical : 0.12);
+                                const front = mCenter.z + mSize.z * 0.5;
+
+                                mGroup = new THREE.Group();
+                                mGroup.name = 'FixedMouthWrap';
+                                mouthObj = buildMouthGroup(THREE, {
+                                    width: w, lip: opts.lip, cavity: opts.cavity,
+                                    teeth: opts.teeth, tongue: opts.tongue,
+                                    viseme: VISEMES[currentViseme],
+                                });
+                                mGroup.add(mouthObj);
+                                mGroup.position.set(mCenter.x, y, front);
+                                scene.add(mGroup);
+                                raycaster = new THREE.Raycaster();
+                                mHistory.length = 0;
+                                wasAutoRotating = controls.autoRotate;
+                                controls.autoRotate = false;
+                                return m;
+                            },
+
+                            setViseme(key) {
+                                if (!mouthObj || !VISEMES[key]) return;
+                                currentViseme = key;
+                                mouthObj.userData.setViseme(VISEMES[key]);
+                            },
+                            setSizeScale(mult) {
+                                if (!mGroup) return;
+                                mGroup.scale.setScalar(Math.max(mult, 0.001));
+                            },
+                            setVertical(y) { if (mGroup) mGroup.position.y = y; },
+                            setDepth(z) { if (mGroup) mGroup.position.z = z; },
+                            setHoriz(x) { if (mGroup) mGroup.position.x = x; },
+                            setColors({ lip, cavity, teeth, tongue } = {}) {
+                                if (!mouthObj) return;
+                                const p = mouthObj.userData.parts;
+                                if (lip && p.lip) p.lip.material.color.set(lip);
+                                if (cavity && p.cavity) p.cavity.material.color.set(cavity);
+                                if (teeth && p.teeth) p.teeth.material.color.set(teeth);
+                                if (tongue && p.tongue) p.tongue.material.color.set(tongue);
+                            },
+                            // Aim the mouth along a yaw/pitch (face it out of the
+                            // head). Default faces +Z; UI flips to -Z like the eyes.
+                            // Yaw/pitch are remembered so tilt + flip compose.
+                            setLook(yawDeg, pitchDeg) {
+                                if (!mGroup) return;
+                                if (yawDeg != null) m._yaw = yawDeg;
+                                if (pitchDeg != null) m._pitch = pitchDeg;
+                                const yaw = THREE.MathUtils.degToRad(m._yaw != null ? m._yaw : 180);
+                                const pitch = THREE.MathUtils.degToRad(m._pitch || 0);
+                                const dir = new THREE.Vector3(
+                                    Math.sin(yaw) * Math.cos(pitch),
+                                    Math.sin(pitch),
+                                    Math.cos(yaw) * Math.cos(pitch)).normalize();
+                                // Orient with an explicit world-up so the mouth's
+                                // local +Y always stays up (teeth on top). Using
+                                // setFromUnitVectors for a 180° flip picks an
+                                // arbitrary axis and can flip Y — this avoids that.
+                                const up = new THREE.Vector3(0, 1, 0);
+                                const zAxis = dir.clone();                       // local +Z → dir
+                                const xAxis = new THREE.Vector3().crossVectors(up, zAxis).normalize();
+                                if (xAxis.lengthSq() < 1e-6) xAxis.set(1, 0, 0);  // dir parallel to up
+                                const yAxis = new THREE.Vector3().crossVectors(zAxis, xAxis).normalize();
+                                const mtx = new THREE.Matrix4().makeBasis(xAxis, yAxis, zAxis);
+                                mouthObj.quaternion.setFromRotationMatrix(mtx);
+                            },
+                            // Tilt = pitch only (preserves the current facing yaw).
+                            setTilt(pitchDeg) { m.setLook(null, pitchDeg); },
+                            // Convexity passthrough to the mouth mesh.
+                            setCurve(amt) {
+                                if (mouthObj && mouthObj.userData.setCurve) mouthObj.userData.setCurve(amt);
+                            },
+
+                            // Drag on the camera-facing plane (same as eyes).
+                            beginDrag(ndcX, ndcY) {
+                                if (!mGroup) return false;
+                                raycaster.setFromCamera(new THREE.Vector2(ndcX, ndcY), camera);
+                                const hits = raycaster.intersectObject(mGroup, true);
+                                if (hits.length) {
+                                    m.pushHistory();
+                                    dragging = true;
+                                    controls.enabled = false;
+                                    return true;
+                                }
+                                return false;
+                            },
+                            drag(ndcX, ndcY) {
+                                if (!dragging || !mGroup) return;
+                                const planeN = camera.getWorldDirection(new THREE.Vector3());
+                                const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(planeN, mGroup.position);
+                                raycaster.setFromCamera(new THREE.Vector2(ndcX, ndcY), camera);
+                                const pt = new THREE.Vector3();
+                                if (raycaster.ray.intersectPlane(plane, pt)) mGroup.position.copy(pt);
+                            },
+                            endDrag() { dragging = false; controls.enabled = true; },
+
+                            // Undo (position + size + viseme snapshots).
+                            pushHistory() {
+                                if (!mGroup) return;
+                                mHistory.push({
+                                    pos: mGroup.position.toArray(),
+                                    scale: mGroup.scale.x,
+                                    viseme: currentViseme,
+                                });
+                                if (mHistory.length > 50) mHistory.shift();
+                            },
+                            get canUndo() { return mHistory.length > 0; },
+                            undo() {
+                                const s = mHistory.pop();
+                                if (!s) return 0;
+                                mGroup.position.fromArray(s.pos);
+                                mGroup.scale.setScalar(s.scale);
+                                m.setViseme(s.viseme);
+                                return mHistory.length;
+                            },
+
+                            get group() { return mGroup; },
+
+                            // Build looping "talk" clips that animate the MORPH
+                            // INFLUENCES of the lip + cavity, blending closed→vowel
+                            // shapes so the lips keep their thickness and the GAP
+                            // opens (not the whole mouth scaling). Returns one clip
+                            // per morph-able mesh (lip, cavity), each named uniquely.
+                            buildTalkClips() {
+                                if (!mouthObj) return [];
+                                const parts = mouthObj.userData.parts;
+                                const targets = mouthObj.userData.talkTargets || [];  // e.g. ['aa','I','O','E']
+                                if (!targets.length) return [];
+                                const nT = targets.length;
+                                // A talk sequence: indices into `targets` plus the
+                                // closed base (-1). Irregular → speech-like cadence.
+                                const seq = [-1, 0, -1, 2, 1, -1, 3, 0, -1];  // closed/aa/closed/O/I.../
+                                const dt = 0.15;
+                                const times = seq.map((_, i) => i * dt);
+                                const clips = [];
+                                const mk = (mesh) => {
+                                    if (!mesh || !mesh.morphTargetInfluences) return;
+                                    // values = times × numTargets, one influence each.
+                                    const values = [];
+                                    seq.forEach((sel) => {
+                                        for (let t = 0; t < nT; t++) values.push(sel === t ? 1 : 0);
+                                    });
+                                    const track = new THREE.NumberKeyframeTrack(
+                                        mesh.name + '.morphTargetInfluences', times, values);
+                                    clips.push(new THREE.AnimationClip(
+                                        'MouthTalk_' + mesh.name, seq.length * dt, [track]));
+                                };
+                                mk(parts.lip); mk(parts.cavity);
+                                return clips;
+                            },
+                            // Clips for the shared exporter to bake into the GLB.
+                            buildClips() { return m.buildTalkClips(); },
+                            // Prepare for baking: ensure morph targets exist, stop
+                            // the live preview, reset influences to the closed base.
+                            prepForBake() {
+                                if (mouthMixer) { mouthMixer.stopAllAction(); mouthMixer = null; }
+                                if (mouthObj && mouthObj.userData.buildMorphTargets) {
+                                    mouthObj.userData.buildMorphTargets();
+                                }
+                                const parts = mouthObj && mouthObj.userData.parts;
+                                [parts && parts.lip, parts && parts.cavity].forEach((mesh) => {
+                                    if (mesh && mesh.morphTargetInfluences) {
+                                        mesh.morphTargetInfluences.fill(0);
+                                    }
+                                });
+                            },
+
+                            // Live talk preview: build morph targets, then play a
+                            // morph-influence talk clip on a dedicated mixer.
+                            previewTalk(enabled) {
+                                if (mouthMixer) { mouthMixer.stopAllAction(); mouthMixer = null; }
+                                if (!mouthObj) return;
+                                const parts = mouthObj.userData.parts;
+                                if (!enabled) {
+                                    [parts.lip, parts.cavity].forEach((mesh) => {
+                                        if (mesh && mesh.morphTargetInfluences) mesh.morphTargetInfluences.fill(0);
+                                    });
+                                    return;
+                                }
+                                if (mouthObj.userData.buildMorphTargets) mouthObj.userData.buildMorphTargets();
+                                const clips = m.buildTalkClips();
+                                if (!clips.length) return;
+                                // One mixer rooted on the mouth; play all part clips.
+                                mouthMixer = new THREE.AnimationMixer(mouthObj);
+                                clips.forEach((c) => mouthMixer.clipAction(c).play());
+                            },
+
+                            remove() {
+                                if (mouthMixer) { mouthMixer.stopAllAction(); mouthMixer = null; }
+                                if (!mGroup) return;
+                                scene.remove(mGroup);
+                                mGroup.traverse((n) => {
+                                    if (n.geometry) n.geometry.dispose();
+                                    if (n.material) {
+                                        (Array.isArray(n.material) ? n.material : [n.material])
+                                            .forEach((mt) => mt.dispose());
+                                    }
+                                });
+                                mGroup = mouthObj = null;
+                                controls.autoRotate = wasAutoRotating;
+                            },
+                        };
+                        return m;
+                    })(),
+
+                    // Bake model + ALL fix-up groups (eyes and/or mouth) and their
+                    // clips into one GLB. Used by the detail page so a single
+                    // "Bake" includes whatever the owner added.
+                    async exportFixups({ withBlink = true, withTalk = true } = {}) {
+                        const exporter = new GLTFExporter();
+                        const extras = [];
+                        const animations = [];
+
+                        // Eyes: reset blink to open, collect group + blink clip.
+                        if (api.eyes && api.eyes.active) {
+                            api.eyes.previewBlink(false);
+                            const eg = api.eyes.group;
+                            if (eg) {
+                                extras.push(eg);
+                                if (withBlink && api.eyes.buildBlinkClip) {
+                                    const c = api.eyes.buildBlinkClip();
+                                    if (c) animations.push(c);
+                                }
+                            }
+                        }
+                        // Mouth: stop the live preview, set the mid-open base shape
+                        // and neutral scale so the baked rest pose matches what the
+                        // talk clip squashes, then collect the group + talk clip.
+                        if (api.mouth && api.mouth.active && api.mouth.group) {
+                            api.mouth.prepForBake();
+                            extras.push(api.mouth.group);
+                            if (withTalk) (api.mouth.buildClips() || []).forEach((c) => animations.push(c));
+                        }
+
+                        const exportRoot = new THREE.Scene();
+                        const modelParent = model.parent;
+                        const parents = extras.map((g) => g.parent);
+                        exportRoot.add(model);
+                        extras.forEach((g) => exportRoot.add(g));
+                        try {
+                            const glb = await new Promise((resolve, reject) => {
+                                exporter.parse(exportRoot, resolve, reject, {
+                                    binary: true, animations, onlyVisible: true,
+                                });
+                            });
+                            return new Blob([glb], { type: 'model/gltf-binary' });
+                        } finally {
+                            if (modelParent) modelParent.add(model);
+                            extras.forEach((g, i) => { if (parents[i]) parents[i].add(g); });
+                        }
+                    },
                     canvas: renderer.domElement,
                     dispose() {
                         disposed = true;
@@ -765,7 +1389,9 @@
                             mixer = null;
                         }
                         if (eyeMixer) { eyeMixer.stopAllAction(); eyeMixer = null; }
+                        if (mouthMixer) { mouthMixer.stopAllAction(); mouthMixer = null; }
                         if (api && api.eyes && api.eyes.active) api.eyes.remove();
+                        if (api && api.mouth && api.mouth.active) api.mouth.remove();
                         if (model) disposeObject(model);
                         scene.environment = null;
                         envTexture.dispose();
