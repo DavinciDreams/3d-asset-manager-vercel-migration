@@ -408,7 +408,15 @@ def test_zai_mcp_analysis_is_added_to_metadata_prompt(monkeypatch):
     monkeypatch.setenv("AI_AUTOTAG_BASE_URL", "https://api.z.ai/api/coding/paas/v4")
     monkeypatch.setenv("AI_AUTOTAG_MODEL", "glm-5.1")
     monkeypatch.setenv("AI_AUTOTAG_TRANSPORT", "zai-mcp")
-    monkeypatch.setattr(ai_enrichment, "_zai_mcp_visual_context", lambda model, provider, api_key: "Visible fantasy lantern with warm glow.")
+    monkeypatch.setattr(
+        ai_enrichment,
+        "_zai_mcp_visual_context_result",
+        lambda model, provider, api_key: {
+            "enabled": True,
+            "analysis": "Visible fantasy lantern with warm glow.",
+            "error": None,
+        },
+    )
     monkeypatch.setattr(ai_enrichment, "_post_json", fake_post_json)
 
     enriched = ai_enrichment._ai_metadata(FakeModel())
@@ -418,6 +426,80 @@ def test_zai_mcp_analysis_is_added_to_metadata_prompt(monkeypatch):
     assert "vision_mcp_analysis" in user_content
     assert "Visible fantasy lantern with warm glow." in user_content
     assert enriched["vision_mcp"] is True
+    assert enriched["vision_mcp_attempted"] is True
+    assert enriched["vision_mcp_analysis"] == "Visible fantasy lantern with warm glow."
+    assert enriched["vision_mcp_error"] is None
+
+
+def test_zai_mcp_records_missing_thumbnail(monkeypatch):
+    from app import ai_enrichment
+
+    class FakeModel:
+        name = "pixal3d asset"
+        description = ""
+        original_filename = "pixal3d.glb"
+        file_format = "glb"
+        file_size = 123
+        tags = []
+        asset_category = None
+        asset_styles = []
+        asset_types = []
+        runtime_metadata = {}
+        approve_game_ready = False
+        approve_asset_store = False
+        conversion_status = None
+        thumbnail_file_id = None
+
+    captured = {}
+
+    def fake_post_json(url, body, headers, provider=None, transport=None):
+        captured["body"] = body
+        return {
+            "id": "zai-test",
+            "choices": [{
+                "message": {
+                    "content": json.dumps({
+                        "title": "Pixal3D Asset",
+                        "asset_category": "other",
+                        "asset_styles": [],
+                        "asset_types": [],
+                        "runtime_metadata": {
+                            "behaviors": [],
+                            "light": {
+                                "enabled": False,
+                                "type": "none",
+                                "color": "#ffffff",
+                                "intensity": 0,
+                                "range": 0,
+                                "cast_shadow": False,
+                                "attach_to": "",
+                                "offset": [0, 0, 0],
+                            },
+                        },
+                        "tags": ["pixal3d", "glb", "3d-model"],
+                        "description": "A Pixal3D GLB asset.",
+                        "summary": "Pixal3D GLB asset.",
+                        "categories": [],
+                        "quality_notes": [],
+                    })
+                }
+            }],
+        }
+
+    monkeypatch.setenv("AI_AUTOTAG_PROVIDER", "zai")
+    monkeypatch.setenv("AI_AUTOTAG_API_KEY", "zai-key")
+    monkeypatch.setenv("AI_AUTOTAG_BASE_URL", "https://api.z.ai/api/coding/paas/v4")
+    monkeypatch.setenv("AI_AUTOTAG_MODEL", "glm-5.1")
+    monkeypatch.setenv("AI_AUTOTAG_TRANSPORT", "zai-mcp")
+    monkeypatch.setattr(ai_enrichment, "_post_json", fake_post_json)
+
+    enriched = ai_enrichment._ai_metadata(FakeModel())
+
+    user_content = captured["body"]["messages"][1]["content"]
+    assert "vision_mcp_status" in user_content
+    assert enriched["vision_mcp"] is False
+    assert enriched["vision_mcp_attempted"] is True
+    assert "No thumbnail image is available" in enriched["vision_mcp_error"]
 
 
 def test_hyades_a2a_empty_message_polls_task(monkeypatch):

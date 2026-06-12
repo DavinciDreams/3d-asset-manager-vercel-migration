@@ -505,14 +505,22 @@ def _zai_mcp_enabled(provider):
 
 
 def _zai_mcp_visual_context(model, provider, api_key):
+    return _zai_mcp_visual_context_result(model, provider, api_key).get("analysis")
+
+
+def _zai_mcp_visual_context_result(model, provider, api_key):
     if not _zai_mcp_enabled(provider):
-        return None
+        return {"enabled": False, "analysis": None, "error": None}
     stored = _thumbnail_bytes(model)
     if not stored:
-        return None
+        return {"enabled": True, "analysis": None, "error": "No thumbnail image is available for MCP analysis."}
     max_bytes = int(os.environ.get("AI_AUTOTAG_MAX_IMAGE_BYTES", str(2 * 1024 * 1024)))
     if len(stored) > max_bytes:
-        return None
+        return {
+            "enabled": True,
+            "analysis": None,
+            "error": f"Thumbnail image exceeds AI_AUTOTAG_MAX_IMAGE_BYTES ({len(stored)} > {max_bytes}).",
+        }
 
     timeout = int(os.environ.get("AI_AUTOTAG_MCP_TIMEOUT", os.environ.get("AI_AUTOTAG_TIMEOUT", "120")))
     tool_name = os.environ.get("AI_AUTOTAG_MCP_TOOL", "image_analysis")
@@ -585,11 +593,14 @@ def _zai_mcp_visual_context(model, provider, api_key):
             },
         })
         payload = _mcp_read_json_line(proc, responses, timeout)
-        return _extract_mcp_text(payload)
+        analysis = _extract_mcp_text(payload)
+        if not analysis:
+            return {"enabled": True, "analysis": None, "error": "MCP tool returned no text analysis."}
+        return {"enabled": True, "analysis": analysis, "error": None}
     except Exception as error:
         if _env_bool("AI_AUTOTAG_ZAI_MCP_REQUIRED", False):
             raise RuntimeError(f"Z.AI Vision MCP failed: {error}") from error
-        return None
+        return {"enabled": True, "analysis": None, "error": _compact_response_detail(str(error))}
     finally:
         if temp_path:
             try:
@@ -866,12 +877,25 @@ def _ai_metadata(model, extra_context=None):
         },
         "extra_context": extra_context or {},
     }
-    vision_mcp_analysis = _zai_mcp_visual_context(model, provider, api_key)
+    vision_mcp = _zai_mcp_visual_context_result(model, provider, api_key)
+    vision_mcp_analysis = vision_mcp.get("analysis")
     if vision_mcp_analysis:
         prompt["vision_mcp_analysis"] = vision_mcp_analysis
+        prompt["metadata_instruction"] = (
+            "Use vision_mcp_analysis as the primary source for visible subject, materials, style, colors, "
+            "and light-emitter hints. Avoid generic generation-pipeline wording such as baseline mesh, "
+            "background prop, sculpting base, or retopology unless those details are visibly supported."
+        )
+    elif vision_mcp.get("enabled"):
+        prompt["vision_mcp_status"] = {
+            "analysis_available": False,
+            "error": vision_mcp.get("error"),
+        }
     user_text = (
         "Create marketplace metadata for this 3D asset. Return only JSON that matches the schema. "
-        "Prefer concrete visible or file-derived details over generic filler.\n\n"
+        "Prefer concrete visible or file-derived details over generic filler. "
+        "If visual analysis is unavailable, say only what can be inferred from the filename and asset fields, "
+        "and avoid pretending to know the object's appearance.\n\n"
         + json.dumps(prompt, sort_keys=True)
     )
     if _transport(provider) == "a2a":
@@ -950,6 +974,9 @@ def _ai_metadata(model, extra_context=None):
     enriched["response_id"] = payload.get("id")
     enriched["vision_fallback"] = vision_fallback
     enriched["vision_mcp"] = bool(vision_mcp_analysis)
+    enriched["vision_mcp_attempted"] = bool(vision_mcp.get("enabled"))
+    enriched["vision_mcp_analysis"] = vision_mcp_analysis
+    enriched["vision_mcp_error"] = vision_mcp.get("error")
     return enriched
 
 
