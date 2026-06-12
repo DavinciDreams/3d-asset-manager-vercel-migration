@@ -534,6 +534,28 @@
                                 {% endif %}
                             </div>
                         </div>
+                        <div>
+                            <span class="font-semibold text-gray-700">Runtime:</span>
+                            {% set rt = model.runtime_metadata or {} %}
+                            {% set light = rt.get('light') if rt else None %}
+                            <div id="model-runtime" class="inline-flex flex-wrap gap-1 ml-1">
+                                {% if light and light.get('enabled') %}
+                                <span class="bg-amber-100 text-amber-800 px-2 py-0.5 rounded text-xs">
+                                    Light {{ light.get('type', 'point')|title }}
+                                </span>
+                                <span class="bg-gray-100 text-gray-700 px-2 py-0.5 rounded text-xs">
+                                    {{ light.get('color', '#ffb35a') }}
+                                </span>
+                                {% if light.get('range') %}
+                                <span class="bg-gray-100 text-gray-700 px-2 py-0.5 rounded text-xs">
+                                    Range {{ light.get('range') }}
+                                </span>
+                                {% endif %}
+                                {% else %}
+                                <span class="text-gray-500">No runtime behaviors</span>
+                                {% endif %}
+                            </div>
+                        </div>
                     </div>
                 </div>
 

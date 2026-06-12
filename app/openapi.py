@@ -35,6 +35,7 @@ def _model_summary_schema():
             'asset_category': {'type': 'string', 'nullable': True, 'example': 'building'},
             'asset_styles': {'type': 'array', 'items': {'type': 'string'}, 'example': ['fantasy', 'stylized']},
             'asset_types': {'type': 'array', 'items': {'type': 'string'}, 'example': ['rigged', 'animated']},
+            'runtime_metadata': {'$ref': '#/components/schemas/RuntimeMetadata'},
             'conversion_status': {
                 'type': 'string',
                 'nullable': True,
@@ -141,6 +142,47 @@ def get_openapi_spec(base_url=''):
                     },
                 },
                 'ModelSummary': _model_summary_schema(),
+                'RuntimeMetadata': {
+                    'type': 'object',
+                    'description': (
+                        'Runtime hints consumed by Tellus/Three.js when an asset is placed in-world. '
+                        'A lantern-like asset can set light.enabled=true so the world spawns a real THREE.Light.'
+                    ),
+                    'properties': {
+                        'behaviors': {
+                            'type': 'array',
+                            'items': {'type': 'string'},
+                            'example': ['light-emitter'],
+                        },
+                        'light': {
+                            'type': 'object',
+                            'properties': {
+                                'enabled': {'type': 'boolean', 'example': True},
+                                'type': {
+                                    'type': 'string',
+                                    'enum': ['none', 'point', 'spot', 'directional', 'ambient'],
+                                    'example': 'point',
+                                },
+                                'color': {'type': 'string', 'example': '#ffb35a'},
+                                'intensity': {'type': 'number', 'example': 1.5},
+                                'range': {'type': 'number', 'example': 8},
+                                'cast_shadow': {'type': 'boolean', 'example': True},
+                                'attach_to': {
+                                    'type': 'string',
+                                    'description': 'Optional GLB node name; empty means attach to the asset root.',
+                                    'example': 'LanternGlow',
+                                },
+                                'offset': {
+                                    'type': 'array',
+                                    'items': {'type': 'number'},
+                                    'minItems': 3,
+                                    'maxItems': 3,
+                                    'example': [0, 0.6, 0],
+                                },
+                            },
+                        },
+                    },
+                },
                 'Pagination': _pagination_schema(),
                 'ModelListResponse': {
                     'type': 'object',
@@ -438,6 +480,10 @@ def get_openapi_spec(base_url=''):
                                             'items': {'type': 'string'},
                                             'description': 'Tags as an array or comma-separated string.',
                                         },
+                                        'asset_category': {'type': 'string'},
+                                        'asset_styles': {'type': 'array', 'items': {'type': 'string'}},
+                                        'asset_types': {'type': 'array', 'items': {'type': 'string'}},
+                                        'runtime_metadata': {'$ref': '#/components/schemas/RuntimeMetadata'},
                                     },
                                 }
                             }
@@ -1153,6 +1199,10 @@ def get_openapi_spec(base_url=''):
                                         'tags': {
                                             'type': 'string',
                                             'description': 'Comma-separated tags. Applies to all files.',
+                                        },
+                                        'runtime_metadata': {
+                                            'type': 'string',
+                                            'description': 'Optional JSON runtime metadata. See RuntimeMetadata schema.',
                                         },
                                     },
                                 }

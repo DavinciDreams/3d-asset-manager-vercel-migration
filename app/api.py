@@ -359,6 +359,7 @@ def list_models():
                 'asset_category': model.asset_category,
                 'asset_styles': model.asset_styles,
                 'asset_types': model.asset_types,
+                'runtime_metadata': model.runtime_metadata,
                 'ai_status': model.ai_status,
                 'ai_title': (model.ai_metadata or {}).get('title'),
                 'ai_description': model.ai_description,
@@ -923,6 +924,8 @@ def update_model(model_id):
             model.asset_styles = Model3D.normalize_tags(data.get('asset_styles'))
         if 'asset_types' in data:
             model.asset_types = Model3D.normalize_tags(data.get('asset_types'))
+        if 'runtime_metadata' in data:
+            model.runtime_metadata = Model3D.normalize_runtime_metadata(data.get('runtime_metadata'))
 
         if 'default_animation' in data:
             # Embedded-clip name to auto-play; empty clears it.
@@ -952,6 +955,7 @@ def update_model(model_id):
                 'asset_category': model.asset_category,
                 'asset_styles': model.asset_styles,
                 'asset_types': model.asset_types,
+                'runtime_metadata': model.runtime_metadata,
                 'default_animation': model.default_animation,
                 'default_vrma_id': model.default_vrma_id,
             }
@@ -1295,6 +1299,7 @@ def _serialize_browse_card(model):
         'asset_category': model.asset_category,
         'asset_styles': model.asset_styles or [],
         'asset_types': model.asset_types or [],
+        'runtime_metadata': model.runtime_metadata or {},
         'has_preview': bool(model.preview_file_id),
         'has_thumbnail': bool(model.thumbnail_file_id),
         'preview_url': url_for('api.get_preview', model_id=model.id) if model.preview_file_id else None,
@@ -1511,6 +1516,7 @@ def get_user_models():
                 'asset_category': model.asset_category,
                 'asset_styles': model.asset_styles,
                 'asset_types': model.asset_types,
+                'runtime_metadata': model.runtime_metadata,
                 'ai_status': model.ai_status,
                 'ai_title': (model.ai_metadata or {}).get('title'),
                 'ai_description': model.ai_description,
@@ -1551,7 +1557,8 @@ def _name_from_filename(original_filename):
 
 
 def _store_one_upload(file, base_name, description, is_public, tags, allowed_extensions, fs, max_bytes,
-                      owner_id=None, asset_category=None, asset_styles=None, asset_types=None):
+                      owner_id=None, asset_category=None, asset_styles=None, asset_types=None,
+                      runtime_metadata=None):
     """Validate and persist a single uploaded file as a Model3D.
 
     Returns (model, None) on success or (None, error_message) on failure.
@@ -1613,6 +1620,7 @@ def _store_one_upload(file, base_name, description, is_public, tags, allowed_ext
         asset_category=asset_category,
         asset_styles=asset_styles,
         asset_types=asset_types,
+        runtime_metadata=runtime_metadata,
     )
     from app.conversion import enqueue
     enqueue(model, enabled=current_app.config.get('ENABLE_CONVERSION', True))
@@ -1642,6 +1650,7 @@ def _serialize_model(model):
         'asset_category': model.asset_category,
         'asset_styles': model.asset_styles,
         'asset_types': model.asset_types,
+        'runtime_metadata': model.runtime_metadata,
         'ai_status': model.ai_status,
         'ai_error': model.ai_error,
         'ai_title': (model.ai_metadata or {}).get('title'),
@@ -1708,6 +1717,7 @@ def _run_ai_enrichment(model, data=None):
         'asset_category': enriched.get('asset_category'),
         'asset_styles': enriched.get('asset_styles', []),
         'asset_types': enriched.get('asset_types', []),
+        'runtime_metadata': enriched.get('runtime_metadata', {}),
         'summary': enriched.get('summary'),
         'categories': enriched.get('categories', []),
         'quality_notes': enriched.get('quality_notes', []),
@@ -1723,6 +1733,7 @@ def _run_ai_enrichment(model, data=None):
         model.asset_category = enriched.get('asset_category') or model.asset_category
         model.asset_styles = Model3D.normalize_tags(enriched.get('asset_styles', []))
         model.asset_types = Model3D.normalize_tags(enriched.get('asset_types', []))
+        model.runtime_metadata = Model3D.normalize_runtime_metadata(enriched.get('runtime_metadata'))
         if include_title and enriched.get('title'):
             model.name = enriched['title']
         if include_description and model.ai_description:
@@ -1733,6 +1744,8 @@ def _run_ai_enrichment(model, data=None):
             model.asset_category = enriched.get('asset_category')
         model.asset_styles = _merge_tags(model.asset_styles, enriched.get('asset_styles', []))
         model.asset_types = _merge_tags(model.asset_types, enriched.get('asset_types', []))
+        if enriched.get('runtime_metadata') and not model.runtime_metadata:
+            model.runtime_metadata = Model3D.normalize_runtime_metadata(enriched.get('runtime_metadata'))
         if include_title and not model.name and enriched.get('title'):
             model.name = enriched['title']
         if include_description and not model.description and model.ai_description:
@@ -2326,6 +2339,7 @@ def upload_model():
         asset_category = Model3D.normalize_category(request.form.get('asset_category'))
         asset_styles = Model3D.normalize_tags(request.form.get('asset_styles', ''))
         asset_types = Model3D.normalize_tags(request.form.get('asset_types', ''))
+        runtime_metadata = Model3D.normalize_runtime_metadata(request.form.get('runtime_metadata'))
 
         # Collect all uploaded files (supports repeated 'file' fields).
         files = [f for f in request.files.getlist('file') if f and f.filename]
@@ -2354,7 +2368,7 @@ def upload_model():
                 file, base_name, description, is_public, tags,
                 allowed_extensions, fs, max_bytes, owner_id=owner_id,
                 asset_category=asset_category, asset_styles=asset_styles,
-                asset_types=asset_types,
+                asset_types=asset_types, runtime_metadata=runtime_metadata,
             )
             if model:
                 uploaded.append(model)

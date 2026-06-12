@@ -312,6 +312,7 @@ def upload():
             asset_category = Model3D.normalize_category(request.form.get('asset_category'))
             asset_styles = Model3D.normalize_tags(request.form.get('asset_styles', ''))
             asset_types = Model3D.normalize_tags(request.form.get('asset_types', ''))
+            runtime_metadata = Model3D.normalize_runtime_metadata(request.form.get('runtime_metadata'))
 
             # Get uploaded file
             file = request.files.get('file')
@@ -382,6 +383,7 @@ def upload():
                 asset_category=asset_category,
                 asset_styles=asset_styles,
                 asset_types=asset_types,
+                runtime_metadata=runtime_metadata,
             )
 
             from app.conversion import enqueue
