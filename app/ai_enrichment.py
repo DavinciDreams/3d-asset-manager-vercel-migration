@@ -238,6 +238,24 @@ def _extract_a2a_output(payload):
     return "\n".join(part for part in parts if part).strip()
 
 
+def _a2a_task_state(payload):
+    result = payload.get("result") or payload
+    if not isinstance(result, dict):
+        return None
+    task = result.get("task") if isinstance(result.get("task"), dict) else result
+    status = task.get("status") if isinstance(task, dict) else None
+    if isinstance(status, dict):
+        return status.get("state")
+    return None
+
+
+def _summarize_provider_payload(payload):
+    try:
+        return _compact_response_detail(json.dumps(payload, sort_keys=True))
+    except (TypeError, ValueError):
+        return _compact_response_detail(str(payload))
+
+
 def _image_part(model):
     if not _env_bool("AI_AUTOTAG_USE_VISION", True):
         return None
@@ -417,7 +435,12 @@ def _a2a_metadata(model, provider, api_key, schema, user_text):
         )
     output_text = _strip_json_fence(_extract_a2a_output(payload))
     if not output_text:
-        raise RuntimeError("AI enrichment returned no A2A output text.")
+        state = _a2a_task_state(payload) or "unknown"
+        detail = _summarize_provider_payload(payload)
+        raise RuntimeError(
+            f"AI enrichment returned no A2A output text (task state: {state}). "
+            f"Response: {detail or 'empty response'}"
+        )
     enriched = json.loads(output_text)
     enriched["provider"] = provider
     enriched["transport"] = "a2a"

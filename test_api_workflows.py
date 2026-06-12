@@ -7,6 +7,7 @@ os.environ.setdefault("ENABLE_CONVERSION", "0")
 os.environ.setdefault("ASSET_MANAGER_API_TOKEN", "test-token")
 os.environ["AI_AUTOTAG_ON_UPLOAD"] = "0"
 os.environ["AI_AUTOTAG_WORKER"] = "0"
+os.environ["AI_AUTOTAG_KICK_ON_REQUEST"] = "0"
 os.environ.pop("OPENAI_API_KEY", None)
 os.environ.pop("AI_AUTOTAG_API_KEY", None)
 os.environ.pop("AI_API_KEY", None)
@@ -181,6 +182,36 @@ def test_async_enrichment_queues_and_model_status_endpoint(monkeypatch):
     assert queued_model.ai_metadata["_job"]["data"]["context"]["source"] == "test"
 
 
+def test_async_enrichment_kicks_queue_when_enabled(monkeypatch):
+    from app import api as api_module
+
+    app = create_app()
+    client = app.test_client()
+    headers = {"Authorization": "Bearer test-token"}
+    glb = b"glTF" + b"\x03" * 64
+    upload = client.post("/api/upload", headers=headers, data={
+        "file": (io.BytesIO(glb), "kick_crate.glb"),
+    }, content_type="multipart/form-data")
+    assert upload.status_code == 201, upload.get_json()
+    model_id = upload.get_json()["model"]["id"]
+
+    kicked = {}
+
+    def fake_kick(kicked_app):
+        kicked["app_name"] = kicked_app.name
+
+    monkeypatch.setenv("AI_AUTOTAG_KICK_ON_REQUEST", "1")
+    monkeypatch.setattr(api_module, "_kick_ai_enrichment_worker", fake_kick)
+
+    queued = client.post(
+        f"/api/model/{model_id}/ai/autotag",
+        headers=headers,
+        json={"async": True, "overwrite": True, "context": {"source": "test_kick"}},
+    )
+    assert queued.status_code == 202, queued.get_json()
+    assert kicked["app_name"] == app.name
+
+
 def test_ai_enrichment_worker_drains_pending_job(monkeypatch):
     from app import ai_enrichment
     from app import api as api_module
@@ -238,6 +269,24 @@ def test_ai_enrichment_worker_drains_pending_job(monkeypatch):
     assert model.ai_status == "done"
     assert model.name == "Worker Lantern"
     assert model.runtime_metadata["light"]["enabled"] is True
+
+
+def test_a2a_no_output_error_includes_task_state():
+    from app import ai_enrichment
+
+    payload = {
+        "jsonrpc": "2.0",
+        "id": "probe",
+        "result": {
+            "kind": "task",
+            "id": "task-1",
+            "status": {"state": "working"},
+        },
+    }
+
+    assert ai_enrichment._extract_a2a_output(payload) == ""
+    assert ai_enrichment._a2a_task_state(payload) == "working"
+    assert "working" in ai_enrichment._summarize_provider_payload(payload)
 
 
 def test_hyades_a2a_enrichment_uses_holo_vision(monkeypatch):
