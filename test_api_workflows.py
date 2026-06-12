@@ -71,7 +71,7 @@ def test_bearer_upload_enrich_approve_and_bundle():
     assert body["model"]["asset_category"] == "prop"
     assert body["model"]["asset_styles"] == ["fantasy", "stylized"]
     assert body["model"]["asset_types"] == ["rigged", "animated"]
-    assert "glb" in body["model"]["tags"]
+    assert "glb" not in body["model"]["tags"]
 
     update = client.put(
         f"/api/model/{model_id}",
@@ -1196,3 +1196,80 @@ def test_ai_enrichment_infers_facets_and_title_from_floral_vision(monkeypatch):
     assert enriched["asset_category"] == "flora"
     assert {"watercolor", "painterly", "stylized"}.issubset(set(enriched["asset_styles"]))
     assert {"static", "decorative-prop"}.issubset(set(enriched["asset_types"]))
+
+
+def test_ai_enrichment_corrects_house_category_and_title(monkeypatch):
+    from app import ai_enrichment
+
+    output = {
+        "title": "Pixal3D 1781271874905-1698b233e6dc8",
+        "asset_category": "fauna",
+        "asset_styles": ["painterly", "stylized", "fantasy"],
+        "asset_types": ["static", "light-emitter", "decorative-prop"],
+        "runtime_metadata": {
+            "behaviors": ["light-emitter"],
+            "light": {
+                "enabled": True,
+                "type": "point",
+                "color": "#ffb35a",
+                "intensity": 1.5,
+                "range": 8,
+                "cast_shadow": True,
+                "attach_to": "",
+                "offset": [0, 0.6, 0],
+            },
+        },
+        "tags": [
+            "cottage", "tower", "house", "fantasy", "storybook", "medieval",
+            "timber-framed", "half-timbered", "tudor", "cupola", "balcony",
+            "environment-prop", "fairy-tale", "stylized", "building", "architecture",
+            "pixal3d", "generated", "image-to-3d", "ai-generated", "glb", "3d-model",
+        ],
+        "description": "A stylized fantasy cottage house with a tower, timber-framed facade, cupola, and balcony.",
+        "summary": "Fantasy storybook cottage house.",
+        "categories": [],
+        "quality_notes": [],
+    }
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps({
+                "id": "chatcmpl-house",
+                "choices": [{"message": {"content": json.dumps(output)}}],
+            }).encode("utf-8")
+
+    class FakeModel:
+        name = "pixal3d_1781271874905.glb"
+        description = ""
+        original_filename = "pixal3d_1781271874905.glb"
+        file_format = "glb"
+        file_size = 1234
+        tags = []
+        asset_category = None
+        asset_styles = []
+        asset_types = []
+        runtime_metadata = {}
+        approve_game_ready = False
+        approve_asset_store = False
+        conversion_status = None
+        thumbnail_file_id = None
+
+    monkeypatch.setenv("AI_AUTOTAG_PROVIDER", "openai")
+    monkeypatch.setenv("AI_AUTOTAG_API_KEY", "openai-key")
+    monkeypatch.setenv("AI_AUTOTAG_USE_VISION", "0")
+    monkeypatch.setattr(ai_enrichment.urllib.request, "urlopen", lambda request, timeout: FakeResponse())
+
+    enriched = ai_enrichment.enrich_model(FakeModel())
+
+    assert enriched["asset_category"] == "building"
+    assert enriched["title"] == "Cottage"
+    assert "fauna" not in enriched["asset_category"]
+    assert not {"pixal3d", "generated", "image-to-3d", "ai-generated", "glb", "3d-model"}.intersection(enriched["tags"])
