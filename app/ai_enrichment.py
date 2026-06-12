@@ -145,6 +145,11 @@ def _base_url(provider):
     return DEFAULT_BASE_URL
 
 
+def _looks_like_a2a_url(url):
+    parsed = urllib.parse.urlparse(url or "")
+    return parsed.path.rstrip("/").endswith("/a2a")
+
+
 def _model_name(provider):
     return (
         os.environ.get("AI_AUTOTAG_MODEL")
@@ -157,6 +162,15 @@ def _model_name(provider):
 
 
 def _transport(provider):
+    base_url = (
+        os.environ.get("AI_AUTOTAG_BASE_URL")
+        or (os.environ.get("HYADES_AUTOTAG_BASE_URL") if provider == "hyades" else None)
+        or (os.environ.get("HYADES_VISION_BASE_URL") if provider == "hyades" else None)
+        or (os.environ.get("HYADES_BASE_URL") if provider == "hyades" else None)
+        or ""
+    ).strip()
+    if provider == "hyades" and _looks_like_a2a_url(base_url):
+        return "a2a"
     configured = (
         os.environ.get("AI_AUTOTAG_TRANSPORT")
         or (os.environ.get("HYADES_AUTOTAG_TRANSPORT") if provider == "hyades" else None)
@@ -173,6 +187,20 @@ def _request_url(base_url):
     if base.endswith("/chat/completions"):
         return base
     return f"{base}/chat/completions"
+
+
+def _chat_payload_summary(payload):
+    choices = payload.get("choices") if isinstance(payload, dict) else None
+    if not isinstance(choices, list):
+        return "missing choices"
+    if not choices:
+        return "empty choices"
+    message = (choices[0] or {}).get("message") if isinstance(choices[0], dict) else None
+    if not isinstance(message, dict):
+        return "first choice has no message"
+    keys = ", ".join(sorted(message.keys())) or "no message keys"
+    finish_reason = (choices[0] or {}).get("finish_reason")
+    return f"first choice message keys: {keys}; finish_reason: {finish_reason or 'none'}"
 
 
 def _strip_json_fence(text):
@@ -623,7 +651,12 @@ def _ai_metadata(model, extra_context=None):
 
     output_text = _strip_json_fence(_extract_chat_output(payload))
     if not output_text:
-        raise RuntimeError("AI enrichment returned no output text.")
+        label = _provider_label(_request_url(_base_url(provider)), provider=provider, transport="openai")
+        raise RuntimeError(
+            f"AI enrichment returned no output text from {label}. "
+            f"Response shape: {_chat_payload_summary(payload)}. "
+            f"Response: {_summarize_provider_payload(payload) or 'empty response'}"
+        )
     enriched = json.loads(output_text)
     enriched["provider"] = provider
     enriched["transport"] = "openai"
