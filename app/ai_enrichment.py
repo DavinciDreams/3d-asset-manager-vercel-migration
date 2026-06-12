@@ -32,6 +32,14 @@ NOISY_ENRICHMENT_TAGS = {
     "3d", "3d-asset", "3d-model", "ai", "ai-generated", "asset", "generated", "generation",
     "glb", "gltf", "fbx", "obj", "stl", "vrm", "image-to-3d", "model", "pixal3d",
 }
+FAB_LISTING_GUIDANCE = (
+    "Write descriptions as Fab marketplace product descriptions for a 3D listing. "
+    "Use polished buyer-facing copy, not analysis notes. Start with what the asset is, "
+    "then mention visual style/materials, likely use cases, and any visible limitations. "
+    "Do not mention Pixal3D, AI pipeline, provider names, polygon counts, texture resolution, "
+    "thumbnail availability, or uncertain technical claims unless those facts are directly supplied "
+    "and useful to a buyer. Keep the title under 80 characters. Return up to 25 discoverability tags."
+)
 
 
 class AIProviderTransientError(RuntimeError):
@@ -1062,7 +1070,7 @@ def _a2a_metadata(model, provider, api_key, schema, user_text):
             "Tags should be lowercase marketplace/search tags, not sentences. "
             "Do not use generator names, file formats, source pipeline labels, or generic tags like "
             "pixal3d, generated, image-to-3d, ai-generated, glb, or 3d-model. "
-            "Descriptions should help a human understand what the asset is and how it may be used.\n\n"
+            + FAB_LISTING_GUIDANCE + "\n\n"
             + user_text
             + "\n\nJSON schema:\n"
             + json.dumps(schema, sort_keys=True)
@@ -1156,11 +1164,12 @@ def _ai_metadata(model, extra_context=None):
                 "type": "array",
                 "items": {"type": "string"},
                 "minItems": 3,
-                "maxItems": 16,
+                "maxItems": 25,
+                "description": "Fab-style discoverability tags. Use concrete subject, style, material, genre, and use-case tags. Do not include file formats, generator names, or generic pipeline/source tags.",
             },
             "title": {
                 "type": "string",
-                "description": "A short descriptive catalog title based on the visible subject and style, not the filename, generator, provider, or generic phrases like AI-generated 3D model.",
+                "description": "A Fab listing title under 80 characters based on the visible subject and style, not the filename, generator, provider, or generic phrases like AI-generated 3D model.",
             },
             "asset_category": {
                 "type": "string",
@@ -1211,8 +1220,11 @@ def _ai_metadata(model, extra_context=None):
                 },
                 "required": ["behaviors", "light"],
             },
-            "description": {"type": "string"},
-            "summary": {"type": "string"},
+            "description": {
+                "type": "string",
+                "description": "Buyer-facing Fab product description for a 3D listing. Start with what the asset is, then describe style/materials and practical scene/use cases. Avoid AI pipeline provenance and unsupported technical specs.",
+            },
+            "summary": {"type": "string", "description": "One concise storefront summary of the product value and subject."},
             "categories": {"type": "array", "items": {"type": "string"}, "maxItems": 6},
             "quality_notes": {"type": "array", "items": {"type": "string"}, "maxItems": 8},
         },
@@ -1259,7 +1271,8 @@ def _ai_metadata(model, extra_context=None):
             "flowers/plants/leaves should use asset_category flora even when the object is also decorative; "
             "watercolor or hand-painted looks belong in asset_styles; static/not-rigged/non-animated observations "
             "belong in asset_types as static. The title should name the visible asset, for example Watercolor "
-            "Floral Arrangement, not Pixal3D AI-Generated 3D Model."
+            "Floral Arrangement, not Pixal3D AI-Generated 3D Model. The description should read like a Fab "
+            "store listing, not a visual-analysis report."
         )
     elif vision_mcp.get("enabled"):
         prompt["vision_mcp_status"] = {
@@ -1268,6 +1281,7 @@ def _ai_metadata(model, extra_context=None):
         }
     user_text = (
         "Create marketplace metadata for this 3D asset. Return only JSON that matches the schema. "
+        + FAB_LISTING_GUIDANCE + " "
         "Prefer concrete visible or file-derived details over generic filler. "
         "Write the title as a concise product/catalog name for the visible subject and style; never use the "
         "generator/provider name or generic source labels as the title. "
@@ -1293,7 +1307,7 @@ def _ai_metadata(model, extra_context=None):
                         "Tags should be lowercase marketplace/search tags, not sentences. "
                         "Do not use generator names, file formats, source pipeline labels, or generic tags like "
                         "pixal3d, generated, image-to-3d, ai-generated, glb, or 3d-model. "
-                        "Descriptions should help a human understand what the asset is and how it may be used."
+                        + FAB_LISTING_GUIDANCE
                     ),
                 },
                 {"role": "user", "content": content},

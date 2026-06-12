@@ -83,6 +83,11 @@ The asset manager can generate catalog titles, descriptions, and tags from model
 metadata and stored preview thumbnails. For Hyades Vision Services, use the A2A
 JSON-RPC endpoint with the `holo` vision model:
 
+Generated metadata is shaped for Fab-style 3D listings: titles stay under the
+80-character listing limit, descriptions use buyer-facing product copy, and tags
+focus on discoverability rather than file formats, generator names, or pipeline
+provenance.
+
 ```bash
 AI_AUTOTAG_PROVIDER=hyades
 AI_AUTOTAG_API_KEY=your-hyades-api-key

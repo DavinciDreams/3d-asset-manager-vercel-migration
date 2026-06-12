@@ -1406,3 +1406,81 @@ def test_ai_enrichment_removes_contradictory_facets(monkeypatch):
     assert "static" in enriched["asset_types"]
     assert "light-emitter" not in enriched["asset_types"]
     assert {"high-poly", "low-poly"} != set(enriched["asset_types"]).intersection({"high-poly", "low-poly"})
+
+
+def test_ai_enrichment_prompt_uses_fab_listing_copy(monkeypatch):
+    from app import ai_enrichment
+
+    class FakeModel:
+        name = "classical_fountain.glb"
+        description = ""
+        original_filename = "classical_fountain.glb"
+        file_format = "glb"
+        file_size = 2760000
+        tags = []
+        asset_category = None
+        asset_styles = []
+        asset_types = []
+        runtime_metadata = {}
+        approve_game_ready = False
+        approve_asset_store = False
+        conversion_status = None
+        thumbnail_file_id = None
+
+    captured = {}
+
+    def fake_post_json(url, body, headers, provider=None, transport=None):
+        captured["body"] = body
+        return {
+            "id": "chatcmpl-fab-copy",
+            "choices": [{
+                "message": {
+                    "content": json.dumps({
+                        "title": "Classical Stone Fountain",
+                        "asset_category": "environment",
+                        "asset_styles": ["classical", "realistic"],
+                        "asset_types": ["static", "decorative-prop"],
+                        "runtime_metadata": {
+                            "behaviors": [],
+                            "light": {
+                                "enabled": False,
+                                "type": "none",
+                                "color": "#ffffff",
+                                "intensity": 0,
+                                "range": 0,
+                                "cast_shadow": False,
+                                "attach_to": "",
+                                "offset": [0, 0, 0],
+                            },
+                        },
+                        "tags": ["fountain", "stone", "classical"],
+                        "description": (
+                            "Add a classical stone fountain to gardens, courtyards, and architectural scenes. "
+                            "Its tiered silhouette and weathered material make it useful as a decorative focal point."
+                        ),
+                        "summary": "Classical stone fountain for architectural and garden scenes.",
+                        "categories": [],
+                        "quality_notes": [],
+                    })
+                }
+            }],
+        }
+
+    monkeypatch.setenv("AI_AUTOTAG_PROVIDER", "openai")
+    monkeypatch.setenv("AI_AUTOTAG_API_KEY", "openai-key")
+    monkeypatch.setenv("AI_AUTOTAG_USE_VISION", "0")
+    monkeypatch.setattr(ai_enrichment, "_post_json", fake_post_json)
+
+    enriched = ai_enrichment._ai_metadata(FakeModel())
+
+    system_text = captured["body"]["messages"][0]["content"]
+    user_text = captured["body"]["messages"][1]["content"]
+    schema = captured["body"]["response_format"]["json_schema"]["schema"]
+    assert "Fab marketplace product descriptions" in system_text
+    assert "buyer-facing copy" in user_text
+    assert "Keep the title under 80 characters" in user_text
+    assert "Return up to 25 discoverability tags" in user_text
+    assert schema["properties"]["tags"]["maxItems"] == 25
+    assert "Fab listing title under 80 characters" in schema["properties"]["title"]["description"]
+    assert "Buyer-facing Fab product description" in schema["properties"]["description"]["description"]
+    assert enriched["title"] == "Classical Stone Fountain"
