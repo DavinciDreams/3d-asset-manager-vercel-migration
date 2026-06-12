@@ -3,8 +3,13 @@ import base64
 import json
 import os
 import re
+import queue
+import shlex
 import socket
+import subprocess
 import time
+import tempfile
+import threading
 import uuid
 import urllib.error
 import urllib.parse
@@ -17,6 +22,7 @@ DEFAULT_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_MODEL = "gpt-4.1-mini"
 ZAI_CODING_BASE_URL = "https://api.z.ai/api/coding/paas/v4"
 ZAI_DEFAULT_MODEL = "glm-5.1"
+ZAI_MCP_COMMAND = "npx -y @z_ai/mcp-server@latest"
 HYADES_A2A_BASE_URL = "https://hyades.gnostr.cloud/a2a"
 HYADES_OPENAI_BASE_URL = "https://hyades.gnostr.cloud/v1"
 HYADES_DEFAULT_MODEL = "holo"
@@ -122,6 +128,7 @@ def _api_key():
         or os.environ.get("HYADES_VISION_API_KEY")
         or os.environ.get("HYADES_API_KEY")
         or os.environ.get("ZAI_API_KEY")
+        or os.environ.get("Z_AI_API_KEY")
         or os.environ.get("OPENAI_API_KEY")
         or ""
     ).strip()
@@ -407,12 +414,7 @@ def _summarize_provider_payload(payload):
 def _image_part(model):
     if not _env_bool("AI_AUTOTAG_USE_VISION", True):
         return None
-    if not model.thumbnail_file_id:
-        return None
-    try:
-        stored = model._read_stored_file(model.thumbnail_file_id)
-    except Exception:
-        return None
+    stored = _thumbnail_bytes(model)
     if not stored:
         return None
     max_bytes = int(os.environ.get("AI_AUTOTAG_MAX_IMAGE_BYTES", str(2 * 1024 * 1024)))
@@ -429,12 +431,7 @@ def _image_part(model):
 def _a2a_image_part(model):
     if not _env_bool("AI_AUTOTAG_USE_VISION", True):
         return None
-    if not model.thumbnail_file_id:
-        return None
-    try:
-        stored = model._read_stored_file(model.thumbnail_file_id)
-    except Exception:
-        return None
+    stored = _thumbnail_bytes(model)
     if not stored:
         return None
     max_bytes = int(os.environ.get("AI_AUTOTAG_MAX_IMAGE_BYTES", str(2 * 1024 * 1024)))
@@ -448,6 +445,166 @@ def _a2a_image_part(model):
             "mimeType": "image/webp",
         },
     }
+
+
+def _thumbnail_bytes(model):
+    if not model.thumbnail_file_id:
+        return None
+    try:
+        return model._read_stored_file(model.thumbnail_file_id)
+    except Exception:
+        return None
+
+
+def _mcp_command():
+    configured = os.environ.get("AI_AUTOTAG_MCP_COMMAND") or os.environ.get("ZAI_MCP_COMMAND")
+    return shlex.split(configured or ZAI_MCP_COMMAND)
+
+
+def _mcp_read_json_line(proc, responses, timeout):
+    try:
+        line = responses.get(timeout=timeout)
+    except queue.Empty as error:
+        raise TimeoutError("MCP server did not respond before timeout") from error
+    if not line:
+        raise RuntimeError("MCP server closed stdout")
+    try:
+        return json.loads(line)
+    except json.JSONDecodeError as error:
+        raise RuntimeError(f"MCP server returned invalid JSON: {_compact_response_detail(line)}") from error
+
+
+def _mcp_write(proc, payload):
+    proc.stdin.write(json.dumps(payload, separators=(",", ":")) + "\n")
+    proc.stdin.flush()
+
+
+def _extract_mcp_text(payload):
+    if payload.get("error"):
+        error = payload["error"]
+        message = error.get("message") if isinstance(error, dict) else str(error)
+        raise RuntimeError(f"MCP tool call failed: {message or 'unknown error'}")
+    result = payload.get("result") or {}
+    parts = result.get("content") if isinstance(result, dict) else None
+    if not isinstance(parts, list):
+        return _compact_response_detail(json.dumps(result, sort_keys=True))
+    texts = []
+    for part in parts:
+        if isinstance(part, dict):
+            if isinstance(part.get("text"), str):
+                texts.append(part["text"])
+            elif part.get("type") == "text" and isinstance(part.get("content"), str):
+                texts.append(part["content"])
+    return "\n".join(texts).strip()
+
+
+def _zai_mcp_enabled(provider):
+    if provider != "zai" or not _env_bool("AI_AUTOTAG_USE_VISION", True):
+        return False
+    return _transport(provider) == "zai-mcp" or _env_bool("AI_AUTOTAG_ZAI_MCP", False)
+
+
+def _zai_mcp_visual_context(model, provider, api_key):
+    if not _zai_mcp_enabled(provider):
+        return None
+    stored = _thumbnail_bytes(model)
+    if not stored:
+        return None
+    max_bytes = int(os.environ.get("AI_AUTOTAG_MAX_IMAGE_BYTES", str(2 * 1024 * 1024)))
+    if len(stored) > max_bytes:
+        return None
+
+    timeout = int(os.environ.get("AI_AUTOTAG_MCP_TIMEOUT", os.environ.get("AI_AUTOTAG_TIMEOUT", "120")))
+    tool_name = os.environ.get("AI_AUTOTAG_MCP_TOOL", "image_analysis")
+    image_arg = os.environ.get("AI_AUTOTAG_MCP_IMAGE_ARG", "image_path")
+    prompt_arg = os.environ.get("AI_AUTOTAG_MCP_PROMPT_ARG", "prompt")
+    prompt = os.environ.get(
+        "AI_AUTOTAG_MCP_PROMPT",
+        "Describe this 3D asset preview for catalog metadata. Mention visible subject, style, materials, "
+        "whether it appears rigged or animated if inferable, and whether it looks like a light emitter.",
+    )
+    suffix = os.environ.get("AI_AUTOTAG_MCP_IMAGE_SUFFIX", ".webp")
+
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as handle:
+            handle.write(stored)
+            temp_path = handle.name
+
+        env = os.environ.copy()
+        env["Z_AI_API_KEY"] = api_key
+        env.setdefault("Z_AI_MODE", os.environ.get("Z_AI_MODE", "ZAI"))
+        proc = subprocess.Popen(
+            _mcp_command(),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            env=env,
+        )
+        responses = queue.Queue()
+        stderr_lines = []
+
+        def read_stdout():
+            for line in proc.stdout:
+                responses.put(line)
+
+        def read_stderr():
+            for line in proc.stderr:
+                if len(stderr_lines) < 20:
+                    stderr_lines.append(line)
+
+        reader = threading.Thread(target=read_stdout, daemon=True)
+        reader.start()
+        stderr_reader = threading.Thread(target=read_stderr, daemon=True)
+        stderr_reader.start()
+
+        _mcp_write(proc, {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "3d-asset-manager", "version": "1.0"},
+            },
+        })
+        _mcp_read_json_line(proc, responses, timeout)
+        _mcp_write(proc, {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}})
+        _mcp_write(proc, {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": tool_name,
+                "arguments": {
+                    image_arg: temp_path,
+                    prompt_arg: prompt,
+                },
+            },
+        })
+        payload = _mcp_read_json_line(proc, responses, timeout)
+        return _extract_mcp_text(payload)
+    except Exception as error:
+        if _env_bool("AI_AUTOTAG_ZAI_MCP_REQUIRED", False):
+            raise RuntimeError(f"Z.AI Vision MCP failed: {error}") from error
+        return None
+    finally:
+        if temp_path:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+        if "proc" in locals():
+            try:
+                proc.terminate()
+                proc.wait(timeout=2)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
 
 
 def _compact_response_detail(detail):
@@ -709,6 +866,9 @@ def _ai_metadata(model, extra_context=None):
         },
         "extra_context": extra_context or {},
     }
+    vision_mcp_analysis = _zai_mcp_visual_context(model, provider, api_key)
+    if vision_mcp_analysis:
+        prompt["vision_mcp_analysis"] = vision_mcp_analysis
     user_text = (
         "Create marketplace metadata for this 3D asset. Return only JSON that matches the schema. "
         "Prefer concrete visible or file-derived details over generic filler.\n\n"
@@ -789,6 +949,7 @@ def _ai_metadata(model, extra_context=None):
     enriched["model"] = body["model"]
     enriched["response_id"] = payload.get("id")
     enriched["vision_fallback"] = vision_fallback
+    enriched["vision_mcp"] = bool(vision_mcp_analysis)
     return enriched
 
 
