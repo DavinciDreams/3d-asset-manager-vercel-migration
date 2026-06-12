@@ -32,6 +32,10 @@ def test_bearer_upload_enrich_approve_and_bundle():
         "asset_category": "prop",
         "asset_styles": "fantasy, stylized",
         "asset_types": "rigged, animated",
+        "runtime_metadata": json.dumps({
+            "behaviors": ["placeable"],
+            "light": {"enabled": False, "type": "none"},
+        }),
         "file": (io.BytesIO(glb), "warehouse_crate.glb"),
     }, content_type="multipart/form-data")
     assert upload.status_code == 201, upload.get_json()
@@ -39,6 +43,7 @@ def test_bearer_upload_enrich_approve_and_bundle():
     assert upload.get_json()["model"]["asset_category"] == "prop"
     assert upload.get_json()["model"]["asset_styles"] == ["fantasy", "stylized"]
     assert upload.get_json()["model"]["asset_types"] == ["rigged", "animated"]
+    assert upload.get_json()["model"]["runtime_metadata"]["behaviors"] == ["placeable"]
     assert len(upload.get_json()["model"]["content_hash"]) == 64
 
     duplicate = client.post("/api/upload", headers=headers, data={
@@ -70,6 +75,19 @@ def test_bearer_upload_enrich_approve_and_bundle():
             "asset_category": "building",
             "asset_styles": "fantasy, medieval",
             "asset_types": "modular, game-ready",
+            "runtime_metadata": {
+                "behaviors": ["light-emitter"],
+                "light": {
+                    "enabled": True,
+                    "type": "point",
+                    "color": "#ffb35a",
+                    "intensity": 1.5,
+                    "range": 8,
+                    "cast_shadow": True,
+                    "attach_to": "",
+                    "offset": [0, 0.6, 0],
+                },
+            },
         },
     )
     assert update.status_code == 200, update.get_json()
@@ -77,6 +95,8 @@ def test_bearer_upload_enrich_approve_and_bundle():
     assert updated_model["asset_category"] == "building"
     assert updated_model["asset_styles"] == ["fantasy", "medieval"]
     assert updated_model["asset_types"] == ["modular", "game-ready"]
+    assert updated_model["runtime_metadata"]["light"]["enabled"] is True
+    assert "light-emitter" in updated_model["runtime_metadata"]["behaviors"]
 
     approval = client.patch(
         f"/api/model/{model_id}/approval",
@@ -124,6 +144,8 @@ def test_openapi_documents_workflow_and_bearer_auth():
     assert "asset_styles" in model_props
     assert "asset_types" in model_props
     assert "content_hash" in model_props
+    assert "runtime_metadata" in model_props
+    assert "RuntimeMetadata" in spec["components"]["schemas"]
 
 
 def test_hyades_a2a_enrichment_uses_holo_vision(monkeypatch):
@@ -135,6 +157,19 @@ def test_hyades_a2a_enrichment_uses_holo_vision(monkeypatch):
         "asset_category": "building",
         "asset_styles": ["fantasy"],
         "asset_types": ["game-ready"],
+        "runtime_metadata": {
+            "behaviors": ["light-emitter"],
+            "light": {
+                "enabled": True,
+                "type": "point",
+                "color": "#ffb35a",
+                "intensity": 1.5,
+                "range": 8,
+                "cast_shadow": True,
+                "attach_to": "",
+                "offset": [0, 0.6, 0],
+            },
+        },
         "tags": ["shrine", "fantasy", "stone"],
         "description": "A fantasy shrine asset with a moonlit stone structure.",
         "summary": "Fantasy shrine asset.",
@@ -179,6 +214,7 @@ def test_hyades_a2a_enrichment_uses_holo_vision(monkeypatch):
         asset_category = None
         asset_styles = []
         asset_types = []
+        runtime_metadata = {}
         approve_game_ready = False
         approve_asset_store = False
         conversion_status = None
@@ -207,3 +243,4 @@ def test_hyades_a2a_enrichment_uses_holo_vision(monkeypatch):
     assert enriched["provider"] == "hyades"
     assert enriched["transport"] == "a2a"
     assert enriched["asset_category"] == "building"
+    assert enriched["runtime_metadata"]["light"]["enabled"] is True

@@ -127,6 +127,34 @@ client by referencing local image/video paths; the Flask enrichment endpoint can
 also include stored thumbnails when the selected OpenAI-compatible model accepts
 image content.
 
+## Runtime Metadata for Tellus
+
+Asset API responses include a `runtime_metadata` object for in-world behavior
+hints. Tellus can use this when it places models from the OpenAPI/tool surface.
+For example, lantern-like assets may be enriched or edited to include:
+
+```json
+{
+  "behaviors": ["light-emitter"],
+  "light": {
+    "enabled": true,
+    "type": "point",
+    "color": "#ffb35a",
+    "intensity": 1.5,
+    "range": 8,
+    "cast_shadow": true,
+    "attach_to": "",
+    "offset": [0, 0.6, 0]
+  }
+}
+```
+
+When `runtime_metadata.light.enabled` is true, the Tellus Three.js loader should
+attach a matching `THREE.PointLight`, `THREE.SpotLight`, or other supported light
+to the named `attach_to` node when present, otherwise to the model root with the
+given offset. The asset manager treats this as metadata only; the world runtime
+owns the actual light creation.
+
 ## Tellus Persistence
 
 Tellus should keep using Cloudflare Durable Objects for live WebSocket

@@ -217,6 +217,7 @@ class Model3D:
                  upload_date=None, download_count=0, gridfs_file_id=None,
                  camera_orbit=None, thumbnail_file_id=None, tags=None,
                  asset_category=None, asset_styles=None, asset_types=None,
+                 runtime_metadata=None,
                  preview_file_id=None, default_animation=None, default_vrma_id=None,
                  viewable_file_id=None, viewable_format=None,
                  conversion_status=None, conversion_error=None,
@@ -243,6 +244,7 @@ class Model3D:
         self.asset_category = asset_category
         self.asset_styles = asset_styles or []
         self.asset_types = asset_types or []
+        self.runtime_metadata = self.normalize_runtime_metadata(runtime_metadata)
         self.preview_file_id = preview_file_id
         self.default_animation = default_animation
         self.default_vrma_id = default_vrma_id
@@ -282,6 +284,7 @@ class Model3D:
             "asset_category": self.asset_category,
             "asset_styles": self.asset_styles or [],
             "asset_types": self.asset_types or [],
+            "runtime_metadata": self.runtime_metadata or {},
             "preview_file_id": self.preview_file_id,
             "default_animation": self.default_animation,
             "default_vrma_id": self.default_vrma_id,
@@ -451,6 +454,7 @@ class Model3D:
             asset_category=model_data.get("asset_category"),
             asset_styles=model_data.get("asset_styles") or [],
             asset_types=model_data.get("asset_types") or [],
+            runtime_metadata=model_data.get("runtime_metadata") or {},
             preview_file_id=model_data.get("preview_file_id"),
             default_animation=model_data.get("default_animation"),
             default_vrma_id=model_data.get("default_vrma_id"),
@@ -492,6 +496,66 @@ class Model3D:
         value = str(raw or "").strip().lower()
         value = " ".join(token for token in value.replace("_", " ").replace("-", " ").split())
         return value or None
+
+    @staticmethod
+    def normalize_runtime_metadata(raw):
+        if raw is None or raw == "":
+            return {}
+        if isinstance(raw, str):
+            import json
+            try:
+                raw = json.loads(raw)
+            except (TypeError, ValueError):
+                return {}
+        if not isinstance(raw, dict):
+            return {}
+
+        metadata = dict(raw)
+        behaviors = Model3D.normalize_tags(metadata.get("behaviors", []))
+        light = metadata.get("light")
+        normalized = {}
+        if behaviors:
+            normalized["behaviors"] = behaviors
+        if isinstance(light, dict):
+            enabled = bool(light.get("enabled"))
+            light_type = str(light.get("type") or ("point" if enabled else "none")).strip().lower()
+            if light_type not in {"none", "point", "spot", "directional", "ambient"}:
+                light_type = "point" if enabled else "none"
+            color = str(light.get("color") or "#ffb35a").strip()
+            if not color.startswith("#") or len(color) not in {4, 7}:
+                color = "#ffb35a"
+            try:
+                intensity = float(light.get("intensity", 1.5 if enabled else 0))
+            except (TypeError, ValueError):
+                intensity = 1.5 if enabled else 0
+            try:
+                range_value = float(light.get("range", 8 if enabled else 0))
+            except (TypeError, ValueError):
+                range_value = 8 if enabled else 0
+            raw_offset = light.get("offset") if isinstance(light.get("offset"), list) else [0, 0, 0]
+            offset = []
+            for item in (raw_offset + [0, 0, 0])[:3]:
+                try:
+                    offset.append(float(item))
+                except (TypeError, ValueError):
+                    offset.append(0.0)
+            attach_to = str(light.get("attach_to") or "").strip()
+            normalized["light"] = {
+                "enabled": enabled,
+                "type": light_type,
+                "color": color,
+                "intensity": max(0, intensity),
+                "range": max(0, range_value),
+                "cast_shadow": bool(light.get("cast_shadow", False)),
+                "attach_to": attach_to,
+                "offset": offset,
+            }
+            if enabled and "light-emitter" not in behaviors:
+                normalized["behaviors"] = (behaviors or []) + ["light-emitter"]
+        for key in ["physics", "interaction", "spawn"]:
+            if isinstance(metadata.get(key), dict):
+                normalized[key] = metadata[key]
+        return normalized
 
     @staticmethod
     def get_by_id(model_id):

@@ -49,16 +49,49 @@ def _heuristic_metadata(model):
         f"{clean_name} is a {fmt.upper() if fmt else '3D'} asset prepared for cataloging, "
         "preview, and downstream packaging."
     )
+    light_words = {"lantern", "lamp", "torch", "candle", "fire", "flame", "brazier", "sconce", "glow", "crystal"}
+    emits_light = any(word in light_words for word in words)
     return {
         "title": title,
         "asset_category": None,
         "asset_styles": [],
-        "asset_types": ["game-ready"] if model.approve_game_ready else [],
+        "asset_types": Model3D.normalize_tags((["game-ready"] if model.approve_game_ready else []) + (["light-emitter"] if emits_light else [])),
+        "runtime_metadata": _default_runtime_metadata(emits_light),
         "tags": Model3D.normalize_tags(tags[:12]),
         "description": description,
         "summary": description[:180],
         "categories": [],
         "quality_notes": [],
+    }
+
+
+def _default_runtime_metadata(emits_light=False):
+    if emits_light:
+        return {
+            "behaviors": ["light-emitter"],
+            "light": {
+                "enabled": True,
+                "type": "point",
+                "color": "#ffb35a",
+                "intensity": 1.5,
+                "range": 8,
+                "cast_shadow": True,
+                "attach_to": "",
+                "offset": [0, 0.6, 0],
+            },
+        }
+    return {
+        "behaviors": [],
+        "light": {
+            "enabled": False,
+            "type": "none",
+            "color": "#ffffff",
+            "intensity": 0,
+            "range": 0,
+            "cast_shadow": False,
+            "attach_to": "",
+            "offset": [0, 0, 0],
+        },
     }
 
 
@@ -345,7 +378,40 @@ def _ai_metadata(model, extra_context=None):
                 "type": "array",
                 "items": {"type": "string"},
                 "maxItems": 8,
-                "description": "Technical/use traits such as rigged, animated, game-ready, modular, pbr, tileable, vrm, optimized.",
+                "description": "Technical/use traits such as rigged, animated, game-ready, modular, pbr, tileable, vrm, optimized, light-emitter.",
+            },
+            "runtime_metadata": {
+                "type": "object",
+                "additionalProperties": False,
+                "description": "Runtime hints for Tellus/Three.js. Be conservative: only enable light when the asset is clearly a lantern, lamp, torch, fire, candle, glowing crystal, or similar emitter.",
+                "properties": {
+                    "behaviors": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "maxItems": 8,
+                    },
+                    "light": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "enabled": {"type": "boolean"},
+                            "type": {"type": "string", "enum": ["none", "point", "spot", "directional", "ambient"]},
+                            "color": {"type": "string", "description": "Hex color such as #ffb35a."},
+                            "intensity": {"type": "number"},
+                            "range": {"type": "number"},
+                            "cast_shadow": {"type": "boolean"},
+                            "attach_to": {"type": "string", "description": "Optional GLB node name to attach the light to, empty when unknown."},
+                            "offset": {
+                                "type": "array",
+                                "items": {"type": "number"},
+                                "minItems": 3,
+                                "maxItems": 3,
+                            },
+                        },
+                        "required": ["enabled", "type", "color", "intensity", "range", "cast_shadow", "attach_to", "offset"],
+                    },
+                },
+                "required": ["behaviors", "light"],
             },
             "description": {"type": "string"},
             "summary": {"type": "string"},
@@ -357,6 +423,7 @@ def _ai_metadata(model, extra_context=None):
             "asset_category",
             "asset_styles",
             "asset_types",
+            "runtime_metadata",
             "tags",
             "description",
             "summary",
@@ -375,6 +442,7 @@ def _ai_metadata(model, extra_context=None):
             "asset_category": model.asset_category,
             "asset_styles": model.asset_styles,
             "asset_types": model.asset_types,
+            "runtime_metadata": model.runtime_metadata,
             "approve_game_ready": model.approve_game_ready,
             "approve_asset_store": model.approve_asset_store,
             "conversion_status": model.conversion_status,
@@ -444,6 +512,9 @@ def enrich_model(model, extra_context=None):
     enriched["asset_category"] = Model3D.normalize_category(enriched.get("asset_category"))
     enriched["asset_styles"] = Model3D.normalize_tags(enriched.get("asset_styles", []))
     enriched["asset_types"] = Model3D.normalize_tags(enriched.get("asset_types", []))
+    enriched["runtime_metadata"] = Model3D.normalize_runtime_metadata(
+        enriched.get("runtime_metadata", _default_runtime_metadata(False))
+    )
     enriched["tags"] = Model3D.normalize_tags(enriched.get("tags", []))
     enriched["description"] = (enriched.get("description") or "").strip()
     enriched["summary"] = (enriched.get("summary") or "").strip()
