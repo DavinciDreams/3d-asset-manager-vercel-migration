@@ -631,6 +631,10 @@ const HAS_THUMBNAIL = {{ (model.thumbnail_file_id is not none) | tojson }};
 const HAS_PREVIEW = {{ (model.preview_file_id is not none) | tojson }};
 // Is the current user the owner? Only owners capture/upload thumbnails.
 const IS_OWNER = {{ (current_user.is_authenticated and current_user.id == model.user_id) | tojson }};
+// Whether a baked fixed-eyes/mouth variant already exists. The Fix Eyes/Mouth
+// editors load THIS as their base (not the original) so prior fixes carry into
+// the next bake (e.g. add a mouth without losing previously-baked eyes+blink).
+const HAS_FIXED_VARIANT = {{ (fixed_eyes_variant is not none) | tojson }};
 
 // Which variant is currently shown: 'original' or 'game'.
 let CURRENT_VARIANT = 'original';
@@ -1257,8 +1261,13 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     toggle.addEventListener('click', () => {
-        // Ensure the Three viewer is loaded (it normally auto-loads on page open).
-        if (!viewer()) { loadDetailModel(MODEL_ID, 'original'); }
+        // Load the existing fixed variant as the base (so prior eyes/mouth carry
+        // forward) when one exists; otherwise the original. Reload if the viewer
+        // is currently showing a different source than we need.
+        const wantVariant = HAS_FIXED_VARIANT ? 'fixed_eyes' : 'original';
+        if (!viewer() || CURRENT_VARIANT !== wantVariant) {
+            loadDetailModel(MODEL_ID, wantVariant);
+        }
         panel.classList.toggle('hidden');
     });
 
