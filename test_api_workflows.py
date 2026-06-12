@@ -1121,3 +1121,78 @@ def test_openai_vision_cloudflare_error_retries_text_only(monkeypatch):
     assert isinstance(calls[1]["messages"][1]["content"], str)
     assert enriched["vision_fallback"] is True
     assert enriched["title"] == "Stone Lantern"
+
+
+def test_ai_enrichment_infers_facets_and_title_from_floral_vision(monkeypatch):
+    from app import ai_enrichment
+
+    output = {
+        "title": "Pixal3D AI-Generated 3D Model",
+        "asset_category": None,
+        "asset_styles": [],
+        "asset_types": [],
+        "runtime_metadata": {
+            "behaviors": [],
+            "light": {
+                "enabled": False,
+                "type": "none",
+                "color": "#ffffff",
+                "intensity": 0,
+                "range": 0,
+                "cast_shadow": False,
+                "attach_to": "",
+                "offset": [0, 0, 0],
+            },
+        },
+        "tags": ["flowers", "bouquet", "watercolor", "painterly", "stylized", "static", "glb"],
+        "description": (
+            "A stylized floral arrangement featuring red, pink, and purple blooms with green leaves and stems. "
+            "Rendered in a painterly watercolor aesthetic as a static decorative prop."
+        ),
+        "summary": "A static watercolor floral arrangement.",
+        "categories": [],
+        "quality_notes": [],
+    }
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps({
+                "id": "chatcmpl-floral",
+                "choices": [{"message": {"content": json.dumps(output)}}],
+            }).encode("utf-8")
+
+    class FakeModel:
+        name = "pixal3d_1781271874905.glb"
+        description = ""
+        original_filename = "pixal3d_1781271874905.glb"
+        file_format = "glb"
+        file_size = 1234
+        tags = []
+        asset_category = None
+        asset_styles = []
+        asset_types = []
+        runtime_metadata = {}
+        approve_game_ready = False
+        approve_asset_store = False
+        conversion_status = None
+        thumbnail_file_id = None
+
+    monkeypatch.setenv("AI_AUTOTAG_PROVIDER", "openai")
+    monkeypatch.setenv("AI_AUTOTAG_API_KEY", "openai-key")
+    monkeypatch.setenv("AI_AUTOTAG_USE_VISION", "0")
+    monkeypatch.setattr(ai_enrichment.urllib.request, "urlopen", lambda request, timeout: FakeResponse())
+
+    enriched = ai_enrichment.enrich_model(FakeModel())
+
+    assert enriched["title"] == "Watercolor Floral Arrangement"
+    assert enriched["asset_category"] == "flora"
+    assert {"watercolor", "painterly", "stylized"}.issubset(set(enriched["asset_styles"]))
+    assert {"static", "decorative-prop"}.issubset(set(enriched["asset_types"]))

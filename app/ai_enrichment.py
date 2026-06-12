@@ -110,6 +110,90 @@ def _default_runtime_metadata(emits_light=False):
     }
 
 
+def _contains_any(text, words):
+    lowered = (text or "").lower()
+    return any(word in lowered for word in words)
+
+
+def _infer_missing_facets(enriched):
+    text = " ".join([
+        str(enriched.get("title") or ""),
+        str(enriched.get("description") or ""),
+        str(enriched.get("summary") or ""),
+        str(enriched.get("vision_mcp_analysis") or ""),
+        " ".join(str(tag) for tag in enriched.get("tags") or []),
+    ]).lower()
+    category = Model3D.normalize_category(enriched.get("asset_category"))
+    generic_categories = {None, "", "other", "prop", "props", "3d model", "3d models", "uncategorized"}
+    category_rules = [
+        ("flora", ("flower", "flowers", "floral", "bouquet", "bloom", "blooms", "leaf", "leaves", "stem", "stems", "plant", "plants", "tree", "trees", "grass", "moss", "vine", "vines")),
+        ("fauna", ("animal", "creature", "bird", "fish", "insect", "horse", "cat", "dog", "wolf", "dragon")),
+        ("building", ("building", "house", "tower", "castle", "temple", "hut", "cabin", "wall", "roof", "architecture")),
+        ("person", ("person", "human", "character", "humanoid", "man", "woman", "figure")),
+        ("vehicle", ("vehicle", "car", "truck", "ship", "boat", "aircraft", "spaceship", "wagon")),
+        ("environment", ("terrain", "landscape", "scene", "environment", "diorama", "level")),
+        ("material", ("material", "texture", "tileable", "surface", "fabric", "shader")),
+    ]
+    if category in generic_categories:
+        for candidate, words in category_rules:
+            if _contains_any(text, words):
+                enriched["asset_category"] = candidate
+                break
+    styles = Model3D.normalize_tags(enriched.get("asset_styles", []))
+    style_rules = {
+        "watercolor": ("watercolor", "translucent wash", "color blending"),
+        "painterly": ("painterly", "painted", "hand-painted"),
+        "stylized": ("stylized", "non-photorealistic", "illustrative"),
+        "fantasy": ("fantasy", "magical", "enchanted"),
+        "realistic": ("realistic", "photorealistic", "lifelike"),
+        "low-poly": ("low-poly", "low poly"),
+    }
+    for style, words in style_rules.items():
+        if style not in styles and _contains_any(text, words):
+            styles.append(style)
+    enriched["asset_styles"] = styles[:6]
+
+    asset_types = Model3D.normalize_tags(enriched.get("asset_types", []))
+    type_rules = {
+        "static": ("static", "not rigged", "not animated", "no visible joints", "single pose"),
+        "rigged": ("rigged", "skeleton", "armature", "joints"),
+        "animated": ("animated", "animation", "keyframes"),
+        "light-emitter": ("light emitter", "emits light", "glowing", "lantern", "lamp", "torch", "candle"),
+        "decorative-prop": ("decorative", "prop", "decoration", "ornamental"),
+        "pbr": ("pbr", "physically based"),
+        "high-poly": ("high-poly", "high poly"),
+        "low-poly": ("low-poly", "low poly"),
+    }
+    for asset_type, words in type_rules.items():
+        if asset_type not in asset_types and _contains_any(text, words):
+            asset_types.append(asset_type)
+    if "static" in asset_types:
+        asset_types = [item for item in asset_types if item not in {"rigged", "animated"}]
+    enriched["asset_types"] = asset_types[:8]
+
+    title = str(enriched.get("title") or "").strip()
+    generic_title = _contains_any(
+        title,
+        ("ai-generated 3d model", "generated 3d model", "pixal3d", "3d model", "untitled", "asset"),
+    )
+    if generic_title and _contains_any(text, ("flower", "flowers", "floral", "bouquet", "bloom", "blooms")):
+        title_parts = []
+        for style in ("watercolor", "painterly", "stylized"):
+            if style in styles:
+                title_parts.append(style)
+                break
+        title_parts.append("floral arrangement" if _contains_any(text, ("arrangement", "bouquet")) else "flowers")
+        enriched["title"] = " ".join(title_parts).title()
+    elif generic_title and category and category not in generic_categories:
+        subject = category
+        for tag in Model3D.normalize_tags(enriched.get("tags", [])):
+            if tag not in {"glb", "gltf", "fbx", "3d-model", "ai-generated", "static"}:
+                subject = tag
+                break
+        enriched["title"] = subject.replace("-", " ").title()
+    return enriched
+
+
 def _env_bool(name, default=False):
     raw = os.environ.get(name)
     if raw is None:
@@ -913,23 +997,23 @@ def _ai_metadata(model, extra_context=None):
             },
             "title": {
                 "type": "string",
-                "description": "A short descriptive catalog title, not just the filename.",
+                "description": "A short descriptive catalog title based on the visible subject and style, not the filename, generator, provider, or generic phrases like AI-generated 3D model.",
             },
             "asset_category": {
                 "type": "string",
-                "description": "One broad what-it-is bucket such as flora, fauna, building, person, prop, vehicle, environment, animation, material, or other. Use other when uncertain.",
+                "description": "One broad what-it-is bucket for filtering. Prefer the subject bucket over generic prop: flora for flowers/plants/trees/leaves, fauna for animals/creatures, building for architecture, person for characters, vehicle, environment, material, animation, prop, or other. Use prop only for objects that do not fit a more specific broad bucket.",
             },
             "asset_styles": {
                 "type": "array",
                 "items": {"type": "string"},
                 "maxItems": 6,
-                "description": "Art direction or genre labels such as fantasy, sci-fi, medieval, modern, stylized, realistic, low-poly, cozy, horror, cyberpunk.",
+                "description": "Art direction, medium, or genre labels such as fantasy, sci-fi, medieval, modern, stylized, realistic, low-poly, cozy, horror, cyberpunk, watercolor, painterly, hand-painted.",
             },
             "asset_types": {
                 "type": "array",
                 "items": {"type": "string"},
                 "maxItems": 8,
-                "description": "Technical/use traits such as rigged, animated, game-ready, modular, pbr, tileable, vrm, optimized, light-emitter.",
+                "description": "Technical/use traits such as static, rigged, animated, game-ready, modular, decorative-prop, pbr, tileable, vrm, optimized, light-emitter, high-poly, low-poly.",
             },
             "runtime_metadata": {
                 "type": "object",
@@ -1007,7 +1091,12 @@ def _ai_metadata(model, extra_context=None):
         prompt["metadata_instruction"] = (
             "Use vision_mcp_analysis as the primary source for visible subject, materials, style, colors, "
             "and light-emitter hints. Avoid generic generation-pipeline wording such as baseline mesh, "
-            "background prop, sculpting base, or retopology unless those details are visibly supported."
+            "background prop, sculpting base, or retopology unless those details are visibly supported. "
+            "Always fill asset_category, asset_styles, and asset_types from the visual analysis. For example, "
+            "flowers/plants/leaves should use asset_category flora even when the object is also decorative; "
+            "watercolor or hand-painted looks belong in asset_styles; static/not-rigged/non-animated observations "
+            "belong in asset_types as static. The title should name the visible asset, for example Watercolor "
+            "Floral Arrangement, not Pixal3D AI-Generated 3D Model."
         )
     elif vision_mcp.get("enabled"):
         prompt["vision_mcp_status"] = {
@@ -1017,6 +1106,11 @@ def _ai_metadata(model, extra_context=None):
     user_text = (
         "Create marketplace metadata for this 3D asset. Return only JSON that matches the schema. "
         "Prefer concrete visible or file-derived details over generic filler. "
+        "Write the title as a concise product/catalog name for the visible subject and style; never use the "
+        "generator/provider name or generic source labels as the title. "
+        "Do not leave asset_category, asset_styles, or asset_types empty when visual analysis provides evidence. "
+        "Use asset_category for the broad subject bucket, asset_styles for aesthetic/genre/medium, "
+        "and asset_types for technical/use traits. "
         "If visual analysis is unavailable, say only what can be inferred from the filename and asset fields, "
         "and avoid pretending to know the object's appearance.\n\n"
         + json.dumps(prompt, sort_keys=True)
@@ -1108,6 +1202,7 @@ def enrich_model(model, extra_context=None):
     if enriched is None:
         enriched = _heuristic_metadata(model)
         enriched["provider"] = "heuristic"
+    enriched = _infer_missing_facets(enriched)
     enriched["title"] = (enriched.get("title") or "").strip()
     enriched["asset_category"] = Model3D.normalize_category(enriched.get("asset_category"))
     enriched["asset_styles"] = Model3D.normalize_tags(enriched.get("asset_styles", []))
