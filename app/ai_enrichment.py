@@ -353,50 +353,68 @@ def _post_json(url, body, headers, provider=None, transport=None):
 
 
 def _a2a_metadata(model, provider, api_key, schema, user_text):
-    parts = [
-        {
-            "kind": "text",
-            "text": (
-                "You enrich 3D asset store records. Return concise JSON only. "
-                "Tags should be lowercase marketplace/search tags, not sentences. "
-                "Descriptions should help a human understand what the asset is and how it may be used.\n\n"
-                + user_text
-                + "\n\nJSON schema:\n"
-                + json.dumps(schema, sort_keys=True)
-            )
-        }
-    ]
-    image = _a2a_image_part(model)
-    if image:
-        parts.append(image)
-    body = {
-        "jsonrpc": "2.0",
-        "id": f"asset-enrichment-{uuid.uuid4()}",
-        "method": os.environ.get("HYADES_A2A_METHOD", "message/send"),
-        "params": {
-            "message": {
-                "role": os.environ.get("HYADES_A2A_ROLE", "user"),
-                "parts": parts,
-                "messageId": f"asset-enrichment-{uuid.uuid4()}",
-            },
-            "metadata": {
-                "model": _model_name(provider),
-            },
-            "configuration": {
-                "acceptedOutputModes": ["application/json", "text/plain"],
-            },
-        },
+    text_part = {
+        "kind": "text",
+        "text": (
+            "You enrich 3D asset store records. Return concise JSON only. "
+            "Tags should be lowercase marketplace/search tags, not sentences. "
+            "Descriptions should help a human understand what the asset is and how it may be used.\n\n"
+            + user_text
+            + "\n\nJSON schema:\n"
+            + json.dumps(schema, sort_keys=True)
+        ),
     }
-    payload = _post_json(
-        _base_url(provider),
-        body,
-        {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        provider=provider,
-        transport="a2a",
-    )
+    image_part = _a2a_image_part(model)
+
+    def build_body(include_image=True):
+        parts = [text_part]
+        if include_image and image_part:
+            parts.append(image_part)
+        return {
+            "jsonrpc": "2.0",
+            "id": f"asset-enrichment-{uuid.uuid4()}",
+            "method": os.environ.get("HYADES_A2A_METHOD", "message/send"),
+            "params": {
+                "message": {
+                    "role": os.environ.get("HYADES_A2A_ROLE", "user"),
+                    "parts": parts,
+                    "messageId": f"asset-enrichment-{uuid.uuid4()}",
+                },
+                "metadata": {
+                    "model": _model_name(provider),
+                },
+                "configuration": {
+                    "acceptedOutputModes": ["application/json", "text/plain"],
+                },
+            },
+        }
+
+    vision_fallback = False
+    try:
+        payload = _post_json(
+            _base_url(provider),
+            build_body(include_image=True),
+            {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            provider=provider,
+            transport="a2a",
+        )
+    except AIProviderTransientError:
+        if not image_part or not _env_bool("AI_AUTOTAG_RETRY_TEXT_ONLY", True):
+            raise
+        vision_fallback = True
+        payload = _post_json(
+            _base_url(provider),
+            build_body(include_image=False),
+            {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            provider=provider,
+            transport="a2a-text",
+        )
     output_text = _strip_json_fence(_extract_a2a_output(payload))
     if not output_text:
         raise RuntimeError("AI enrichment returned no A2A output text.")
@@ -406,6 +424,7 @@ def _a2a_metadata(model, provider, api_key, schema, user_text):
     enriched["base_url"] = _base_url(provider)
     enriched["model"] = _model_name(provider)
     enriched["response_id"] = payload.get("id")
+    enriched["vision_fallback"] = vision_fallback
     return enriched
 
 

@@ -293,6 +293,81 @@ def test_hyades_a2a_enrichment_uses_holo_vision(monkeypatch):
     assert enriched["runtime_metadata"]["light"]["enabled"] is True
 
 
+def test_hyades_a2a_timeout_retries_text_only(monkeypatch):
+    from app import ai_enrichment
+
+    calls = []
+    output = {
+        "title": "Moonlit Shrine",
+        "asset_category": "building",
+        "asset_styles": ["fantasy"],
+        "asset_types": ["game-ready"],
+        "runtime_metadata": {"behaviors": [], "light": {"enabled": False, "type": "none", "color": "#ffffff", "intensity": 0, "range": 0, "cast_shadow": False, "attach_to": "", "offset": [0, 0, 0]}},
+        "tags": ["shrine", "fantasy", "stone"],
+        "description": "A fantasy shrine asset.",
+        "summary": "Fantasy shrine asset.",
+        "categories": ["environment"],
+        "quality_notes": [],
+    }
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps({
+                "jsonrpc": "2.0",
+                "id": "response-1",
+                "result": {"task": {"artifacts": [{"parts": [{"text": json.dumps(output)}]}]}},
+            }).encode("utf-8")
+
+    def fake_urlopen(request, timeout):
+        calls.append(json.loads(request.data.decode("utf-8")))
+        if len(calls) == 1:
+            raise TimeoutError("The read operation timed out")
+        return FakeResponse()
+
+    class FakeModel:
+        name = "moon_shrine"
+        description = ""
+        original_filename = "moon_shrine.glb"
+        file_format = "glb"
+        file_size = 1234
+        tags = []
+        asset_category = None
+        asset_styles = []
+        asset_types = []
+        runtime_metadata = {}
+        approve_game_ready = False
+        approve_asset_store = False
+        conversion_status = None
+        thumbnail_file_id = "thumb"
+
+        def _read_stored_file(self, file_id):
+            assert file_id == "thumb"
+            return b"webp-thumbnail"
+
+    monkeypatch.setenv("AI_AUTOTAG_PROVIDER", "hyades")
+    monkeypatch.setenv("AI_AUTOTAG_API_KEY", "hyades-key")
+    monkeypatch.setenv("AI_AUTOTAG_RETRY_TEXT_ONLY", "1")
+    monkeypatch.delenv("AI_AUTOTAG_BASE_URL", raising=False)
+    monkeypatch.delenv("AI_AUTOTAG_TRANSPORT", raising=False)
+    monkeypatch.delenv("AI_AUTOTAG_MODEL", raising=False)
+    monkeypatch.setattr(ai_enrichment.urllib.request, "urlopen", fake_urlopen)
+
+    enriched = ai_enrichment.enrich_model(FakeModel())
+
+    assert len(calls) == 2
+    assert any(part.get("kind") == "file" for part in calls[0]["params"]["message"]["parts"])
+    assert not any(part.get("kind") == "file" for part in calls[1]["params"]["message"]["parts"])
+    assert enriched["provider"] == "hyades"
+    assert enriched["transport"] == "a2a"
+    assert enriched["vision_fallback"] is True
+
+
 def test_openai_vision_cloudflare_error_retries_text_only(monkeypatch):
     from app import ai_enrichment
 
@@ -302,6 +377,7 @@ def test_openai_vision_cloudflare_error_retries_text_only(monkeypatch):
         "asset_category": "prop",
         "asset_styles": ["fantasy"],
         "asset_types": ["game-ready"],
+        "runtime_metadata": {"behaviors": ["light-emitter"], "light": {"enabled": True, "type": "point", "color": "#ffb35a", "intensity": 1.5, "range": 8, "cast_shadow": True, "attach_to": "", "offset": [0, 0.6, 0]}},
         "tags": ["lantern", "stone", "prop"],
         "description": "A stone lantern prop for a fantasy scene.",
         "summary": "Fantasy stone lantern.",
@@ -346,6 +422,7 @@ def test_openai_vision_cloudflare_error_retries_text_only(monkeypatch):
         asset_category = None
         asset_styles = []
         asset_types = []
+        runtime_metadata = {}
         approve_game_ready = False
         approve_asset_store = False
         conversion_status = None
