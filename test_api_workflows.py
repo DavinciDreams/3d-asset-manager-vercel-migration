@@ -246,8 +246,11 @@ def test_hyades_a2a_enrichment_uses_holo_vision(monkeypatch):
     assert captured["body"]["method"] == "message/send"
     assert captured["body"]["params"]["metadata"]["model"] == "holo"
     parts = captured["body"]["params"]["message"]["parts"]
-    assert any(part.get("text") for part in parts)
-    assert any(part.get("raw") for part in parts)
+    text_part = next(part for part in parts if part.get("kind") == "text")
+    file_part = next(part for part in parts if part.get("kind") == "file")
+    assert text_part["text"]
+    assert file_part["file"]["bytes"]
+    assert file_part["file"]["mimeType"] == "image/webp"
     assert enriched["provider"] == "hyades"
     assert enriched["transport"] == "a2a"
     assert enriched["asset_category"] == "building"
