@@ -631,9 +631,24 @@ const HAS_THUMBNAIL = {{ (model.thumbnail_file_id is not none) | tojson }};
 const HAS_PREVIEW = {{ (model.preview_file_id is not none) | tojson }};
 // Is the current user the owner? Only owners capture/upload thumbnails.
 const IS_OWNER = {{ (current_user.is_authenticated and current_user.id == model.user_id) | tojson }};
+// Whether a baked fixed-eyes/mouth variant already exists. The Fix Eyes/Mouth
+// editors load THIS as their base (not the original) so prior fixes carry into
+// the next bake (e.g. add a mouth without losing previously-baked eyes+blink).
+const HAS_FIXED_VARIANT = {{ (fixed_eyes_variant is not none) | tojson }};
+// Whether a game-optimized variant exists (it bakes in any eyes/mouth too).
+const HAS_GAME_VARIANT = {{ (game_variant is not none) | tojson }};
 
-// Which variant is currently shown: 'original' or 'game'.
-let CURRENT_VARIANT = 'original';
+// The best variant to show in the main preview: game-optimized (smallest AND
+// includes any baked eyes/mouth) -> fixed-eyes -> original. Matches browse +
+// galleries so the detail page shows the fixed/animated version by default.
+function bestVariant() {
+    if (HAS_GAME_VARIANT) return 'game';
+    if (HAS_FIXED_VARIANT) return 'fixed_eyes';
+    return 'original';
+}
+
+// Which variant is currently shown: 'original' | 'game' | 'fixed_eyes'.
+let CURRENT_VARIANT = bestVariant();
 
 function loadDetailModel(modelId, variant) {
     const container = document.getElementById(`viewer-detail-${modelId}`);
@@ -1055,7 +1070,22 @@ document.addEventListener('DOMContentLoaded', function() {
     const container = document.getElementById('viewer-detail-{{ model.id }}');
     const ready = container && container.getAttribute('data-viewable-ready') === '1';
     if (ready) {
-        setTimeout(() => loadDetailModel('{{ model.id }}'), 500);
+        // Load the best available variant (game/fixed-eyes/original) so the main
+        // preview shows the fixed + animated version by default, and reflect it
+        // in the variant toggle's active button.
+        const initial = bestVariant();
+        if (initial !== 'original') {
+            const active = 'bg-indigo-600 text-white';
+            const inactive = 'bg-white text-gray-700 hover:bg-gray-50';
+            ['original','game','fixed_eyes'].forEach((k) => {
+                const btn = document.getElementById('variant-btn-' + k);
+                if (!btn) return;
+                const wasHidden = btn.classList.contains('hidden');
+                btn.className = 'px-4 py-2 font-medium ' + (k === initial ? active : inactive);
+                if (wasHidden) btn.classList.add('hidden');
+            });
+        }
+        setTimeout(() => loadDetailModel('{{ model.id }}', initial), 500);
     } else if (container && container.getAttribute('data-conversion-status') !== 'failed') {
         pollConversionStatus('{{ model.id }}');
     }
@@ -1257,8 +1287,13 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     toggle.addEventListener('click', () => {
-        // Ensure the Three viewer is loaded (it normally auto-loads on page open).
-        if (!viewer()) { loadDetailModel(MODEL_ID, 'original'); }
+        // Load the existing fixed variant as the base (so prior eyes/mouth carry
+        // forward) when one exists; otherwise the original. Reload if the viewer
+        // is currently showing a different source than we need.
+        const wantVariant = HAS_FIXED_VARIANT ? 'fixed_eyes' : 'original';
+        if (!viewer() || CURRENT_VARIANT !== wantVariant) {
+            loadDetailModel(MODEL_ID, wantVariant);
+        }
         panel.classList.toggle('hidden');
     });
 
