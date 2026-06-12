@@ -274,6 +274,36 @@ def test_ai_enrichment_worker_drains_pending_job(monkeypatch):
     assert model.runtime_metadata["light"]["enabled"] is True
 
 
+def test_detail_page_shows_ai_vision_failure_message():
+    from app.models import Model3D
+
+    app = create_app()
+    client = app.test_client()
+    headers = {"Authorization": "Bearer test-token"}
+    glb = b"glTF" + b"\x04" * 64
+    upload = client.post("/api/upload", headers=headers, data={
+        "is_public": "true",
+        "file": (io.BytesIO(glb), "visionless_crate.glb"),
+    }, content_type="multipart/form-data")
+    assert upload.status_code == 201, upload.get_json()
+    model_id = upload.get_json()["model"]["id"]
+
+    with app.app_context():
+        model = Model3D.get_by_id(model_id)
+        model.ai_metadata = {
+            "vision_mcp_attempted": True,
+            "vision_mcp": False,
+            "vision_mcp_error": "No thumbnail image is available for MCP analysis.",
+        }
+        model.save()
+
+    detail = client.get(f"/model/{model_id}")
+    assert detail.status_code == 200
+    html = detail.get_data(as_text=True)
+    assert "AI vision did not use image" in html
+    assert "No thumbnail image is available for MCP analysis." in html
+
+
 def test_a2a_no_output_error_includes_task_state():
     from app import ai_enrichment
 
