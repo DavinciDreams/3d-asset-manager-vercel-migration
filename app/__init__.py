@@ -18,7 +18,7 @@ def create_app():
     app.config["MAX_FILE_BYTES"] = max_upload_mb * 1024 * 1024
     app.config["MAX_CONTENT_LENGTH"] = app.config["MAX_FILE_BYTES"] + (5 * 1024 * 1024)
     app.config["ALLOWED_EXTENSIONS"] = {
-        "obj", "fbx", "gltf", "glb", "dae", "3ds", "ply", "stl", "vrm", "vrma"
+        "obj", "fbx", "gltf", "glb", "dae", "3ds", "ply", "stl", "vrm", "vrma", "bvh"
     }
     enable_conversion = os.environ.get("ENABLE_CONVERSION")
     has_configured_database = bool(os.environ.get("DATABASE_URL") or os.environ.get("POSTGRES_URL"))

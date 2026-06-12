@@ -78,6 +78,54 @@ A Flask web app for uploading, viewing, browsing, and optimizing 3D assets
 
 ## Recent Changes
 
+### 2026-06-12 — BVH→VRMA converter + Mixamo animation library tooling
+**Why:** Extend animation support beyond humanoid FBX. Add BVH (mocap) → VRMA,
+and tooling to build a curated Mixamo VRMA library. Inspired by DavinciDreams/3dchat.
+
+**FBX→VRMA status (pre-existing, verified working):** `fbx` uploads convert to a
+viewable GLB via FBX2glTF; **humanoid** FBX (≥6 Mixamo bones, `looks_humanoid`)
+ALSO get a VRMA via `tools/fbx2vrma-converter.js` → sets `vrma_file_id`. Plays via
+`@pixiv/three-vrm-animation` in `_vrm_viewer.html`. Non-humanoid FBX → GLB only.
+
+**New files (`tools/`):**
+- `bvh2vrma-converter.js` — pure-JS BVH parser → VRMA. Parses HIERARCHY/MOTION,
+  Euler-channels→quaternion (respects per-joint channel order), emits self-
+  contained glTF with `VRMC_vrm_animation` (base64 data-URI buffer). No
+  FBX2glTF/assimp/Blender. `--map overrides.json` for custom rigs.
+- `vrm-bone-map.js` — shared joint→VRM-bone map (Mixamo + CMU/Rokoko/Biped
+  aliases, `normalizeJointName`, `jointToVrmBone`). Used by BVH converter.
+- `animation-list.json` — 34 curated Mixamo clips (name/mixamoName/category/desc).
+- `convert-raw-to-vrma.js` — batch-convert a folder of raw FBX/BVH → VRMA,
+  fuzzy-matches filenames to the curated list, writes `manifest.json`.
+- `download-mixamo.js` — OPTIONAL admin-only Puppeteer CLI (Adobe login + Mixamo
+  API → bulk FBX). Puppeteer intentionally NOT a dependency (kept out of the
+  server image; lazy-required with install hint). ToS caveat documented.
+- `.gitignore` — excludes node_modules, package-lock, animations-raw/-vrma, *.vrma/*.bvh.
+
+**Wiring (`app/`):**
+- `conversion.py` — new `CONVERTIBLE_TO_VRMA = {"bvh"}`; `bvh_to_vrma()` helper;
+  `process_model_doc` BVH branch converts straight to VRMA (animation-only, no
+  GLB) and marks `done` + sets `vrma_file_id`; `enqueue()` queues BVH too.
+- `__init__.py` — `bvh` added to `ALLOWED_EXTENSIONS`.
+- **No API change needed:** any model with `vrma_file_id` auto-appears in
+  `GET /api/vrma` via `list_generated_vrma_for_user`, applicable to any VRM.
+
+**Verification:**
+- `node --check` on all 5 JS files ✓; `animation-list.json`/`package.json` valid ✓.
+- `py_compile app/conversion.py app/__init__.py` ✓.
+- BVH converter smoke test: synthetic Mixamo-named BVH → 9 humanoid bones, valid
+  `VRMC_vrm_animation`, identity quat at frame 0 (rot=0), buffer byte-lengths
+  match, all bufferViews in range ✓.
+- Auto-mapping verified across Mixamo / CMU (`LeftUpArm`,`RightThigh`,`Neck1`) /
+  `Character1_` prefix; CMU dummy `LHipJoint`→null; unknown→null ✓.
+- Batch path: CMU-named `Waving.bvh` → fuzzy-matched `wave.vrma` [gesture] +
+  manifest, valid VRMA (9 bones) ✓. Test artifacts cleaned.
+- Known gap: 3ds Max Biped "Bip001 L UpperArm" side-prefix not auto-mapped
+  (use `--map`); covered by override JSON, not over-engineered.
+- ⚠️ NOT yet live-tested through the real upload→worker path on Coolify (needs
+  FBX2glTF/node in the image — already present). No browser playback test of a
+  BVH-derived VRMA on a VRM yet.
+
 ### 2026-06-09 — "Fix Eyes" blinker eyeballs (client-side bake)
 **Why:** Image-to-3D pipeline produces character models with holes/black voids in
 the eye sockets (reconstruction can't resolve dark recessed regions). Feature lets

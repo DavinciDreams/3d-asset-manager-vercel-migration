@@ -18,6 +18,8 @@ from app.db import models
 
 NATIVE_VIEWABLE = {"glb", "gltf", "vrm"}
 CONVERTIBLE_TO_GLB = {"fbx", "obj", "stl", "dae", "ply", "3ds"}
+# Animation-only formats: no mesh to view, converted straight to a VRMA clip.
+CONVERTIBLE_TO_VRMA = {"bvh"}
 
 MIXAMO_BONES = {
     "mixamorig:Hips", "mixamorig:Spine", "mixamorig:Spine1", "mixamorig:Spine2",
@@ -86,6 +88,18 @@ def fbx_to_vrma(node_bin, converter_dir, fbx2gltf_bin, input_path, output_path, 
     return output_path
 
 
+def bvh_to_vrma(node_bin, converter_dir, input_path, output_path, clip_name=None, timeout=120):
+    """Convert a BVH mocap clip straight to a VRMA animation (pure JS, no FBX2glTF)."""
+    script = os.path.join(converter_dir, "bvh2vrma-converter.js")
+    cmd = [node_bin, script, "-i", input_path, "-o", output_path]
+    if clip_name:
+        cmd += ["--name", clip_name]
+    _run(cmd, timeout)
+    if not os.path.exists(output_path):
+        raise RuntimeError("bvh2vrma produced no output")
+    return output_path
+
+
 def gltf_node_names(glb_or_gltf_path):
     try:
         with open(glb_or_gltf_path, "rb") as f:
@@ -135,7 +149,7 @@ def process_model_doc(app, doc):
     if fmt in NATIVE_VIEWABLE:
         patch_model(app, model_id, conversion_status="skipped", conversion_error=None)
         return "skipped"
-    if fmt not in CONVERTIBLE_TO_GLB:
+    if fmt not in CONVERTIBLE_TO_GLB and fmt not in CONVERTIBLE_TO_VRMA:
         patch_model(app, model_id, conversion_status="skipped", conversion_error=None)
         return "skipped"
 
@@ -149,6 +163,29 @@ def process_model_doc(app, doc):
         in_path = os.path.join(workdir, "input." + fmt)
         with open(in_path, "wb") as f:
             f.write(fs.get(src_id).read())
+
+        # BVH is animation-only: no mesh to view, so produce a VRMA clip directly.
+        if fmt in CONVERTIBLE_TO_VRMA:
+            vrma_path = os.path.join(workdir, "clip.vrma")
+            bvh_to_vrma(
+                paths["node"], paths["fbx2vrma_dir"], in_path, vrma_path,
+                clip_name=(doc.get("name") or None),
+            )
+            with open(vrma_path, "rb") as f:
+                vrma_bytes = f.read()
+            vrma_id = fs.put(
+                vrma_bytes,
+                filename=f"clip_{model_id}.vrma",
+                content_type="application/octet-stream",
+                metadata={"derived_for": str(model_id), "kind": "vrma"},
+            )
+            patch_model(
+                app, model_id,
+                vrma_file_id=str(vrma_id),
+                conversion_status="done",
+                conversion_error=None,
+            )
+            return "done"
 
         if fmt == "fbx":
             glb_path = fbx2gltf_to_glb(paths["fbx2gltf"], in_path, workdir)
@@ -266,7 +303,7 @@ def enqueue(model, enabled=True):
     fmt = (model.file_format or "").lower()
     if fmt in NATIVE_VIEWABLE:
         status = "skipped"
-    elif fmt in CONVERTIBLE_TO_GLB:
+    elif fmt in CONVERTIBLE_TO_GLB or fmt in CONVERTIBLE_TO_VRMA:
         status = "pending" if enabled else "skipped"
         if not enabled:
             model.conversion_error = "Conversion is disabled on this server."

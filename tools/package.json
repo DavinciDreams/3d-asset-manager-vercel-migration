@@ -1,10 +1,13 @@
 {
   "name": "fbx2vrma-converter",
-  "version": "1.0.0",
-  "description": "Convert FBX animation files to VRMA-like JSON for the 3D Asset Manager conversion pipeline.",
+  "version": "1.1.0",
+  "description": "Convert FBX/BVH animation files to VRMA for the 3D Asset Manager conversion pipeline, plus Mixamo library tooling.",
   "main": "fbx2vrma-converter.js",
   "bin": {
-    "fbx2vrma": "./fbx2vrma-converter.js"
+    "fbx2vrma": "./fbx2vrma-converter.js",
+    "bvh2vrma": "./bvh2vrma-converter.js",
+    "convert-raw-to-vrma": "./convert-raw-to-vrma.js",
+    "download-mixamo": "./download-mixamo.js"
   },
   "license": "MIT",
   "engines": {
@@ -13,5 +16,6 @@
   "dependencies": {
     "commander": "^11.1.0",
     "fs-extra": "^11.2.0"
-  }
+  },
+  "comment_puppeteer": "download-mixamo.js needs puppeteer, but it is intentionally NOT a dependency: it is a heavy (~Chromium) local/admin-only tool and must stay out of the server Docker image. Install on demand: cd tools && npm install puppeteer"
 }
