@@ -1,9 +1,9 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from flask import Blueprint, jsonify, request, current_app, make_response, url_for
 from flask_login import current_user, login_required
 from werkzeug.exceptions import HTTPException
-from sqlalchemy import select, update
-from app.db import asset_files, optimization_jobs
+from sqlalchemy import and_, or_, select, update
+from app.db import asset_files, models as model_rows, optimization_jobs
 from app.models import ApiKey, AssetBundle, Model3D, ModelVariant, User, WorldState
 from app.openapi import get_openapi_spec
 import hashlib
@@ -17,6 +17,7 @@ import uuid
 import zipfile
 
 api_bp = Blueprint('api', __name__)
+AI_ENRICHMENT_WORKER = None
 
 MIME_TYPES = {
     'glb': 'model/gltf-binary',
@@ -1769,17 +1770,114 @@ def _run_ai_enrichment_worker(app, model_id, data):
 
 
 def _enqueue_ai_enrichment(model, data):
-    model.ai_status = 'processing'
+    data = dict(data or {})
+    data.pop('async', None)
+    metadata = dict(model.ai_metadata or {})
+    metadata['_job'] = {
+        'data': data,
+        'queued_at': datetime.utcnow().isoformat(),
+    }
+    model.ai_status = 'pending'
     model.ai_error = None
+    model.ai_metadata = metadata
     model.save()
-    app = current_app._get_current_object()
-    thread = threading.Thread(
-        target=_run_ai_enrichment_worker,
-        args=(app, model.id, dict(data or {})),
-        name=f"ai-enrichment-{str(model.id)[:8]}",
-        daemon=True,
+
+
+def _claim_ai_enrichment_job(app):
+    now = datetime.utcnow()
+    stale_minutes = int(os.environ.get('AI_AUTOTAG_STALE_MINUTES', '15'))
+    stale_before = now - timedelta(minutes=stale_minutes)
+    claimable = or_(
+        model_rows.c.ai_status == 'pending',
+        and_(
+            model_rows.c.ai_status == 'processing',
+            model_rows.c.ai_metadata['_job']['claimed_at'].as_string() < stale_before.isoformat(),
+        ),
     )
-    thread.start()
+    with app.config['DB_ENGINE'].begin() as conn:
+        row = conn.execute(
+            select(model_rows.c.id, model_rows.c.ai_metadata)
+            .where(claimable)
+            .order_by(model_rows.c.upload_date.asc())
+            .limit(1)
+        ).mappings().first()
+        if not row:
+            return None
+        metadata = dict(row.ai_metadata or {})
+        job = dict(metadata.get('_job') or {})
+        job['claimed_at'] = now.isoformat()
+        metadata['_job'] = job
+        updated = conn.execute(
+            update(model_rows)
+            .where(and_(model_rows.c.id == row.id, claimable))
+            .values(ai_status='processing', ai_error=None, ai_metadata=metadata)
+        )
+        if updated.rowcount != 1:
+            return None
+        return {'model_id': row.id, 'data': job.get('data') or {}}
+
+
+def _process_ai_enrichment_claim(app, claim):
+    with app.app_context():
+        model = Model3D.get_by_id(claim['model_id'])
+        if not model:
+            return
+        try:
+            _run_ai_enrichment(model, claim.get('data') or {})
+        except Exception as e:
+            model.ai_status = 'failed'
+            model.ai_error = str(e)[:500]
+            metadata = dict(model.ai_metadata or {})
+            job = dict(metadata.get('_job') or {})
+            job['failed_at'] = datetime.utcnow().isoformat()
+            metadata['_job'] = job
+            model.ai_metadata = metadata
+            model.save()
+            print(f"AI enrichment worker error for model {model.id}: {model.ai_error}", flush=True)
+
+
+def _drain_ai_enrichment_once(app):
+    processed = 0
+    while True:
+        claim = _claim_ai_enrichment_job(app)
+        if not claim:
+            break
+        _process_ai_enrichment_claim(app, claim)
+        processed += 1
+    return processed
+
+
+class AIEnrichmentWorker:
+    def __init__(self, app, poll_interval=2.0):
+        self.app = app
+        self.poll_interval = poll_interval
+        self._stop = threading.Event()
+        self._thread = None
+
+    def start(self):
+        if self._thread and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(target=self._loop, name='ai-enrichment-worker', daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+
+    def _loop(self):
+        while not self._stop.is_set():
+            try:
+                _drain_ai_enrichment_once(self.app)
+            except Exception as e:
+                print(f"AI enrichment worker loop error: {e}", flush=True)
+            self._stop.wait(self.poll_interval)
+
+
+def start_ai_enrichment_worker(app):
+    global AI_ENRICHMENT_WORKER
+    if AI_ENRICHMENT_WORKER is None:
+        AI_ENRICHMENT_WORKER = AIEnrichmentWorker(app)
+        AI_ENRICHMENT_WORKER.start()
+    return AI_ENRICHMENT_WORKER
 
 
 def _maybe_autotag_on_upload(model, context=None):
@@ -2443,7 +2541,8 @@ def autotag_model(model_id):
         data = _payload()
 
         if _as_bool(data.get('async', False)):
-            if model.ai_status != 'processing':
+            durable_job = (model.ai_metadata or {}).get('_job') if isinstance(model.ai_metadata, dict) else None
+            if model.ai_status not in ('pending', 'processing') or not durable_job:
                 _enqueue_ai_enrichment(model, data)
             return jsonify({
                 'success': True,

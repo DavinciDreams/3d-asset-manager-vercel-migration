@@ -58,11 +58,18 @@ def create_app():
 
     from app.auth import auth_bp
     from app.main import main_bp
-    from app.api import api_bp
+    from app.api import api_bp, start_ai_enrichment_worker
 
     app.register_blueprint(auth_bp, url_prefix="/auth")
     app.register_blueprint(main_bp)
     app.register_blueprint(api_bp, url_prefix="/api")
+
+    if os.environ.get("AI_AUTOTAG_WORKER", "1").lower() not in {"0", "false", "no", "off"}:
+        try:
+            start_ai_enrichment_worker(app)
+            print("AI enrichment worker started")
+        except Exception as e:
+            print(f"AI enrichment worker failed to start: {e}")
 
     if app.config["ENABLE_CONVERSION"]:
         try:

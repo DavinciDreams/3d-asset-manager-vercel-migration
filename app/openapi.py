@@ -43,7 +43,7 @@ def _model_summary_schema():
             },
             'has_viewable': {'type': 'boolean'},
             'has_vrma': {'type': 'boolean'},
-            'ai_status': {'type': 'string', 'nullable': True, 'enum': ['processing', 'done', 'failed', None]},
+            'ai_status': {'type': 'string', 'nullable': True, 'enum': ['pending', 'processing', 'done', 'failed', None]},
             'ai_error': {'type': 'string', 'nullable': True},
             'ai_title': {'type': 'string', 'nullable': True},
             'ai_description': {'type': 'string', 'nullable': True},
@@ -1047,7 +1047,7 @@ def get_openapi_spec(base_url=''):
                                         'async': {
                                             'type': 'boolean',
                                             'default': False,
-                                            'description': 'Queue enrichment and return immediately with ai_status=processing.',
+                                            'description': 'Queue enrichment and return immediately with ai_status=pending.',
                                         },
                                         'context': {'type': 'object'},
                                     },

@@ -6,6 +6,7 @@ os.environ.setdefault("SQLITE_PATH", ":memory:")
 os.environ.setdefault("ENABLE_CONVERSION", "0")
 os.environ.setdefault("ASSET_MANAGER_API_TOKEN", "test-token")
 os.environ["AI_AUTOTAG_ON_UPLOAD"] = "0"
+os.environ["AI_AUTOTAG_WORKER"] = "0"
 os.environ.pop("OPENAI_API_KEY", None)
 os.environ.pop("AI_AUTOTAG_API_KEY", None)
 os.environ.pop("AI_API_KEY", None)
@@ -152,8 +153,6 @@ def test_openapi_documents_workflow_and_bearer_auth():
 
 
 def test_async_enrichment_queues_and_model_status_endpoint(monkeypatch):
-    from app import api as api_module
-
     app = create_app()
     client = app.test_client()
     headers = {"Authorization": "Bearer test-token"}
@@ -163,16 +162,6 @@ def test_async_enrichment_queues_and_model_status_endpoint(monkeypatch):
     }, content_type="multipart/form-data")
     assert upload.status_code == 201, upload.get_json()
     model_id = upload.get_json()["model"]["id"]
-    captured = {}
-
-    def fake_enqueue(model, data):
-        captured["model_id"] = model.id
-        captured["data"] = dict(data)
-        model.ai_status = "processing"
-        model.ai_error = None
-        model.save()
-
-    monkeypatch.setattr(api_module, "_enqueue_ai_enrichment", fake_enqueue)
 
     queued = client.post(
         f"/api/model/{model_id}/ai/autotag",
@@ -181,13 +170,74 @@ def test_async_enrichment_queues_and_model_status_endpoint(monkeypatch):
     )
     assert queued.status_code == 202, queued.get_json()
     assert queued.get_json()["status"] == "queued"
-    assert queued.get_json()["model"]["ai_status"] == "processing"
-    assert captured["model_id"] == model_id
-    assert captured["data"]["context"]["source"] == "test"
+    assert queued.get_json()["model"]["ai_status"] == "pending"
 
     status = client.get(f"/api/model/{model_id}", headers=headers)
     assert status.status_code == 200, status.get_json()
-    assert status.get_json()["model"]["ai_status"] == "processing"
+    assert status.get_json()["model"]["ai_status"] == "pending"
+    from app.models import Model3D
+    with app.app_context():
+        queued_model = Model3D.get_by_id(model_id)
+    assert queued_model.ai_metadata["_job"]["data"]["context"]["source"] == "test"
+
+
+def test_ai_enrichment_worker_drains_pending_job(monkeypatch):
+    from app import ai_enrichment
+    from app import api as api_module
+    from app.models import Model3D
+
+    app = create_app()
+    client = app.test_client()
+    headers = {"Authorization": "Bearer test-token"}
+    glb = b"glTF" + b"\x02" * 64
+    upload = client.post("/api/upload", headers=headers, data={
+        "file": (io.BytesIO(glb), "worker_lantern.glb"),
+    }, content_type="multipart/form-data")
+    assert upload.status_code == 201, upload.get_json()
+    model_id = upload.get_json()["model"]["id"]
+
+    def fake_enrich_model(model, extra_context=None):
+        assert extra_context == {"source": "test_worker"}
+        return {
+            "title": "Worker Lantern",
+            "asset_category": "prop",
+            "asset_styles": ["fantasy"],
+            "asset_types": ["game-ready", "light-emitter"],
+            "runtime_metadata": {
+                "behaviors": ["light-emitter"],
+                "light": {
+                    "enabled": True,
+                    "type": "point",
+                    "color": "#ffb35a",
+                    "intensity": 1.5,
+                    "range": 8,
+                    "cast_shadow": True,
+                    "attach_to": "",
+                    "offset": [0, 0.6, 0],
+                },
+            },
+            "tags": ["lantern", "fantasy", "prop"],
+            "description": "A fantasy lantern prop.",
+            "summary": "Fantasy lantern.",
+            "categories": ["props"],
+            "quality_notes": [],
+            "provider": "fake",
+        }
+
+    monkeypatch.setattr(ai_enrichment, "enrich_model", fake_enrich_model)
+
+    queued = client.post(
+        f"/api/model/{model_id}/ai/autotag",
+        headers=headers,
+        json={"async": True, "overwrite": True, "context": {"source": "test_worker"}},
+    )
+    assert queued.status_code == 202, queued.get_json()
+    with app.app_context():
+        assert api_module._drain_ai_enrichment_once(app) == 1
+        model = Model3D.get_by_id(model_id)
+    assert model.ai_status == "done"
+    assert model.name == "Worker Lantern"
+    assert model.runtime_metadata["light"]["enabled"] is True
 
 
 def test_hyades_a2a_enrichment_uses_holo_vision(monkeypatch):
