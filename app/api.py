@@ -1729,6 +1729,7 @@ def _run_ai_enrichment(model, data=None):
         'model': enriched.get('model'),
         'response_id': enriched.get('response_id'),
         'vision_fallback': enriched.get('vision_fallback', False),
+        'vision_mcp': enriched.get('vision_mcp', False),
         'updated_at': datetime.utcnow().isoformat(),
     }
     if overwrite:
