@@ -99,6 +99,7 @@
             <div class="flex flex-wrap items-center justify-between gap-3">
                 <h2 class="text-xl font-semibold">Your Models</h2>
                 <form method="GET" class="flex flex-wrap items-center gap-2">
+                    {% for t in tags %}<input type="hidden" name="tag" value="{{ t }}">{% endfor %}
                     <select name="sort" onchange="this.form.submit()"
                             class="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500">
                         <option value="newest" {% if sort == 'newest' %}selected{% endif %}>Newest</option>
@@ -106,28 +107,76 @@
                         <option value="downloads" {% if sort == 'downloads' %}selected{% endif %}>Most downloaded</option>
                         <option value="name" {% if sort == 'name' %}selected{% endif %}>Name A–Z</option>
                     </select>
-                    {% for t in tags %}<input type="hidden" name="tag" value="{{ t }}">{% endfor %}
+                    <select name="category" onchange="this.form.submit()"
+                            class="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                        <option value="">All categories</option>
+                        {% for c in facets.categories %}
+                        <option value="{{ c }}" {% if c == category %}selected{% endif %}>{{ c|title }}</option>
+                        {% endfor %}
+                    </select>
+                    <select name="style" onchange="this.form.submit()"
+                            class="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                        <option value="">All styles</option>
+                        {% for s in facets.styles %}
+                        <option value="{{ s }}" {% if s in styles %}selected{% endif %}>{{ s|title }}</option>
+                        {% endfor %}
+                    </select>
+                    <select name="type" onchange="this.form.submit()"
+                            class="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                        <option value="">All types</option>
+                        {% for t in facets.types %}
+                        <option value="{{ t }}" {% if t in asset_types %}selected{% endif %}>{{ t|title }}</option>
+                        {% endfor %}
+                    </select>
                 </form>
             </div>
+
+            {% if category or styles or asset_types %}
+            <div class="flex flex-wrap items-center gap-2 mt-3">
+                <span class="text-sm text-gray-500 mr-1">Filters:</span>
+                {% if category %}
+                <a href="{{ url_for('main.dashboard', sort=sort, tag=tags, style=styles, type=asset_types) }}"
+                   class="px-3 py-1 rounded-full text-sm bg-indigo-600 text-white inline-flex items-center gap-1">
+                    {{ category|title }} <i class="fas fa-times text-xs"></i>
+                </a>
+                {% endif %}
+                {% for s in styles %}
+                <a href="{{ url_for('main.dashboard', sort=sort, tag=tags, category=category, style=styles|reject('equalto', s)|list, type=asset_types) }}"
+                   class="px-3 py-1 rounded-full text-sm bg-indigo-600 text-white inline-flex items-center gap-1">
+                    {{ s|title }} <i class="fas fa-times text-xs"></i>
+                </a>
+                {% endfor %}
+                {% for t in asset_types %}
+                <a href="{{ url_for('main.dashboard', sort=sort, tag=tags, category=category, style=styles, type=asset_types|reject('equalto', t)|list) }}"
+                   class="px-3 py-1 rounded-full text-sm bg-indigo-600 text-white inline-flex items-center gap-1">
+                    {{ t|title }} <i class="fas fa-times text-xs"></i>
+                </a>
+                {% endfor %}
+                <a href="{{ url_for('main.dashboard', sort=sort, tag=tags) }}"
+                   class="px-3 py-1 rounded-full text-sm text-red-600 hover:text-red-800">
+                    <i class="fas fa-times-circle mr-1"></i>Clear facets
+                </a>
+            </div>
+            {% endif %}
 
             {% if all_tags %}
             <div class="flex flex-wrap items-center gap-2 mt-3">
                 <span class="text-sm text-gray-500 mr-1">Tags:</span>
                 {% for t in all_tags %}
                     {% if t in tags %}
-                    <a href="{{ url_for('main.dashboard', sort=sort, tag=tags|reject('equalto', t)|list) }}"
+                    <a href="{{ url_for('main.dashboard', sort=sort, category=category, style=styles, type=asset_types, tag=tags|reject('equalto', t)|list) }}"
                        class="px-3 py-1 rounded-full text-sm bg-indigo-600 text-white inline-flex items-center gap-1">
                         {{ t }} <i class="fas fa-times text-xs"></i>
                     </a>
                     {% else %}
-                    <a href="{{ url_for('main.dashboard', sort=sort, tag=tags + [t]) }}"
+                    <a href="{{ url_for('main.dashboard', sort=sort, category=category, style=styles, type=asset_types, tag=tags + [t]) }}"
                        class="px-3 py-1 rounded-full text-sm bg-gray-200 text-gray-700 hover:bg-gray-300">
                         {{ t }}
                     </a>
                     {% endif %}
                 {% endfor %}
                 {% if tags %}
-                <a href="{{ url_for('main.dashboard', sort=sort) }}"
+                <a href="{{ url_for('main.dashboard', sort=sort, category=category, style=styles, type=asset_types) }}"
                    class="px-3 py-1 rounded-full text-sm text-red-600 hover:text-red-800">
                     <i class="fas fa-times-circle mr-1"></i>Clear
                 </a>
@@ -212,6 +261,9 @@
     const params = {
         sort: {{ (sort or 'newest') | tojson }},
         tags: {{ (tags or []) | tojson }},
+        category: {{ (category or '') | tojson }},
+        styles: {{ (styles or []) | tojson }},
+        assetTypes: {{ (asset_types or []) | tojson }},
     };
     let page = {{ page or 1 }};
     let hasNext = {{ 'true' if has_next else 'false' }};
@@ -238,6 +290,9 @@
             usp.set('page', String(page + 1));
             if (params.sort) usp.set('sort', params.sort);
             params.tags.forEach((t) => usp.append('tag', t));
+            if (params.category) usp.set('category', params.category);
+            params.styles.forEach((s) => usp.append('style', s));
+            params.assetTypes.forEach((t) => usp.append('type', t));
             const res = await fetch(`/dashboard/rows?${usp.toString()}`, { headers: { 'Accept': 'text/html' } });
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const html = await res.text();
@@ -276,6 +331,110 @@ function toggleQuickEdit(modelId) {
     if (row) row.classList.toggle('hidden');
 }
 
+function escapeHtml(value) {
+    const div = document.createElement('div');
+    div.textContent = value == null ? '' : String(value);
+    return div.innerHTML;
+}
+
+function renderTagBadges(modelId, tags) {
+    const wrap = document.getElementById(`model-tags-${modelId}`);
+    if (!wrap) return;
+    const clean = Array.isArray(tags) ? tags.filter(Boolean) : [];
+    wrap.innerHTML = clean.map((tag) =>
+        `<span class="bg-indigo-50 text-indigo-700 text-xs px-2 py-0.5 rounded">${escapeHtml(tag)}</span>`
+    ).join('');
+    wrap.classList.toggle('hidden', clean.length === 0);
+}
+
+function renderFacetBadges(modelId, model) {
+    const wrap = document.getElementById(`model-facets-${modelId}`);
+    if (!wrap) return;
+    const category = model.asset_category || '';
+    const styles = Array.isArray(model.asset_styles) ? model.asset_styles.filter(Boolean) : [];
+    const types = Array.isArray(model.asset_types) ? model.asset_types.filter(Boolean) : [];
+    const badges = [];
+    if (category) {
+        badges.push(`<span class="bg-gray-100 text-gray-700 text-xs px-2 py-0.5 rounded">${escapeHtml(category.replace(/\b\w/g, c => c.toUpperCase()))}</span>`);
+    }
+    styles.forEach((style) => {
+        badges.push(`<span class="bg-purple-50 text-purple-700 text-xs px-2 py-0.5 rounded">${escapeHtml(style)}</span>`);
+    });
+    types.forEach((type) => {
+        badges.push(`<span class="bg-teal-50 text-teal-700 text-xs px-2 py-0.5 rounded">${escapeHtml(type)}</span>`);
+    });
+    wrap.innerHTML = badges.join('');
+    wrap.classList.toggle('hidden', badges.length === 0);
+}
+
+function applyModelMetadataToRow(model) {
+    if (!model) return;
+    const title = document.getElementById(`model-title-${model.id}`);
+    if (title) title.textContent = model.name || 'Untitled';
+    const nameInput = document.getElementById(`qe-name-${model.id}`);
+    if (nameInput) nameInput.value = model.name || '';
+    const descInput = document.getElementById(`qe-desc-${model.id}`);
+    if (descInput) descInput.value = model.description || '';
+    const tagsInput = document.getElementById(`qe-tags-${model.id}`);
+    if (tagsInput) tagsInput.value = (model.tags || []).join(', ');
+    const categoryInput = document.getElementById(`qe-category-${model.id}`);
+    if (categoryInput) categoryInput.value = model.asset_category || '';
+    const stylesInput = document.getElementById(`qe-styles-${model.id}`);
+    if (stylesInput) stylesInput.value = (model.asset_styles || []).join(', ');
+    const typesInput = document.getElementById(`qe-types-${model.id}`);
+    if (typesInput) typesInput.value = (model.asset_types || []).join(', ');
+    const row = document.querySelector(`tr[data-model-id="${model.id}"]`);
+    if (row) {
+        row.dataset.modelName = model.name || '';
+        row.dataset.modelTags = (model.tags || []).join(',');
+        row.dataset.assetCategory = model.asset_category || '';
+        row.dataset.assetStyles = (model.asset_styles || []).join(',');
+        row.dataset.assetTypes = (model.asset_types || []).join(',');
+    }
+    renderFacetBadges(model.id, model);
+    renderTagBadges(model.id, model.tags || []);
+}
+
+async function enrichModel(modelId, btn) {
+    const icon = btn.querySelector('i');
+    const originalClass = icon ? icon.className : '';
+    btn.disabled = true;
+    btn.classList.add('opacity-60', 'cursor-not-allowed');
+    if (icon) icon.className = 'fas fa-spinner fa-spin';
+    btn.title = 'Generating metadata...';
+
+    try {
+        const response = await fetch(`/api/model/${modelId}/ai/autotag`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            body: JSON.stringify({
+                overwrite: true,
+                include_title: true,
+                include_description: true,
+                context: { source: 'dashboard' }
+            })
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data.success) {
+            throw new Error(data.detail || data.error || `AI enrichment failed (HTTP ${response.status}).`);
+        }
+        applyModelMetadataToRow(data.model);
+        if (icon) icon.className = 'fas fa-check text-green-600';
+        btn.title = 'Metadata generated';
+        setTimeout(() => {
+            if (icon) icon.className = originalClass;
+            btn.title = 'AI title, description, and tags';
+        }, 3000);
+    } catch (error) {
+        if (icon) icon.className = originalClass;
+        btn.title = 'AI title, description, and tags';
+        alert('Error enriching model: ' + error.message);
+    } finally {
+        btn.disabled = false;
+        btn.classList.remove('opacity-60', 'cursor-not-allowed');
+    }
+}
+
 // Save quick-edit changes via the metadata API
 async function saveQuickEdit(event, modelId) {
     event.preventDefault();
@@ -284,6 +443,9 @@ async function saveQuickEdit(event, modelId) {
     const description = document.getElementById(`qe-desc-${modelId}`).value.trim();
     const isPublic = document.getElementById(`qe-public-${modelId}`).checked;
     const tags = document.getElementById(`qe-tags-${modelId}`).value;
+    const assetCategory = document.getElementById(`qe-category-${modelId}`).value;
+    const assetStyles = document.getElementById(`qe-styles-${modelId}`).value;
+    const assetTypes = document.getElementById(`qe-types-${modelId}`).value;
 
     if (!name) {
         alert('Title cannot be empty.');
@@ -299,11 +461,22 @@ async function saveQuickEdit(event, modelId) {
         const response = await fetch(`/api/model/${modelId}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name, description, is_public: isPublic, tags })
+            body: JSON.stringify({
+                name,
+                description,
+                is_public: isPublic,
+                tags,
+                asset_category: assetCategory,
+                asset_styles: assetStyles,
+                asset_types: assetTypes
+            })
         });
         const data = await response.json();
         if (data.success) {
-            location.reload();
+            applyModelMetadataToRow(data.model);
+            toggleQuickEdit(modelId);
+            btn.disabled = false;
+            btn.textContent = original;
         } else {
             alert('Error: ' + (data.error || 'Update failed'));
             btn.disabled = false;

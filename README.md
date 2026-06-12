@@ -77,6 +77,37 @@ Tellus should store one of these generated keys in its generation backend as
 owning user, so generated assets persist in that user's inventory and the shared
 asset library.
 
+## AI Metadata Enrichment
+
+The asset manager can generate catalog titles, descriptions, and tags from model
+metadata. It accepts OpenAI Chat Completions-compatible endpoints, so the first
+recommended Z.AI Coding Plan setup is:
+
+```bash
+AI_AUTOTAG_PROVIDER=zai
+AI_AUTOTAG_API_KEY=your-zai-api-key
+AI_AUTOTAG_BASE_URL=https://api.z.ai/api/coding/paas/v4
+AI_AUTOTAG_MODEL=glm-5.1
+AI_AUTOTAG_ON_UPLOAD=1
+```
+
+Without an API key, `/api/model/:id/ai/autotag` falls back to deterministic
+filename/metadata tags for local development and tests. Dashboard rows include a
+robot action that triggers the same enrichment endpoint and updates the visible
+title, description, and tags.
+
+Z.AI Vision MCP is separate from the Flask app's HTTP enrichment call. For
+Claude Code or another MCP-capable client, configure the local MCP server:
+
+```bash
+claude mcp add -s user zai-mcp-server --env Z_AI_API_KEY=your-zai-api-key Z_AI_MODE=ZAI -- npx -y "@z_ai/mcp-server"
+```
+
+The Vision MCP server requires Node.js 22 or newer. Use it from the coding
+client by referencing local image/video paths; the Flask enrichment endpoint can
+also include stored thumbnails when the selected OpenAI-compatible model accepts
+image content.
+
 ## Tellus Persistence
 
 Tellus should keep using Cloudflare Durable Objects for live WebSocket

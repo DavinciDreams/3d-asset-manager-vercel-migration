@@ -5,7 +5,7 @@ from datetime import datetime
 
 from flask import current_app
 from flask_login import UserMixin
-from sqlalchemy import and_, delete, desc, func, insert, or_, select, true, update
+from sqlalchemy import String, and_, cast, delete, desc, func, insert, or_, select, true, update
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from app.db import (
@@ -215,6 +215,7 @@ class Model3D:
                  original_filename=None, user_id=None, is_public=True, _id=None,
                  upload_date=None, download_count=0, gridfs_file_id=None,
                  camera_orbit=None, thumbnail_file_id=None, tags=None,
+                 asset_category=None, asset_styles=None, asset_types=None,
                  preview_file_id=None, default_animation=None, default_vrma_id=None,
                  viewable_file_id=None, viewable_format=None,
                  conversion_status=None, conversion_error=None,
@@ -237,6 +238,9 @@ class Model3D:
         self.camera_orbit = camera_orbit
         self.thumbnail_file_id = thumbnail_file_id
         self.tags = tags or []
+        self.asset_category = asset_category
+        self.asset_styles = asset_styles or []
+        self.asset_types = asset_types or []
         self.preview_file_id = preview_file_id
         self.default_animation = default_animation
         self.default_vrma_id = default_vrma_id
@@ -272,6 +276,9 @@ class Model3D:
             "camera_orbit": self.camera_orbit,
             "thumbnail_file_id": self.thumbnail_file_id,
             "tags": self.tags or [],
+            "asset_category": self.asset_category,
+            "asset_styles": self.asset_styles or [],
+            "asset_types": self.asset_types or [],
             "preview_file_id": self.preview_file_id,
             "default_animation": self.default_animation,
             "default_vrma_id": self.default_vrma_id,
@@ -437,6 +444,9 @@ class Model3D:
             camera_orbit=model_data.get("camera_orbit"),
             thumbnail_file_id=model_data.get("thumbnail_file_id"),
             tags=model_data.get("tags") or [],
+            asset_category=model_data.get("asset_category"),
+            asset_styles=model_data.get("asset_styles") or [],
+            asset_types=model_data.get("asset_types") or [],
             preview_file_id=model_data.get("preview_file_id"),
             default_animation=model_data.get("default_animation"),
             default_vrma_id=model_data.get("default_vrma_id"),
@@ -474,6 +484,12 @@ class Model3D:
         return out
 
     @staticmethod
+    def normalize_category(raw):
+        value = str(raw or "").strip().lower()
+        value = " ".join(token for token in value.replace("_", " ").replace("-", " ").split())
+        return value or None
+
+    @staticmethod
     def get_by_id(model_id):
         try:
             engine = current_app.config["DB_ENGINE"]
@@ -501,7 +517,27 @@ class Model3D:
         tags = Model3D.normalize_tags(tag)
         if not tags:
             return []
-        return [models.c.tags.contains([tag]) for tag in tags]
+        return [Model3D._json_list_contains(models.c.tags, tag) for tag in tags]
+
+    @staticmethod
+    def _json_list_contains(column, value):
+        engine = current_app.config["DB_ENGINE"]
+        if engine.dialect.name == "sqlite":
+            safe_value = str(value).replace("%", "\\%").replace("_", "\\_").replace('"', '\\"')
+            return cast(column, String).like(f'%"{safe_value}"%', escape="\\")
+        return column.contains([value])
+
+    @staticmethod
+    def _facet_predicates(category=None, style=None, asset_type=None):
+        predicates = []
+        category = Model3D.normalize_category(category)
+        if category:
+            predicates.append(models.c.asset_category == category)
+        for style in Model3D.normalize_tags(style):
+            predicates.append(Model3D._json_list_contains(models.c.asset_styles, style))
+        for asset_type in Model3D.normalize_tags(asset_type):
+            predicates.append(Model3D._json_list_contains(models.c.asset_types, asset_type))
+        return predicates
 
     @staticmethod
     def _search_predicate(search):
@@ -514,13 +550,15 @@ class Model3D:
         )
 
     @staticmethod
-    def get_public_models(page=1, per_page=20, search=None, sort="newest", tag=None):
+    def get_public_models(page=1, per_page=20, search=None, sort="newest", tag=None,
+                          category=None, style=None, asset_type=None):
         engine = current_app.config["DB_ENGINE"]
         predicates = [models.c.is_public.is_(True)]
         search_predicate = Model3D._search_predicate(search)
         if search_predicate is not None:
             predicates.append(search_predicate)
         predicates.extend(Model3D._tag_predicates(tag))
+        predicates.extend(Model3D._facet_predicates(category=category, style=style, asset_type=asset_type))
         where = and_(*predicates) if predicates else true()
 
         with engine.begin() as conn:
@@ -536,10 +574,12 @@ class Model3D:
         return [Model3D.from_doc(row) for row in rows], total
 
     @staticmethod
-    def get_user_models(user_id, page=1, per_page=20, sort="newest", tag=None):
+    def get_user_models(user_id, page=1, per_page=20, sort="newest", tag=None,
+                        category=None, style=None, asset_type=None):
         engine = current_app.config["DB_ENGINE"]
         predicates = [models.c.user_id == str(user_id)]
         predicates.extend(Model3D._tag_predicates(tag))
+        predicates.extend(Model3D._facet_predicates(category=category, style=style, asset_type=asset_type))
         where = and_(*predicates) if predicates else true()
 
         with engine.begin() as conn:
@@ -566,6 +606,22 @@ class Model3D:
         return sorted(tags)
 
     @staticmethod
+    def _distinct_column_values(column, where, *, list_values=False):
+        engine = current_app.config["DB_ENGINE"]
+        with engine.begin() as conn:
+            rows = conn.execute(select(column).where(where)).all()
+        values = set()
+        for row in rows:
+            value = row[0]
+            if list_values:
+                for item in value or []:
+                    if item:
+                        values.add(item)
+            elif value:
+                values.add(value)
+        return sorted(values)
+
+    @staticmethod
     def get_user_tags(user_id):
         try:
             return Model3D._distinct_tags(models.c.user_id == str(user_id))
@@ -580,6 +636,24 @@ class Model3D:
         except Exception as e:
             print(f"Error getting public tags: {e}")
             return []
+
+    @staticmethod
+    def get_user_facets(user_id):
+        where = models.c.user_id == str(user_id)
+        return {
+            "categories": Model3D._distinct_column_values(models.c.asset_category, where),
+            "styles": Model3D._distinct_column_values(models.c.asset_styles, where, list_values=True),
+            "types": Model3D._distinct_column_values(models.c.asset_types, where, list_values=True),
+        }
+
+    @staticmethod
+    def get_public_facets():
+        where = models.c.is_public.is_(True)
+        return {
+            "categories": Model3D._distinct_column_values(models.c.asset_category, where),
+            "styles": Model3D._distinct_column_values(models.c.asset_styles, where, list_values=True),
+            "types": Model3D._distinct_column_values(models.c.asset_types, where, list_values=True),
+        }
 
     @staticmethod
     def optimizable_ids():
