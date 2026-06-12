@@ -479,15 +479,62 @@
 
         <!-- Model Details -->
         <div class="bg-white rounded-lg shadow-lg p-6">
-            <h1 class="text-3xl font-bold text-gray-800 mb-4">{{ model.name }}</h1>
+            <h1 id="model-title" class="text-3xl font-bold text-gray-800 mb-4">{{ model.name }}</h1>
             
             <div class="space-y-4">
                 <!-- Description -->
                 <div>
                     <h3 class="font-semibold text-gray-700 mb-2">Description</h3>
-                    <p class="text-gray-600">
+                    <p id="model-description" class="text-gray-600">
                         {{ model.description or "No description provided." }}
                     </p>
+                </div>
+
+                <!-- Catalog facets -->
+                <div class="border-t pt-4">
+                    <h3 class="font-semibold text-gray-700 mb-2">Catalog Metadata</h3>
+                    <div class="space-y-3 text-sm">
+                        <div>
+                            <span class="font-semibold text-gray-700">Category:</span>
+                            <span id="model-category" class="ml-1 text-gray-600">{{ model.asset_category|title if model.asset_category else 'Uncategorized' }}</span>
+                        </div>
+                        <div>
+                            <span class="font-semibold text-gray-700">Style:</span>
+                            <div id="model-styles" class="inline-flex flex-wrap gap-1 ml-1">
+                                {% if model.asset_styles %}
+                                    {% for style in model.asset_styles %}
+                                    <span class="bg-indigo-100 text-indigo-800 px-2 py-0.5 rounded text-xs">{{ style|title }}</span>
+                                    {% endfor %}
+                                {% else %}
+                                    <span class="text-gray-500">None</span>
+                                {% endif %}
+                            </div>
+                        </div>
+                        <div>
+                            <span class="font-semibold text-gray-700">Type:</span>
+                            <div id="model-types" class="inline-flex flex-wrap gap-1 ml-1">
+                                {% if model.asset_types %}
+                                    {% for type in model.asset_types %}
+                                    <span class="bg-teal-100 text-teal-800 px-2 py-0.5 rounded text-xs">{{ type|title }}</span>
+                                    {% endfor %}
+                                {% else %}
+                                    <span class="text-gray-500">None</span>
+                                {% endif %}
+                            </div>
+                        </div>
+                        <div>
+                            <span class="font-semibold text-gray-700">Tags:</span>
+                            <div id="model-tags" class="inline-flex flex-wrap gap-1 ml-1">
+                                {% if model.tags %}
+                                    {% for tag in model.tags %}
+                                    <span class="bg-gray-100 text-gray-700 px-2 py-0.5 rounded text-xs">{{ tag }}</span>
+                                    {% endfor %}
+                                {% else %}
+                                    <span class="text-gray-500">None</span>
+                                {% endif %}
+                            </div>
+                        </div>
+                    </div>
                 </div>
 
                 <!-- Metadata -->
@@ -554,7 +601,11 @@
                 {% if current_user.is_authenticated and current_user.id == model.user_id %}
                 <div class="border-t pt-4">
                     <h3 class="font-semibold text-gray-700 mb-3">Manage Model</h3>
-                    <div class="flex space-x-2">
+                    <div class="flex flex-wrap gap-2">
+                        <button type="button" id="ai-enrich-btn" onclick="enrichModelDetails()"
+                                class="bg-purple-600 text-white px-4 py-2 rounded hover:bg-purple-700 transition">
+                            <i class="fas fa-robot mr-1"></i>Enrich Metadata
+                        </button>
                         <button type="button" onclick="toggleEditForm()"
                                 class="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 transition">
                             <i class="fas fa-pen mr-1"></i>Edit Details
@@ -565,6 +616,7 @@
                             Delete Model
                         </button>
                     </div>
+                    <p id="ai-enrich-status" class="mt-2 text-sm text-gray-600"></p>
 
                     <!-- Inline edit form (hidden until "Edit Details" is clicked) -->
                     <form id="edit-form" class="hidden mt-4 space-y-4 bg-gray-50 p-4 rounded-lg">
@@ -1876,6 +1928,52 @@ document.addEventListener('DOMContentLoaded', function() {
 function toggleEditForm() {
     const form = document.getElementById('edit-form');
     if (form) form.classList.toggle('hidden');
+}
+
+async function enrichModelDetails() {
+    const btn = document.getElementById('ai-enrich-btn');
+    const status = document.getElementById('ai-enrich-status');
+    const original = btn ? btn.innerHTML : '';
+    if (btn) {
+        btn.disabled = true;
+        btn.classList.add('opacity-70', 'cursor-not-allowed');
+        btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>Enriching...';
+    }
+    if (status) {
+        status.textContent = 'Generating title, description, tags, and facets...';
+        status.className = 'mt-2 text-sm text-gray-600';
+    }
+    try {
+        const response = await fetch('/api/model/{{ model.id }}/ai/autotag', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                overwrite: true,
+                include_title: true,
+                include_description: true,
+                context: { source: 'detail_page' }
+            })
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data.success) {
+            throw new Error(data.detail || data.error || ('AI enrichment failed (HTTP ' + response.status + ').'));
+        }
+        if (status) {
+            status.textContent = 'Metadata enriched. Refreshing...';
+            status.className = 'mt-2 text-sm text-green-700';
+        }
+        window.location.reload();
+    } catch (error) {
+        if (status) {
+            status.textContent = error.message || 'AI enrichment failed.';
+            status.className = 'mt-2 text-sm text-red-700';
+        }
+        if (btn) {
+            btn.disabled = false;
+            btn.classList.remove('opacity-70', 'cursor-not-allowed');
+            btn.innerHTML = original;
+        }
+    }
 }
 
 // Capture the current camera angle and save it as this model's default view.
