@@ -4,6 +4,7 @@ import json
 import os
 import re
 import socket
+import time
 import uuid
 import urllib.error
 import urllib.parse
@@ -264,6 +265,8 @@ def _extract_a2a_output(payload):
     if isinstance(message, dict):
         candidates.extend(message.get("parts") or [])
     task = result.get("task") if isinstance(result, dict) else None
+    if not isinstance(task, dict) and isinstance(result, dict) and result.get("kind") == "task":
+        task = result
     if isinstance(task, dict):
         for artifact in task.get("artifacts") or []:
             if isinstance(artifact, dict):
@@ -285,6 +288,58 @@ def _a2a_task_state(payload):
     if isinstance(status, dict):
         return status.get("state")
     return None
+
+
+def _a2a_task_id(payload):
+    result = payload.get("result") or payload
+    if not isinstance(result, dict):
+        return None
+    for key in ("taskId", "id"):
+        value = result.get(key)
+        if value:
+            return value
+    task = result.get("task")
+    if isinstance(task, dict):
+        for key in ("id", "taskId"):
+            value = task.get(key)
+            if value:
+                return value
+    return None
+
+
+def _a2a_tasks_get_body(task_id):
+    return {
+        "jsonrpc": "2.0",
+        "id": f"asset-enrichment-task-{uuid.uuid4()}",
+        "method": "tasks/get",
+        "params": {"id": task_id},
+    }
+
+
+def _poll_a2a_task(provider, api_key, task_id):
+    max_attempts = int(os.environ.get("HYADES_A2A_POLL_ATTEMPTS", "12"))
+    interval = float(os.environ.get("HYADES_A2A_POLL_INTERVAL", "2"))
+    payload = None
+    for attempt in range(max_attempts):
+        if attempt:
+            time.sleep(interval)
+        payload = _post_json(
+            _base_url(provider),
+            _a2a_tasks_get_body(task_id),
+            {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            provider=provider,
+            transport="a2a-tasks-get",
+        )
+        output_text = _strip_json_fence(_extract_a2a_output(payload))
+        if output_text:
+            return payload
+        state = (_a2a_task_state(payload) or "").lower()
+        if state in {"completed", "failed", "canceled", "cancelled", "rejected"}:
+            return payload
+    return payload
 
 
 def _summarize_provider_payload(payload):
@@ -472,11 +527,16 @@ def _a2a_metadata(model, provider, api_key, schema, user_text):
             transport="a2a-text",
         )
     output_text = _strip_json_fence(_extract_a2a_output(payload))
+    task_id = _a2a_task_id(payload)
+    if not output_text and task_id:
+        payload = _poll_a2a_task(provider, api_key, task_id)
+        output_text = _strip_json_fence(_extract_a2a_output(payload or {}))
     if not output_text:
-        state = _a2a_task_state(payload) or "unknown"
-        detail = _summarize_provider_payload(payload)
+        state = _a2a_task_state(payload or {}) or "unknown"
+        task = _a2a_task_id(payload or {}) or task_id or "unknown"
+        detail = _summarize_provider_payload(payload or {})
         raise RuntimeError(
-            f"AI enrichment returned no A2A output text (task state: {state}). "
+            f"AI enrichment returned no A2A output text (task state: {state}; task id: {task}). "
             f"Response: {detail or 'empty response'}"
         )
     enriched = json.loads(output_text)
