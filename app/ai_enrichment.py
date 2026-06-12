@@ -19,6 +19,7 @@ ZAI_DEFAULT_MODEL = "glm-5.1"
 HYADES_A2A_BASE_URL = "https://hyades.gnostr.cloud/a2a"
 HYADES_OPENAI_BASE_URL = "https://hyades.gnostr.cloud/v1"
 HYADES_DEFAULT_MODEL = "holo"
+DEFAULT_USER_AGENT = "3d-asset-manager/1.0 (+https://github.com/DavinciDreams/3d-asset-manager-vercel-migration)"
 
 
 class AIProviderTransientError(RuntimeError):
@@ -269,11 +270,21 @@ def _is_transient_provider_failure(status_code, detail):
     return "origin web server returned an invalid or incomplete response" in lowered
 
 
+def _request_headers(headers):
+    merged = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": os.environ.get("AI_AUTOTAG_USER_AGENT", DEFAULT_USER_AGENT),
+    }
+    merged.update(headers or {})
+    return merged
+
+
 def _post_json(url, body, headers, provider=None, transport=None):
     request = urllib.request.Request(
         url,
         data=json.dumps(body).encode("utf-8"),
-        headers=headers,
+        headers=_request_headers(headers),
         method="POST",
     )
     label = _provider_label(url, provider=provider, transport=transport)

@@ -241,6 +241,8 @@ def test_hyades_a2a_enrichment_uses_holo_vision(monkeypatch):
 
     assert captured["url"] == "https://hyades.gnostr.cloud/a2a"
     assert captured["headers"]["Authorization"] == "Bearer hyades-key"
+    assert captured["headers"]["Accept"] == "application/json"
+    assert captured["headers"]["User-agent"].startswith("3d-asset-manager/")
     assert captured["body"]["method"] == "message/send"
     assert captured["body"]["params"]["metadata"]["model"] == "holo"
     parts = captured["body"]["params"]["message"]["parts"]
