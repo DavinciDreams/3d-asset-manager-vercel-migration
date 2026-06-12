@@ -114,16 +114,58 @@ def test_openapi_documents_workflow_and_bearer_auth():
     app = create_app()
     spec = app.test_client().get("/api/openapi.json").get_json()
     assert "bearerAuth" in spec["components"]["securitySchemes"]
+    assert "get" in spec["paths"]["/model/{model_id}"]
     assert "/model/{model_id}/ai/autotag" in spec["paths"]
     assert "/model/{model_id}/approval" in spec["paths"]
     assert "/bundles" in spec["paths"]
     props = spec["paths"]["/model/{model_id}/ai/autotag"]["post"]["requestBody"]["content"]["application/json"]["schema"]["properties"]
     assert "include_title" in props
+    assert "async" in props
     model_props = spec["components"]["schemas"]["ModelSummary"]["properties"]
     assert "asset_category" in model_props
     assert "asset_styles" in model_props
     assert "asset_types" in model_props
+    assert "ai_error" in model_props
     assert "content_hash" in model_props
+
+
+def test_async_enrichment_queues_and_model_status_endpoint(monkeypatch):
+    from app import api as api_module
+
+    app = create_app()
+    client = app.test_client()
+    headers = {"Authorization": "Bearer test-token"}
+    glb = b"glTF" + b"\x01" * 64
+    upload = client.post("/api/upload", headers=headers, data={
+        "file": (io.BytesIO(glb), "async_crate.glb"),
+    }, content_type="multipart/form-data")
+    assert upload.status_code == 201, upload.get_json()
+    model_id = upload.get_json()["model"]["id"]
+    captured = {}
+
+    def fake_enqueue(model, data):
+        captured["model_id"] = model.id
+        captured["data"] = dict(data)
+        model.ai_status = "processing"
+        model.ai_error = None
+        model.save()
+
+    monkeypatch.setattr(api_module, "_enqueue_ai_enrichment", fake_enqueue)
+
+    queued = client.post(
+        f"/api/model/{model_id}/ai/autotag",
+        headers=headers,
+        json={"async": True, "overwrite": True, "context": {"source": "test"}},
+    )
+    assert queued.status_code == 202, queued.get_json()
+    assert queued.get_json()["status"] == "queued"
+    assert queued.get_json()["model"]["ai_status"] == "processing"
+    assert captured["model_id"] == model_id
+    assert captured["data"]["context"]["source"] == "test"
+
+    status = client.get(f"/api/model/{model_id}", headers=headers)
+    assert status.status_code == 200, status.get_json()
+    assert status.get_json()["model"]["ai_status"] == "processing"
 
 
 def test_hyades_a2a_enrichment_uses_holo_vision(monkeypatch):
