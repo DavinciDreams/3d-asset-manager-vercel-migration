@@ -291,6 +291,107 @@ def test_a2a_no_output_error_includes_task_state():
     assert "working" in ai_enrichment._summarize_provider_payload(payload)
 
 
+def test_hyades_a2a_empty_message_polls_task(monkeypatch):
+    from app import ai_enrichment
+
+    calls = []
+    output = {
+        "title": "Task Lantern",
+        "asset_category": "prop",
+        "asset_styles": ["fantasy"],
+        "asset_types": ["game-ready", "light-emitter"],
+        "runtime_metadata": {
+            "behaviors": ["light-emitter"],
+            "light": {
+                "enabled": True,
+                "type": "point",
+                "color": "#ffb35a",
+                "intensity": 1.5,
+                "range": 8,
+                "cast_shadow": True,
+                "attach_to": "",
+                "offset": [0, 0.6, 0],
+            },
+        },
+        "tags": ["lantern", "fantasy", "prop"],
+        "description": "A fantasy lantern prop.",
+        "summary": "Fantasy lantern.",
+        "categories": ["props"],
+        "quality_notes": [],
+    }
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps(self.payload).encode("utf-8")
+
+    def fake_urlopen(request, timeout):
+        body = json.loads(request.data.decode("utf-8"))
+        calls.append(body)
+        if body["method"] == "message/send":
+            return FakeResponse({
+                "jsonrpc": "2.0",
+                "id": "message-response",
+                "result": {
+                    "kind": "message",
+                    "messageId": "empty-message",
+                    "parts": [{"kind": "text", "text": ""}],
+                    "role": "agent",
+                    "taskId": "task-123",
+                },
+            })
+        assert body["method"] == "tasks/get"
+        assert body["params"]["id"] == "task-123"
+        return FakeResponse({
+            "jsonrpc": "2.0",
+            "id": "task-response",
+            "result": {
+                "kind": "task",
+                "id": "task-123",
+                "status": {"state": "completed"},
+                "artifacts": [{"parts": [{"kind": "text", "text": json.dumps(output)}]}],
+            },
+        })
+
+    class FakeModel:
+        name = "task_lantern"
+        description = ""
+        original_filename = "task_lantern.glb"
+        file_format = "glb"
+        file_size = 1234
+        tags = []
+        asset_category = None
+        asset_styles = []
+        asset_types = []
+        runtime_metadata = {}
+        approve_game_ready = False
+        approve_asset_store = False
+        conversion_status = None
+        thumbnail_file_id = None
+
+    monkeypatch.setenv("AI_AUTOTAG_PROVIDER", "hyades")
+    monkeypatch.setenv("AI_AUTOTAG_API_KEY", "hyades-key")
+    monkeypatch.setenv("AI_AUTOTAG_MODEL", "holo")
+    monkeypatch.setenv("HYADES_A2A_POLL_ATTEMPTS", "2")
+    monkeypatch.setenv("HYADES_A2A_POLL_INTERVAL", "0")
+    monkeypatch.setattr(ai_enrichment.urllib.request, "urlopen", fake_urlopen)
+
+    enriched = ai_enrichment.enrich_model(FakeModel())
+
+    assert [call["method"] for call in calls] == ["message/send", "tasks/get"]
+    assert enriched["title"] == "Task Lantern"
+    assert enriched["provider"] == "hyades"
+    assert enriched["transport"] == "a2a"
+
+
 def test_hyades_a2a_enrichment_uses_holo_vision(monkeypatch):
     from app import ai_enrichment
 
