@@ -2,6 +2,8 @@ import io
 import json
 import os
 
+import pytest
+
 os.environ.setdefault("SQLITE_PATH", ":memory:")
 os.environ.setdefault("ENABLE_CONVERSION", "0")
 os.environ.setdefault("ASSET_MANAGER_API_TOKEN", "test-token")
@@ -465,6 +467,68 @@ def test_hyades_a2a_timeout_retries_text_only(monkeypatch):
     assert enriched["provider"] == "hyades"
     assert enriched["transport"] == "a2a"
     assert enriched["vision_fallback"] is True
+
+
+def test_hyades_a2a_base_url_overrides_generic_openai_transport(monkeypatch):
+    from app import ai_enrichment
+
+    monkeypatch.setenv("AI_AUTOTAG_PROVIDER", "hyades")
+    monkeypatch.setenv("AI_AUTOTAG_BASE_URL", "https://hyades.gnostr.cloud/a2a")
+    monkeypatch.setenv("AI_AUTOTAG_TRANSPORT", "openai")
+
+    assert ai_enrichment._transport("hyades") == "a2a"
+    assert ai_enrichment._base_url("hyades") == "https://hyades.gnostr.cloud/a2a"
+
+
+def test_openai_no_output_error_includes_payload_shape(monkeypatch):
+    from app import ai_enrichment
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return json.dumps({
+                "id": "chatcmpl-empty",
+                "choices": [{"message": {"role": "assistant"}, "finish_reason": "stop"}],
+            }).encode("utf-8")
+
+    def fake_urlopen(request, timeout):
+        return FakeResponse()
+
+    class FakeModel:
+        name = "empty_response"
+        description = ""
+        original_filename = "empty_response.glb"
+        file_format = "glb"
+        file_size = 1234
+        tags = []
+        asset_category = None
+        asset_styles = []
+        asset_types = []
+        runtime_metadata = {}
+        approve_game_ready = False
+        approve_asset_store = False
+        conversion_status = None
+        thumbnail_file_id = None
+
+    monkeypatch.setenv("AI_AUTOTAG_PROVIDER", "openai")
+    monkeypatch.setenv("AI_AUTOTAG_API_KEY", "openai-key")
+    monkeypatch.setenv("AI_AUTOTAG_MODEL", "gpt-test")
+    monkeypatch.setattr(ai_enrichment.urllib.request, "urlopen", fake_urlopen)
+
+    with pytest.raises(RuntimeError) as exc:
+        ai_enrichment.enrich_model(FakeModel())
+
+    message = str(exc.value)
+    assert "AI enrichment returned no output text from openai/openai" in message
+    assert "first choice message keys: role" in message
+    assert "chatcmpl-empty" in message
 
 
 def test_openai_vision_cloudflare_error_retries_text_only(monkeypatch):
