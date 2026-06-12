@@ -395,6 +395,29 @@ function applyModelMetadataToRow(model) {
     renderTagBadges(model.id, model.tags || []);
 }
 
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function waitForModelEnrichment(modelId, maxAttempts = 80) {
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+        await sleep(attempt === 0 ? 1200 : 2500);
+        const response = await fetch(`/api/model/${modelId}`, {
+            headers: { 'Accept': 'application/json' }
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data.success) {
+            throw new Error(data.detail || data.error || `Could not check enrichment status (HTTP ${response.status}).`);
+        }
+        const model = data.model || {};
+        if (model.ai_status === 'done') return model;
+        if (model.ai_status === 'failed') {
+            throw new Error(model.ai_error || 'AI enrichment failed.');
+        }
+    }
+    throw new Error('AI enrichment is still running. Try refreshing in a moment.');
+}
+
 async function enrichModel(modelId, btn) {
     const icon = btn.querySelector('i');
     const originalClass = icon ? icon.className : '';
@@ -408,6 +431,7 @@ async function enrichModel(modelId, btn) {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
             body: JSON.stringify({
+                async: true,
                 overwrite: true,
                 include_title: true,
                 include_description: true,
@@ -418,7 +442,11 @@ async function enrichModel(modelId, btn) {
         if (!response.ok || !data.success) {
             throw new Error(data.detail || data.error || `AI enrichment failed (HTTP ${response.status}).`);
         }
-        applyModelMetadataToRow(data.model);
+        btn.title = 'Metadata generation queued...';
+        const model = data.model && data.model.ai_status === 'done'
+            ? data.model
+            : await waitForModelEnrichment(modelId);
+        applyModelMetadataToRow(model);
         if (icon) icon.className = 'fas fa-check text-green-600';
         btn.title = 'Metadata generated';
         setTimeout(() => {

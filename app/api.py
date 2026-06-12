@@ -860,6 +860,22 @@ def export_model(model_id):
         print(f"API export error: {e}")
         return jsonify({'error': 'Export failed'}), 500
 
+@api_bp.route('/model/<model_id>', methods=['GET'])
+def get_model(model_id):
+    """Return a single model summary, including async job status."""
+    try:
+        model = Model3D.get_by_id(model_id)
+        if not model:
+            return jsonify({'error': 'Model not found'}), 404
+        user, service = _api_principal()
+        if not _can_access_model_as(model, principal=user, service=service):
+            return jsonify({'error': 'Access denied'}), 403
+        return jsonify({'success': True, 'model': _serialize_model(model)})
+    except Exception as e:
+        print(f"API get model error: {e}")
+        return jsonify({'error': 'Failed to retrieve model'}), 500
+
+
 @api_bp.route('/model/<model_id>', methods=['PUT', 'PATCH'])
 def update_model(model_id):
     """Update a model's metadata (name, description, visibility)."""
@@ -1627,6 +1643,7 @@ def _serialize_model(model):
         'asset_styles': model.asset_styles,
         'asset_types': model.asset_types,
         'ai_status': model.ai_status,
+        'ai_error': model.ai_error,
         'ai_title': (model.ai_metadata or {}).get('title'),
         'ai_description': model.ai_description,
         'ai_tags': model.ai_tags,
@@ -1722,6 +1739,34 @@ def _run_ai_enrichment(model, data=None):
             model.description = model.ai_description
     model.save()
     return enriched
+
+
+def _run_ai_enrichment_worker(app, model_id, data):
+    with app.app_context():
+        model = Model3D.get_by_id(model_id)
+        if not model:
+            return
+        try:
+            _run_ai_enrichment(model, data)
+        except Exception as e:
+            model.ai_status = 'failed'
+            model.ai_error = str(e)[:500]
+            model.save()
+            print(f"API autotag background error for model {model.id}: {model.ai_error}", flush=True)
+
+
+def _enqueue_ai_enrichment(model, data):
+    model.ai_status = 'processing'
+    model.ai_error = None
+    model.save()
+    app = current_app._get_current_object()
+    thread = threading.Thread(
+        target=_run_ai_enrichment_worker,
+        args=(app, model.id, dict(data or {})),
+        name=f"ai-enrichment-{str(model.id)[:8]}",
+        daemon=True,
+    )
+    thread.start()
 
 
 def _maybe_autotag_on_upload(model, context=None):
@@ -2382,6 +2427,15 @@ def autotag_model(model_id):
             return jsonify({'error': 'Access denied'}), 403
 
         data = _payload()
+
+        if _as_bool(data.get('async', False)):
+            if model.ai_status != 'processing':
+                _enqueue_ai_enrichment(model, data)
+            return jsonify({
+                'success': True,
+                'status': 'queued',
+                'model': _serialize_model(model),
+            }), 202
 
         try:
             _run_ai_enrichment(model, data)

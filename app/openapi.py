@@ -42,7 +42,8 @@ def _model_summary_schema():
             },
             'has_viewable': {'type': 'boolean'},
             'has_vrma': {'type': 'boolean'},
-            'ai_status': {'type': 'string', 'nullable': True, 'enum': ['done', 'failed', None]},
+            'ai_status': {'type': 'string', 'nullable': True, 'enum': ['processing', 'done', 'failed', None]},
+            'ai_error': {'type': 'string', 'nullable': True},
             'ai_title': {'type': 'string', 'nullable': True},
             'ai_description': {'type': 'string', 'nullable': True},
             'ai_tags': {'type': 'array', 'items': {'type': 'string'}},
@@ -386,6 +387,30 @@ def get_openapi_spec(base_url=''):
                         'description': 'The model id.',
                     }
                 ],
+                'get': {
+                    'tags': ['Models'],
+                    'summary': 'Get model metadata',
+                    'security': [{'sessionCookie': []}, {'bearerAuth': []}],
+                    'responses': {
+                        '200': {
+                            'description': 'Model metadata',
+                            'content': {
+                                'application/json': {
+                                    'schema': {
+                                        'type': 'object',
+                                        'properties': {
+                                            'success': {'type': 'boolean'},
+                                            'model': {'$ref': '#/components/schemas/ModelSummary'},
+                                        },
+                                    }
+                                }
+                            },
+                        },
+                        '403': _error_response('Access denied'),
+                        '404': _error_response('Model not found'),
+                        '500': _error_response('Failed to retrieve model'),
+                    },
+                },
                 'put': {
                     'tags': ['Models'],
                     'summary': 'Update model metadata',
@@ -973,6 +998,11 @@ def get_openapi_spec(base_url=''):
                                         'overwrite': {'type': 'boolean', 'default': True},
                                         'include_title': {'type': 'boolean', 'default': True},
                                         'include_description': {'type': 'boolean', 'default': True},
+                                        'async': {
+                                            'type': 'boolean',
+                                            'default': False,
+                                            'description': 'Queue enrichment and return immediately with ai_status=processing.',
+                                        },
                                         'context': {'type': 'object'},
                                     },
                                 }
@@ -981,6 +1011,7 @@ def get_openapi_spec(base_url=''):
                     },
                     'responses': {
                         '200': {'description': 'Enriched', 'content': {'application/json': {'schema': {'type': 'object'}}}},
+                        '202': {'description': 'Enrichment queued', 'content': {'application/json': {'schema': {'type': 'object'}}}},
                         '401': _error_response('Authentication required'),
                         '403': _error_response('Access denied'),
                         '404': _error_response('Model not found'),
