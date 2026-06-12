@@ -126,6 +126,10 @@ def _api_key():
     ).strip()
 
 
+def _is_hyades_holo_model(provider):
+    return provider == "hyades" and _model_name(provider).strip().lower() == "holo"
+
+
 def _base_url(provider):
     configured = (
         os.environ.get("AI_AUTOTAG_BASE_URL")
@@ -134,6 +138,10 @@ def _base_url(provider):
         or (os.environ.get("HYADES_BASE_URL") if provider == "hyades" else None)
         or os.environ.get("OPENAI_BASE_URL")
     )
+    if _is_hyades_holo_model(provider):
+        if configured and _looks_like_a2a_url(configured.strip().rstrip("/")):
+            return configured.strip().rstrip("/")
+        return HYADES_A2A_BASE_URL
     if configured:
         return configured.strip().rstrip("/")
     if provider == "zai":
@@ -170,6 +178,8 @@ def _transport(provider):
         or ""
     ).strip()
     if provider == "hyades" and _looks_like_a2a_url(base_url):
+        return "a2a"
+    if _is_hyades_holo_model(provider):
         return "a2a"
     configured = (
         os.environ.get("AI_AUTOTAG_TRANSPORT")

@@ -480,6 +480,18 @@ def test_hyades_a2a_base_url_overrides_generic_openai_transport(monkeypatch):
     assert ai_enrichment._base_url("hyades") == "https://hyades.gnostr.cloud/a2a"
 
 
+def test_hyades_holo_model_forces_a2a_over_generic_openai_env(monkeypatch):
+    from app import ai_enrichment
+
+    monkeypatch.setenv("AI_AUTOTAG_PROVIDER", "hyades")
+    monkeypatch.setenv("AI_AUTOTAG_BASE_URL", "https://hyades.gnostr.cloud/v1")
+    monkeypatch.setenv("AI_AUTOTAG_TRANSPORT", "openai")
+    monkeypatch.setenv("AI_AUTOTAG_MODEL", "holo")
+
+    assert ai_enrichment._transport("hyades") == "a2a"
+    assert ai_enrichment._base_url("hyades") == "https://hyades.gnostr.cloud/a2a"
+
+
 def test_openai_no_output_error_includes_payload_shape(monkeypatch):
     from app import ai_enrichment
 
