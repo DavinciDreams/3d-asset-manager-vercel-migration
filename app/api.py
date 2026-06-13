@@ -2,8 +2,8 @@ from datetime import datetime, timedelta
 from flask import Blueprint, jsonify, request, current_app, make_response, url_for
 from flask_login import current_user, login_required
 from werkzeug.exceptions import HTTPException
-from sqlalchemy import or_, select, update
-from app.db import asset_files, models as model_rows, optimization_jobs
+from sqlalchemy import or_, select, true, update
+from app.db import asset_files, model_variants, models as model_rows, optimization_jobs
 from app.models import ApiKey, AssetBundle, Model3D, ModelVariant, User, WorldState
 from app.openapi import get_openapi_spec
 from app.permissions import asset_admin_configured, can_manage_model, is_asset_admin_user
@@ -338,6 +338,10 @@ def _gltf_animation_duration(gltf, animation):
 
 def _can_access_model(model):
     if model.is_public:
+        return True
+    if _authorized_service_token():
+        return True
+    if current_user.is_authenticated and is_asset_admin_user(current_user):
         return True
     return current_user.is_authenticated and model.user_id == current_user.id
 
@@ -2603,6 +2607,8 @@ def _media_presence_fields(model):
         'media_capture': {
             'needs_thumbnail': not bool(model.thumbnail_file_id),
             'needs_preview': not bool(model.preview_file_id),
+            'thumbnail_file_id': model.thumbnail_file_id,
+            'preview_file_id': model.preview_file_id,
             'capture_url': url_for('main.model_detail', model_id=model.id, capture=1),
         },
         **game,
@@ -2612,17 +2618,17 @@ def _media_presence_fields(model):
 def _media_capture_ready(model):
     """Return True when the detail page can render this model for capture."""
     fmt = (model.file_format or '').lower()
-    if fmt in ('vrma', 'bvh'):
+    if fmt in ('vrma', 'bvh') or model.vrma_file_id:
         return False
     if fmt in ('glb', 'gltf', 'vrm'):
         return True
     return bool(model.viewable_file_id)
 
 
-def _media_capture_queue_item(model):
+def _media_capture_queue_item(model, *, force_capture=False):
     owner = User.get_by_id(model.user_id)
-    needs_thumbnail = not bool(model.thumbnail_file_id)
-    needs_preview = not bool(model.preview_file_id)
+    needs_thumbnail = force_capture or not bool(model.thumbnail_file_id)
+    needs_preview = force_capture or not bool(model.preview_file_id)
     needs_enrichment = model.ai_status not in ('done', 'processing', 'pending')
     return {
         'id': model.id,
@@ -2637,14 +2643,110 @@ def _media_capture_queue_item(model):
         'conversion_status': model.conversion_status,
         'has_viewable': bool(model.viewable_file_id),
         'has_thumbnail': bool(model.thumbnail_file_id),
+        'thumbnail_file_id': model.thumbnail_file_id,
         'has_preview': bool(model.preview_file_id),
+        'preview_file_id': model.preview_file_id,
         'needs_thumbnail': needs_thumbnail,
         'needs_preview': needs_preview,
+        'force_capture': force_capture,
         'needs_enrichment': needs_enrichment,
         'capture_ready': _media_capture_ready(model),
         'detail_url': url_for('main.model_detail', model_id=model.id, capture=1),
-        'capture_url': url_for('main.model_detail', model_id=model.id, capture=1),
+        'capture_url': (
+            url_for('main.model_detail', model_id=model.id, capture=1, regen=1)
+            if force_capture else url_for('main.model_detail', model_id=model.id, capture=1)
+        ),
     }
+
+
+def _animation_capture_ready():
+    with current_app.config['DB_ENGINE'].begin() as conn:
+        native = conn.execute(
+            select(model_rows.c.id)
+            .where(model_rows.c.file_format == 'vrm')
+            .limit(1)
+        ).first()
+        if native:
+            return True
+        derived = conn.execute(
+            select(model_variants.c.model_id)
+            .where(
+                model_variants.c.kind.in_(['vrm_optimized', 'vrm']),
+                model_variants.c.file_id.is_not(None),
+            )
+            .limit(1)
+        ).first()
+    return bool(derived)
+
+
+def _animation_media_capture_queue_item(model, *, generated=False, capture_ready=True, force_capture=False):
+    owner = User.get_by_id(model.user_id)
+    clip_id = (model.id + ':vrma') if generated else model.id
+    needs_thumbnail = force_capture or not bool(model.thumbnail_file_id)
+    needs_preview = force_capture or not bool(model.preview_file_id)
+    return {
+        'id': model.id,
+        'clip_id': clip_id,
+        'name': (model.name or 'Untitled') + (' animation' if generated else ''),
+        'file_format': 'vrma',
+        'is_public': model.is_public,
+        'owner': {
+            'id': owner.id if owner else None,
+            'username': owner.username if owner else 'Unknown',
+        },
+        'upload_date': model.upload_date.isoformat() if model.upload_date else None,
+        'conversion_status': model.conversion_status,
+        'has_viewable': True,
+        'has_thumbnail': bool(model.thumbnail_file_id),
+        'thumbnail_file_id': model.thumbnail_file_id,
+        'has_preview': bool(model.preview_file_id),
+        'preview_file_id': model.preview_file_id,
+        'needs_thumbnail': needs_thumbnail,
+        'needs_preview': needs_preview,
+        'force_capture': force_capture,
+        'needs_enrichment': False,
+        'capture_ready': capture_ready,
+        'detail_url': url_for('main.animations'),
+        'capture_url': url_for('main.animations', capture_clip=clip_id),
+        'capture_mode': 'animation',
+    }
+
+
+def _animation_media_capture_queue_items(limit, *, include_not_ready=False, recapture=False):
+    capture_ready = _animation_capture_ready()
+    missing = true() if recapture else or_(
+        model_rows.c.thumbnail_file_id.is_(None),
+        model_rows.c.preview_file_id.is_(None),
+    )
+    with current_app.config['DB_ENGINE'].begin() as conn:
+        rows = conn.execute(
+            select(model_rows)
+            .where(
+                missing,
+                or_(model_rows.c.file_format == 'vrma', model_rows.c.vrma_file_id.is_not(None)),
+            )
+            .order_by(model_rows.c.upload_date.desc())
+            .limit(limit * 3)
+        ).mappings().all()
+
+    items = []
+    skipped_not_ready = 0
+    for row in rows:
+        model = Model3D.from_doc(row)
+        generated = (model.file_format or '').lower() != 'vrma'
+        item = _animation_media_capture_queue_item(
+            model,
+            generated=generated,
+            capture_ready=capture_ready,
+            force_capture=recapture,
+        )
+        if not item['capture_ready'] and not include_not_ready:
+            skipped_not_ready += 1
+            continue
+        items.append(item)
+        if len(items) >= limit:
+            break
+    return items, skipped_not_ready
 
 
 def _game_optimized_fields(model):
@@ -3790,33 +3892,54 @@ def admin_media_capture_queue():
         return jsonify({'error': 'Unauthorized'}), 401
 
     limit = max(1, min(request.args.get('limit', 50, type=int), 200))
+    kind = (request.args.get('kind') or 'all').strip().lower()
+    if kind not in {'all', 'models', 'animations'}:
+        kind = 'all'
     include_not_ready = request.args.get('include_not_ready', 'false').lower() == 'true'
-    missing = or_(
-        model_rows.c.thumbnail_file_id.is_(None),
-        model_rows.c.preview_file_id.is_(None),
-    )
-    with current_app.config['DB_ENGINE'].begin() as conn:
-        rows = conn.execute(
-            select(model_rows)
-            .where(missing)
-            .order_by(model_rows.c.upload_date.desc())
-            .limit(limit * 3)
-        ).mappings().all()
-
+    recapture = request.args.get('recapture', 'false').lower() in {'1', 'true', 'yes'}
     items = []
     skipped_not_ready = 0
-    for row in rows:
-        model = Model3D.from_doc(row)
-        item = _media_capture_queue_item(model)
-        if not item['capture_ready'] and not include_not_ready:
-            skipped_not_ready += 1
-            continue
-        items.append(item)
-        if len(items) >= limit:
-            break
+
+    if kind in {'all', 'models'}:
+        missing = true() if recapture else or_(
+            model_rows.c.thumbnail_file_id.is_(None),
+            model_rows.c.preview_file_id.is_(None),
+        )
+        with current_app.config['DB_ENGINE'].begin() as conn:
+            rows = conn.execute(
+                select(model_rows)
+                .where(
+                    missing,
+                    model_rows.c.file_format.not_in(['vrma', 'bvh']),
+                    model_rows.c.vrma_file_id.is_(None),
+                )
+                .order_by(model_rows.c.upload_date.desc())
+                .limit(limit * 3)
+            ).mappings().all()
+
+        for row in rows:
+            model = Model3D.from_doc(row)
+            item = _media_capture_queue_item(model, force_capture=recapture)
+            if not item['capture_ready'] and not include_not_ready:
+                skipped_not_ready += 1
+                continue
+            items.append(item)
+            if len(items) >= limit:
+                break
+
+    if kind in {'all', 'animations'} and len(items) < limit:
+        animation_items, animation_skipped = _animation_media_capture_queue_items(
+            limit - len(items),
+            include_not_ready=include_not_ready,
+            recapture=recapture,
+        )
+        items.extend(animation_items)
+        skipped_not_ready += animation_skipped
 
     return jsonify({
         'success': True,
+        'kind': kind,
+        'recapture': recapture,
         'count': len(items),
         'skipped_not_ready': skipped_not_ready,
         'models': items,

@@ -30,14 +30,22 @@ async function init(containerId, vrmUrl, options = {}) {
     const camera = new THREE.PerspectiveCamera(30, width / height, 0.1, 100);
     camera.position.set(0, 1.3, 3);
 
-    // preserveDrawingBuffer lets us capture the canvas to a PNG thumbnail.
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
+    // preserveDrawingBuffer lets us capture the canvas to a PNG thumbnail. Use
+    // an opaque white background so transparent costume textures preview like
+    // the GLB/game viewer instead of compositing dark fringes over the page.
+    const renderer = new THREE.WebGLRenderer({
+        antialias: true,
+        alpha: false,
+        premultipliedAlpha: false,
+        preserveDrawingBuffer: true
+    });
     renderer.setSize(width, height);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     // Match the brightness/look of the GLB viewer (neutral tone mapping + IBL).
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.toneMapping = THREE.NeutralToneMapping;
     renderer.toneMappingExposure = 1;
+    renderer.setClearColor(0xffffff, 1);
     container.appendChild(renderer.domElement);
 
     const controls = new OrbitControls(camera, renderer.domElement);
@@ -45,11 +53,11 @@ async function init(containerId, vrmUrl, options = {}) {
     controls.update();
 
     // Built-in RoomEnvironment as an IBL source for any PBR parts of the avatar.
-    // Only assigned to scene.environment (not .background) so the canvas stays
-    // transparent (alpha: true).
+    // Keep the visible background plain white to match model-viewer captures.
     const pmrem = new THREE.PMREMGenerator(renderer);
     const envTexture = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
     scene.environment = envTexture;
+    scene.background = new THREE.Color(0xffffff);
 
     scene.add(new THREE.AmbientLight(0xffffff, 1.0));
     const dir = new THREE.DirectionalLight(0xffffff, 1.5);
@@ -76,6 +84,21 @@ async function init(containerId, vrmUrl, options = {}) {
         }
         VRMUtils.removeUnnecessaryVertices(vrm.scene);
         VRMUtils.removeUnnecessaryJoints(vrm.scene);
+        vrm.scene.traverse((node) => {
+            if (!node.isMesh || !node.material) return;
+            const materials = Array.isArray(node.material) ? node.material : [node.material];
+            materials.filter(Boolean).forEach((material) => {
+                material.needsUpdate = true;
+                const map = material.map;
+                if (map) {
+                    map.colorSpace = THREE.SRGBColorSpace;
+                    map.needsUpdate = true;
+                }
+                if (material.transparent && material.opacity >= 0.98 && material.alphaTest < 0.02) {
+                    material.alphaTest = 0.02;
+                }
+            });
+        });
 
         scene.add(vrm.scene);
 

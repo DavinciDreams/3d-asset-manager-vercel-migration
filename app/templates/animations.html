@@ -4,6 +4,10 @@
 
 {% block content %}
 {% include "_live_previews.html" %}
+{% if preview_avatar_url %}
+{% include "_vrm_viewer.html" %}
+{% include "_preview_capture.html" %}
+{% endif %}
 <style>
     #animation-grid { align-items: start; }
     #animation-grid .animation-media {
@@ -16,6 +20,11 @@
             linear-gradient(135deg, rgba(79, 70, 229, 0.12), rgba(16, 185, 129, 0.12)),
             radial-gradient(circle at 72% 28%, rgba(15, 23, 42, 0.12), transparent 34%),
             #f8fafc;
+    }
+    .animation-vrm-preview canvas {
+        width: 100% !important;
+        height: 100% !important;
+        display: block;
     }
 </style>
 
@@ -74,6 +83,18 @@
                 <video class="w-full h-full object-cover lazy-media" loop muted playsinline preload="none"
                        data-preview-src="{{ clip.preview_url }}"
                        poster="{{ clip.thumbnail_url or '' }}"></video>
+                {% elif preview_avatar_url %}
+                <div id="animation-vrm-preview-{{ loop.index }}"
+                     class="animation-vrm-preview absolute inset-0"
+                     data-model-id="{{ clip.model_id }}"
+                     data-clip-id="{{ clip.id }}"
+                     data-avatar-src="{{ preview_avatar_url }}"
+                     data-vrma-src="{{ clip.view_url }}"
+                     {% if clip.thumbnail_url %}data-thumbnail-src="{{ clip.thumbnail_url }}"{% endif %}>
+                    <div class="absolute inset-0 flex items-center justify-center text-sm text-gray-500 bg-gray-50">
+                        <i class="fas fa-spinner fa-spin mr-2"></i>Loading preview
+                    </div>
+                </div>
                 {% elif clip.thumbnail_url %}
                 <img alt="{{ clip.name }}" class="w-full h-full object-cover lazy-media"
                      loading="lazy" data-img-src="{{ clip.thumbnail_url }}">
@@ -124,6 +145,96 @@
     <script>
         window.LivePreviews.observeMediaIn(document.getElementById('animation-grid'));
     </script>
+    {% if preview_avatar_url %}
+    <script>
+    (function () {
+        const captureClipId = {{ (capture_clip_id or '') | tojson }};
+        const grid = document.getElementById('animation-grid');
+        if (!grid) return;
+
+        function waitForViewer() {
+            if (window.VRMViewer) return Promise.resolve();
+            return new Promise((resolve) => {
+                window.addEventListener('vrmviewer-ready', resolve, { once: true });
+            });
+        }
+
+        async function uploadThumbnail(controller, modelId) {
+            if (!controller || !controller.capturePng) return false;
+            const image = controller.capturePng();
+            if (!image) return false;
+            try {
+                const resp = await fetch('/api/model/' + modelId + '/thumbnail', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ image })
+                });
+                const data = await resp.json().catch(() => ({}));
+                return data.success === true;
+            } catch (err) {
+                console.warn('Animation thumbnail capture failed:', err);
+                return false;
+            }
+        }
+
+        async function capturePreview(controller, modelId) {
+            if (!controller || !controller.canvas || !window.capturePreview) return false;
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            return window.capturePreview(controller.canvas, modelId, { durationMs: 4200, fps: 30 });
+        }
+
+        async function initPreview(el) {
+            if (!el || el.dataset.ready || el.dataset.loading) return;
+            el.dataset.loading = '1';
+            try {
+                await waitForViewer();
+                const controller = await window.VRMViewer.init(el.id, el.dataset.avatarSrc, {
+                    onError: () => { el.dataset.failed = '1'; }
+                });
+                if (!controller) return;
+                el.__vrmController = controller;
+                controller.setAutoRotate(false);
+                const animated = await controller.applyAnimation(el.dataset.vrmaSrc);
+                if (!animated) {
+                    el.innerHTML = '<div class="absolute inset-0 flex items-center justify-center text-sm text-red-600 bg-red-50 p-4 text-center">Could not play this animation.</div>';
+                    return;
+                }
+                el.dataset.ready = '1';
+
+                if (captureClipId && (el.dataset.clipId === captureClipId || el.dataset.modelId === captureClipId)) {
+                    const modelId = el.dataset.modelId;
+                    await uploadThumbnail(controller, modelId);
+                    await capturePreview(controller, modelId);
+                }
+            } catch (err) {
+                console.warn('Animation preview failed:', err);
+                el.innerHTML = '<div class="absolute inset-0 flex items-center justify-center text-sm text-red-600 bg-red-50 p-4 text-center">Preview failed.</div>';
+            } finally {
+                delete el.dataset.loading;
+            }
+        }
+
+        const observer = new IntersectionObserver((entries) => {
+            entries.forEach((entry) => {
+                if (entry.isIntersecting) initPreview(entry.target);
+            });
+        }, { rootMargin: '350px 0px' });
+
+        grid.querySelectorAll('.animation-vrm-preview').forEach((el) => observer.observe(el));
+
+        if (captureClipId) {
+            const target = grid.querySelector(
+                `.animation-vrm-preview[data-clip-id="${CSS.escape(captureClipId)}"],` +
+                `.animation-vrm-preview[data-model-id="${CSS.escape(captureClipId)}"]`
+            );
+            if (target) {
+                target.scrollIntoView({ block: 'center' });
+                initPreview(target);
+            }
+        }
+    })();
+    </script>
+    {% endif %}
     {% else %}
     <div class="text-center py-16">
         <div class="text-6xl text-gray-300 mb-4"><i class="fas fa-person-running"></i></div>

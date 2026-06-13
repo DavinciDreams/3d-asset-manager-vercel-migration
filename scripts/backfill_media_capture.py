@@ -54,8 +54,12 @@ def _login(page, base_url: str, username: str, password: str) -> None:
     page.wait_for_load_state("networkidle")
 
 
-def _fetch_queue(context, base_url: str, limit: int) -> list[dict]:
-    url = _absolute(base_url, f"/api/admin/media-capture/queue?limit={limit}")
+def _fetch_queue(context, base_url: str, limit: int, kind: str, recapture: bool) -> list[dict]:
+    recapture_value = "true" if recapture else "false"
+    url = _absolute(
+        base_url,
+        f"/api/admin/media-capture/queue?limit={limit}&kind={kind}&recapture={recapture_value}",
+    )
     data = _json_response(context.request.get(url), "queue fetch")
     return list(data.get("models") or [])
 
@@ -70,11 +74,21 @@ def _model_state(context, base_url: str, model_id: str) -> dict:
 
 def _wait_for_media(context, base_url: str, item: dict, timeout_s: int) -> tuple[bool, dict]:
     deadline = time.time() + timeout_s
+    force_capture = bool(item.get("force_capture"))
+    original_thumbnail_id = item.get("thumbnail_file_id")
+    original_preview_id = item.get("preview_file_id")
     model = {}
     while time.time() < deadline:
         model = _model_state(context, base_url, item["id"])
-        thumbnail_done = (not item.get("needs_thumbnail")) or model.get("has_thumbnail")
-        preview_done = (not item.get("needs_preview")) or model.get("has_preview")
+        media = model.get("media_capture") or {}
+        thumbnail_id = media.get("thumbnail_file_id")
+        preview_id = media.get("preview_file_id")
+        thumbnail_done = (not item.get("needs_thumbnail")) or (
+            model.get("has_thumbnail") and (not force_capture or thumbnail_id != original_thumbnail_id)
+        )
+        preview_done = (not item.get("needs_preview")) or (
+            model.get("has_preview") and (not force_capture or preview_id != original_preview_id)
+        )
         if thumbnail_done and preview_done:
             return True, model
         time.sleep(2)
@@ -123,6 +137,17 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default=os.environ.get("ASSET_MANAGER_BASE_URL", "http://127.0.0.1:5000"))
     parser.add_argument("--limit", type=int, default=50)
+    parser.add_argument(
+        "--kind",
+        choices=["all", "models", "animations"],
+        default="all",
+        help="Capture regular model media, animation clip media, or both.",
+    )
+    parser.add_argument(
+        "--recapture",
+        action="store_true",
+        help="Queue matching items even when media already exists, replacing stale thumbnails/previews.",
+    )
     parser.add_argument("--poll", action="store_true", help="Keep draining the queue for future uploads.")
     parser.add_argument("--interval", type=int, default=60, help="Seconds between poll cycles.")
     parser.add_argument("--capture-timeout", type=int, default=45)
@@ -154,7 +179,7 @@ def main(argv: list[str] | None = None) -> int:
 
         try:
             while True:
-                items = _fetch_queue(context, args.base_url, args.limit)
+                items = _fetch_queue(context, args.base_url, args.limit, args.kind, args.recapture)
                 if not items:
                     print("[queue] empty")
                     if not args.poll:

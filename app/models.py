@@ -771,9 +771,16 @@ class Model3D:
 
     @staticmethod
     def get_user_models(user_id, page=1, per_page=20, sort="newest", tag=None,
-                        category=None, style=None, asset_type=None):
+                        category=None, style=None, asset_type=None, exclude_formats=None,
+                        exclude_animation_carriers=False):
         engine = current_app.config["DB_ENGINE"]
         predicates = [models.c.user_id == str(user_id)]
+        if exclude_formats:
+            predicates.append(models.c.file_format.not_in([
+                str(fmt).strip().lower() for fmt in exclude_formats if str(fmt).strip()
+            ]))
+        if exclude_animation_carriers:
+            predicates.append(models.c.vrma_file_id.is_(None))
         predicates.extend(Model3D._tag_predicates(tag))
         predicates.extend(Model3D._facet_predicates(category=category, style=style, asset_type=asset_type))
         where = and_(*predicates) if predicates else true()
@@ -818,9 +825,16 @@ class Model3D:
         return sorted(values)
 
     @staticmethod
-    def get_user_tags(user_id):
+    def get_user_tags(user_id, exclude_formats=None, exclude_animation_carriers=False):
         try:
-            return Model3D._distinct_tags(models.c.user_id == str(user_id))
+            predicates = [models.c.user_id == str(user_id)]
+            if exclude_formats:
+                predicates.append(models.c.file_format.not_in([
+                    str(fmt).strip().lower() for fmt in exclude_formats if str(fmt).strip()
+                ]))
+            if exclude_animation_carriers:
+                predicates.append(models.c.vrma_file_id.is_(None))
+            return Model3D._distinct_tags(and_(*predicates))
         except Exception as e:
             print(f"Error getting user tags: {e}")
             return []
@@ -834,8 +848,15 @@ class Model3D:
             return []
 
     @staticmethod
-    def get_user_facets(user_id):
-        where = models.c.user_id == str(user_id)
+    def get_user_facets(user_id, exclude_formats=None, exclude_animation_carriers=False):
+        predicates = [models.c.user_id == str(user_id)]
+        if exclude_formats:
+            predicates.append(models.c.file_format.not_in([
+                str(fmt).strip().lower() for fmt in exclude_formats if str(fmt).strip()
+            ]))
+        if exclude_animation_carriers:
+            predicates.append(models.c.vrma_file_id.is_(None))
+        where = and_(*predicates)
         return {
             "categories": Model3D._distinct_column_values(models.c.asset_category, where),
             "styles": Model3D._distinct_column_values(models.c.asset_styles, where, list_values=True),

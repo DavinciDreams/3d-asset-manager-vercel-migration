@@ -1252,6 +1252,7 @@ def _autorig_marker_schema():
                 "type": "object",
                 "additionalProperties": False,
                 "properties": {key: point_schema for key in AUTORIG_MARKER_KEYS},
+                "required": AUTORIG_MARKER_KEYS,
             },
             "facing": {"type": "string", "enum": ["front", "back", "side", "uncertain"]},
             "pose": {"type": "string", "enum": ["t-pose", "a-pose", "wide-stance", "posed", "unknown"]},
@@ -1403,35 +1404,75 @@ def suggest_autorig_markers(model, image_bytes=None, image_mime="image/webp", vi
     image = _image_part_from_bytes(image_bytes, image_mime) if _openai_transport_supports_image_parts(provider) else None
     if not image:
         raise RuntimeError("Auto-rig marker suggestion requires image input support.")
-    payload = _post_json(
-        _request_url(_base_url(provider)),
+    base_messages = [
         {
-            "model": _model_name(provider),
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "You are a precise humanoid rigging assistant. Return JSON only.",
-                },
-                {"role": "user", "content": [{"type": "text", "text": user_text}, image]},
-            ],
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "autorig_marker_suggestions",
-                    "strict": True,
-                    "schema": schema,
-                },
+            "role": "system",
+            "content": "You are a precise humanoid rigging assistant. Return JSON only.",
+        },
+        {"role": "user", "content": [{"type": "text", "text": user_text}, image]},
+    ]
+    strict_body = {
+        "model": _model_name(provider),
+        "messages": base_messages,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "autorig_marker_suggestions",
+                "strict": True,
+                "schema": schema,
             },
         },
-        {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        provider=provider,
-        transport="openai",
-    )
-    parsed = _parse_json_object(_extract_chat_output(payload), provider=provider, transport="openai", label="auto-rig marker provider")
+    }
+    request_url = _request_url(_base_url(provider))
+    try:
+        payload = _post_json(
+            request_url,
+            strict_body,
+            {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            provider=provider,
+            transport="openai",
+        )
+        transport = "openai"
+    except RuntimeError as error:
+        detail = str(error).lower()
+        schema_rejected = (
+            "response_format" in detail
+            or "json_schema" in detail
+            or "schema" in detail
+            or "strict" in detail
+        )
+        if not schema_rejected or not _env_bool("AI_AUTORIG_RETRY_SCHEMALESS", True):
+            raise
+        fallback_messages = [
+            base_messages[0],
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            user_text
+                            + "\n\nReturn JSON matching this schema exactly:\n"
+                            + json.dumps(schema, sort_keys=True)
+                        ),
+                    },
+                    image,
+                ],
+            },
+        ]
+        payload = _post_json(
+            request_url,
+            {"model": _model_name(provider), "messages": fallback_messages},
+            {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            provider=provider,
+            transport="openai-schemaless",
+        )
+        transport = "openai-schemaless"
+    parsed = _parse_json_object(_extract_chat_output(payload), provider=provider, transport=transport, label="auto-rig marker provider")
     result = _normalize_marker_suggestions(parsed)
     result.update({
         "provider": provider,
-        "transport": "openai",
+        "transport": transport,
         "model": _model_name(provider),
         "view": view,
         "response_id": payload.get("id") if isinstance(payload, dict) else None,

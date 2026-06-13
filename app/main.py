@@ -155,12 +155,22 @@ def dashboard():
             current_user.id, page=page, per_page=per_page,
             sort=sort, tag=tags if tags else None,
             category=category, style=styles if styles else None,
-            asset_type=asset_types if asset_types else None)
+            asset_type=asset_types if asset_types else None,
+            exclude_formats=['vrma', 'bvh'],
+            exclude_animation_carriers=True)
         _enrich_dashboard_models(user_models)
 
         stats = Model3D.get_user_stats(current_user.id)
-        all_tags = Model3D.get_user_tags(current_user.id)
-        facets = Model3D.get_user_facets(current_user.id)
+        all_tags = Model3D.get_user_tags(
+            current_user.id,
+            exclude_formats=['vrma', 'bvh'],
+            exclude_animation_carriers=True,
+        )
+        facets = Model3D.get_user_facets(
+            current_user.id,
+            exclude_formats=['vrma', 'bvh'],
+            exclude_animation_carriers=True,
+        )
         has_next = page * per_page < total_filtered
 
         return render_template('dashboard.html',
@@ -215,7 +225,9 @@ def dashboard_rows():
             current_user.id, page=page, per_page=per_page,
             sort=sort, tag=tags if tags else None,
             category=category, style=styles if styles else None,
-            asset_type=asset_types if asset_types else None)
+            asset_type=asset_types if asset_types else None,
+            exclude_formats=['vrma', 'bvh'],
+            exclude_animation_carriers=True)
         _enrich_dashboard_models(user_models)
         has_next = page * per_page < total_filtered
         rows_html = render_template('_dashboard_rows.html', user_models=user_models)
@@ -327,6 +339,22 @@ def _sort_animation_items(items, sort):
     return sorted(items, key=lambda item: item['upload_date'] or 0, reverse=True)
 
 
+def _preview_avatar_url(avatars):
+    seen = set()
+    for avatar in avatars:
+        if not avatar or avatar.id in seen:
+            continue
+        seen.add(avatar.id)
+        if (avatar.file_format or '').lower() == 'vrm':
+            return url_for('api.view_model', model_id=avatar.id)
+        variant = ModelVariant.get(avatar.id, 'vrm_optimized') or ModelVariant.get(avatar.id, 'vrm')
+        if variant and variant.file_id:
+            if variant.kind == 'vrm_optimized':
+                return url_for('api.get_optimized_vrm', model_id=avatar.id)
+            return url_for('api.get_vrm_variant', model_id=avatar.id)
+    return None
+
+
 @main_bp.route('/animations')
 def animations():
     """Browse VRMA animation clips separately from model assets."""
@@ -352,19 +380,23 @@ def animations():
             ]
         items = _sort_animation_items(items, sort)
         avatars = Model3D.list_vrm_for_user(user_id) + Model3D.list_with_vrm_variant_for_user(user_id)
+        capture_clip_id = (request.args.get('capture_clip') or '').strip()
         return render_template(
             'animations.html',
             animations=items,
             search=search,
             sort=sort,
             avatar_count=len({avatar.id for avatar in avatars}),
+            preview_avatar_url=_preview_avatar_url(avatars),
+            capture_clip_id=capture_clip_id,
         )
     except Exception as e:
         print(f"Animations page error: {e}")
         import traceback
         traceback.print_exc()
         return render_template('animations.html', animations=[], search='', sort='newest',
-                               avatar_count=0, error=str(e))
+                               avatar_count=0, preview_avatar_url=None,
+                               capture_clip_id='', error=str(e))
 
 
 @main_bp.route('/local-assets')
