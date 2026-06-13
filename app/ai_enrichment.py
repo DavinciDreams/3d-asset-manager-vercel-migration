@@ -159,15 +159,58 @@ def _generic_description(description):
         "produced via pixal3d",
         "image-to-3d pipeline",
         "specific visual subject matter cannot be determined",
+        "specific details regarding its exact appearance",
+        "optimal use cases cannot be confirmed",
+        "as no preview thumbnail is available",
         "no thumbnail is available",
         "baseline for rendering",
+        "foundational component",
         "starting point for further 3d sculpting",
     )
     return not lowered.strip() or any(fragment in lowered for fragment in generic_fragments)
 
 
+def _generic_title(title):
+    lowered = (title or "").strip().lower()
+    if not lowered:
+        return True
+    return _contains_any(
+        lowered,
+        (
+            "unknown",
+            "ai-generated 3d model",
+            "generated 3d model",
+            "pixal3d",
+            "3d model",
+            "untitled",
+            "asset",
+            "hyades",
+        ),
+    )
+
+
 def _vision_subject_metadata(text):
     lowered = (text or "").lower()
+    if _contains_any(lowered, ("signpost", "sign post", "wooden sign", "signboard", "sign board")):
+        tags = ["signpost", "wooden-sign", "signboard", "wood", "fantasy-prop", "environment-prop"]
+        if _contains_any(lowered, ("cartoon", "stylized", "low-poly", "low poly")):
+            tags.extend(["stylized", "low-poly"])
+        if _contains_any(lowered, ("grass", "rocks", "foliage", "base")):
+            tags.extend(["grass-base", "rocks"])
+        return {
+            "title": "Stylized Wooden Signpost",
+            "asset_category": "prop",
+            "tags": tags,
+            "asset_styles": ["stylized", "fantasy", "low-poly"],
+            "asset_types": ["decorative-prop", "low-poly"],
+            "description": (
+                "A stylized wooden signpost prop with a blank signboard, simple wood material, "
+                "and a small grassy base with rocks and foliage. Suitable for fantasy, cartoon, "
+                "or low-poly game environments that need customizable directional signs, markers, "
+                "or scene dressing."
+            ),
+            "summary": "Stylized wooden signpost prop for fantasy or low-poly game scenes.",
+        }
     if "fountain" in lowered:
         tags = ["fountain", "water-feature", "decorative-prop"]
         if _contains_any(lowered, ("classical", "ornate", "antique", "historical")):
@@ -241,12 +284,13 @@ def _infer_missing_facets(enriched):
     vision_text = str(enriched.get("vision_mcp_analysis") or "")
     vision_subject = _vision_subject_metadata(vision_text)
     if vision_subject:
-        if _contains_any(str(enriched.get("title") or ""), ("unknown", "ai-generated 3d model", "generated 3d model", "pixal3d", "3d model", "untitled", "asset")):
+        if _generic_title(enriched.get("title")):
             enriched["title"] = vision_subject["title"]
         if _generic_description(enriched.get("description")):
             enriched["description"] = vision_subject["description"]
             enriched["summary"] = vision_subject["summary"]
         enriched["tags"] = _clean_enrichment_tags((enriched.get("tags") or []) + vision_subject.get("tags", []))
+        enriched["asset_styles"] = Model3D.normalize_tags((enriched.get("asset_styles") or []) + vision_subject.get("asset_styles", []))
         enriched["asset_types"] = Model3D.normalize_tags((enriched.get("asset_types") or []) + vision_subject.get("asset_types", []))
         if Model3D.normalize_category(enriched.get("asset_category")) in {None, "", "other", "prop", "props", "3d model", "3d models", "uncategorized"}:
             enriched["asset_category"] = vision_subject["asset_category"]
@@ -266,7 +310,7 @@ def _infer_missing_facets(enriched):
     best_category, best_score = max(category_scores, key=lambda item: item[1])
     current_score = next((score for candidate, score in category_scores if candidate == category), 0)
     protected_category = Model3D.normalize_category(vision_subject.get("asset_category")) if vision_subject else None
-    if protected_category and category == protected_category:
+    if protected_category:
         enriched["asset_category"] = protected_category
         category = protected_category
     elif best_score > 0 and (
@@ -318,10 +362,7 @@ def _infer_missing_facets(enriched):
     enriched["asset_types"] = _resolve_type_conflicts(asset_types, category, text)
 
     title = str(enriched.get("title") or "").strip()
-    generic_title = _contains_any(
-        title,
-        ("ai-generated 3d model", "generated 3d model", "pixal3d", "3d model", "untitled", "asset"),
-    )
+    generic_title = _generic_title(title)
     if generic_title and _contains_any(text, ("flower", "flowers", "floral", "bouquet", "bloom", "blooms")):
         title_parts = []
         for style in ("watercolor", "painterly", "stylized"):

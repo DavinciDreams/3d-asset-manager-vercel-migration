@@ -1689,6 +1689,61 @@ def test_ai_enrichment_removes_contradictory_facets(monkeypatch):
     assert {"high-poly", "low-poly"} != set(enriched["asset_types"]).intersection({"high-poly", "low-poly"})
 
 
+def test_ai_enrichment_uses_signpost_vision_over_no_thumbnail_fallback(monkeypatch):
+    from app import ai_enrichment
+
+    class FakeModel:
+        name = "Hyades"
+        description = ""
+        original_filename = "hyades.glb"
+        file_format = "glb"
+        file_size = 1710000
+        tags = []
+        asset_category = None
+        asset_styles = []
+        asset_types = []
+        runtime_metadata = {}
+        approve_game_ready = False
+        approve_asset_store = False
+        conversion_status = None
+        thumbnail_file_id = "thumb-1"
+
+    def fake_ai_metadata(model, extra_context=None):
+        return {
+            "title": "Hyades",
+            "asset_category": "flora",
+            "asset_styles": ["stylized", "fantasy", "low-poly"],
+            "asset_types": ["decorative-prop", "low-poly"],
+            "runtime_metadata": {"behaviors": []},
+            "tags": [],
+            "description": (
+                "A 3D model named Hyades. As no preview thumbnail is available for visual analysis, "
+                "specific details regarding its exact appearance, materials, and optimal use cases cannot be confirmed."
+            ),
+            "summary": "A foundational component ready to be integrated and verified.",
+            "categories": [],
+            "quality_notes": [],
+            "vision_mcp": True,
+            "vision_mcp_analysis": (
+                "The preview depicts a stylized, cartoon-like wooden signpost. "
+                "It has a blank wooden signboard on a vertical post, rooted in a small circular patch of grass "
+                "with rocks and foliage. It is a prop or environmental decoration and not a light emitter."
+            ),
+        }
+
+    monkeypatch.setattr(ai_enrichment, "_ai_metadata", fake_ai_metadata)
+
+    enriched = ai_enrichment.enrich_model(FakeModel())
+
+    assert enriched["title"] == "Stylized Wooden Signpost"
+    assert enriched["asset_category"] == "prop"
+    assert enriched["description"].startswith("A stylized wooden signpost prop")
+    assert {"signpost", "wooden-sign", "signboard"}.issubset(set(enriched["tags"]))
+    assert {"stylized", "fantasy", "low-poly"}.issubset(set(enriched["asset_styles"]))
+    assert {"decorative-prop", "low-poly"}.issubset(set(enriched["asset_types"]))
+    assert "flora" not in enriched["asset_types"]
+
+
 def test_ai_enrichment_prompt_uses_fab_listing_copy(monkeypatch):
     from app import ai_enrichment
 
