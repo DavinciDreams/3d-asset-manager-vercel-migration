@@ -33,12 +33,21 @@ NOISY_ENRICHMENT_TAGS = {
     "glb", "gltf", "fbx", "obj", "stl", "vrm", "image-to-3d", "model", "pixal3d",
 }
 FAB_LISTING_GUIDANCE = (
-    "Write descriptions as Fab marketplace product descriptions for a 3D listing. "
-    "Use polished buyer-facing copy, not analysis notes. Start with what the asset is, "
-    "then mention visual style/materials, likely use cases, and any visible limitations. "
-    "Do not mention Pixal3D, AI pipeline, provider names, polygon counts, texture resolution, "
-    "thumbnail availability, or uncertain technical claims unless those facts are directly supplied "
-    "and useful to a buyer. Keep the title under 80 characters. Return up to 25 discoverability tags."
+    "Write compelling copy describing the asset in detail. Use polished buyer-facing prose; "
+    "you may include bullet points in the description where useful. Describe the asset subject, "
+    "visual style, materials, and scenarios it is well suited for. Utilize terminology that buyers "
+    "would use to search for this type of item, including appropriate keywords and tags. "
+    "Keep the title under 80 characters. Return up to 10 discoverability tags."
+)
+TAGGER_SYSTEM_PROMPT = (
+    "You are a specialist in 3D assets, 3D modeling, game design, and rigging. "
+    "You are writing marketing copy to enrich 3D asset store records. Return concise JSON only. "
+    "Tags should be lowercase marketplace/search tags, not sentences, and should represent actual "
+    "groups useful for game designers and 3D artists. Use tags that describe what the asset is, "
+    "and the style or category it belongs to. Do not use generic names, file formats, source "
+    "pipeline labels, or generic tags like pixal3d, generated, image-to-3d, ai-generated, glb, "
+    "or 3d-model. Do not invent formats, file sizes, vertex counts, texture resolution, rigging, "
+    "animation, or optimization details; those are filled from file metadata."
 )
 
 
@@ -1098,11 +1107,7 @@ def _a2a_metadata(model, provider, api_key, schema, user_text):
     text_part = {
         "kind": "text",
         "text": (
-            "You enrich 3D asset store records. Return concise JSON only. "
-            "Tags should be lowercase marketplace/search tags, not sentences. "
-            "Do not use generator names, file formats, source pipeline labels, or generic tags like "
-            "pixal3d, generated, image-to-3d, ai-generated, glb, or 3d-model. "
-            + FAB_LISTING_GUIDANCE + "\n\n"
+            TAGGER_SYSTEM_PROMPT + " " + FAB_LISTING_GUIDANCE + "\n\n"
             + user_text
             + "\n\nJSON schema:\n"
             + json.dumps(schema, sort_keys=True)
@@ -1196,8 +1201,8 @@ def _ai_metadata(model, extra_context=None):
                 "type": "array",
                 "items": {"type": "string"},
                 "minItems": 3,
-                "maxItems": 25,
-                "description": "Fab-style discoverability tags. Use concrete subject, style, material, genre, and use-case tags. Do not include file formats, generator names, or generic pipeline/source tags.",
+                "maxItems": 10,
+                "description": "Discoverability tags useful to game designers and 3D artists. Use concrete subject, style, material, genre, category, and use-case tags. Do not include file formats, generator names, or generic pipeline/source tags.",
             },
             "title": {
                 "type": "string",
@@ -1316,14 +1321,13 @@ def _ai_metadata(model, extra_context=None):
         "Create marketplace metadata for this 3D asset. Return only JSON that matches the schema. "
         + FAB_LISTING_GUIDANCE + " "
         "Prefer concrete visible or file-derived details over generic filler. "
-        "Write the title as a concise product/catalog name for the visible subject and style; never use the "
-        "generator/provider name or generic source labels as the title. "
+        "Write the title as a concise product/catalog name for the visible subject and style. "
             "Do not leave asset_category or asset_styles empty when visual analysis provides evidence. "
             "Use asset_category for the broad subject bucket, asset_styles for aesthetic/genre/medium, "
-            "and asset_types for non-structural technical/use traits. Avoid contradictory facet pairs such as realistic with "
-            "cartoon/painterly/stylized or high-poly with low-poly. "
-            "If visual analysis is unavailable, say only what can be inferred from the filename and asset fields, "
-        "and avoid pretending to know the object's appearance.\n\n"
+            "and asset_types for non-structural technical/use traits. Use buyer search terminology, "
+            "but avoid keyword stuffing. Do not mention thumbnail availability, AI generation, provider names, "
+            "or pipeline details. Do not invent technical details that are not directly supplied. "
+            "If visual analysis is unavailable, say only what can be inferred from the filename and asset fields.\n\n"
         + json.dumps(prompt, sort_keys=True)
     )
     if _transport(provider) == "a2a":
@@ -1334,13 +1338,7 @@ def _ai_metadata(model, extra_context=None):
             "messages": [
                 {
                     "role": "system",
-                    "content": (
-                        "You enrich 3D asset store records. Return concise JSON only. "
-                        "Tags should be lowercase marketplace/search tags, not sentences. "
-                        "Do not use generator names, file formats, source pipeline labels, or generic tags like "
-                        "pixal3d, generated, image-to-3d, ai-generated, glb, or 3d-model. "
-                        + FAB_LISTING_GUIDANCE
-                    ),
+                    "content": TAGGER_SYSTEM_PROMPT + " " + FAB_LISTING_GUIDANCE,
                 },
                 {"role": "user", "content": content},
             ],

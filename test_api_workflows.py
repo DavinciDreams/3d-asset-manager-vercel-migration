@@ -1859,11 +1859,12 @@ def test_ai_enrichment_prompt_uses_fab_listing_copy(monkeypatch):
     system_text = captured["body"]["messages"][0]["content"]
     user_text = captured["body"]["messages"][1]["content"]
     schema = captured["body"]["response_format"]["json_schema"]["schema"]
-    assert "Fab marketplace product descriptions" in system_text
-    assert "buyer-facing copy" in user_text
+    assert "specialist in 3D assets" in system_text
+    assert "writing marketing copy" in system_text
+    assert "polished buyer-facing prose" in user_text
     assert "Keep the title under 80 characters" in user_text
-    assert "Return up to 25 discoverability tags" in user_text
-    assert schema["properties"]["tags"]["maxItems"] == 25
+    assert "Return up to 10 discoverability tags" in user_text
+    assert schema["properties"]["tags"]["maxItems"] == 10
     assert "Fab listing title under 80 characters" in schema["properties"]["title"]["description"]
     assert "Buyer-facing Fab product description" in schema["properties"]["description"]["description"]
     assert enriched["title"] == "Classical Stone Fountain"
