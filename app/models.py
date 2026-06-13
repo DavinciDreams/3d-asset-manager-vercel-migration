@@ -600,6 +600,25 @@ class Model3D:
         for key in ["physics", "interaction", "spawn"]:
             if isinstance(metadata.get(key), dict):
                 normalized[key] = metadata[key]
+        upload = metadata.get("upload")
+        if isinstance(upload, dict):
+            allowed = {
+                "source",
+                "world_id",
+                "asset_username",
+                "asset_user_id",
+                "user_agent",
+                "content_hash",
+                "generation_id",
+            }
+            cleaned_upload = {}
+            for key in allowed:
+                value = upload.get(key)
+                if value in (None, "", [], {}):
+                    continue
+                cleaned_upload[key] = str(value)[:500]
+            if cleaned_upload:
+                normalized["upload"] = cleaned_upload
         return normalized
 
     @staticmethod

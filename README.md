@@ -109,6 +109,10 @@ ids in `/api/tellus/worlds/:worldId/state` are tagged with normalized
 `tellus-world-<world-id>` tags. If the world id is already known during upload,
 `worldId`, `world_id`, `tellusWorldId`, `tellus_world_id`, or
 `X-Tellus-World-Id` may also be sent to stamp the same tag immediately.
+Generation workers should also send a stable `X-Generation-Id` header (or
+`generationId` / `generation_id` form field) on every retry/path for the same
+generated asset; the asset manager uses it as an idempotency key even if the
+binary, title, tags, or owner differ.
 
 To let a human store account clean up admin-owned assets, set one or more of
 `ASSET_MANAGER_ADMIN_USERNAMES`, `ASSET_MANAGER_ADMIN_EMAILS`, or

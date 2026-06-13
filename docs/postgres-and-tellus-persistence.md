@@ -71,6 +71,11 @@ Tellus saves world state: assets referenced by id in
 `tellus-world-<world-id>` tag. If the world id is already known during upload,
 Tellus may also send `worldId`, `world_id`, `tellusWorldId`,
 `tellus_world_id`, or `X-Tellus-World-Id` to stamp that tag immediately.
+Generation workers should also send a stable `X-Generation-Id` header (or
+`generationId` / `generation_id` form field) for every retry and every upload
+path belonging to the same generated asset. The asset manager treats that value
+as an idempotency key, so different binary outputs, titles, tags, or owners do
+not create duplicate records for the same generation.
 
 For asset-store cleanup, set `ASSET_MANAGER_ADMIN_USERNAMES`,
 `ASSET_MANAGER_ADMIN_EMAILS`, or `ASSET_MANAGER_ADMIN_USER_IDS` to allow logged

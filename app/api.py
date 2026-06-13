@@ -2228,7 +2228,7 @@ def _name_from_filename(original_filename):
 
 def _store_one_upload(file, base_name, description, is_public, tags, allowed_extensions, fs, max_bytes,
                       owner_id=None, asset_category=None, asset_styles=None, asset_types=None,
-                      runtime_metadata=None):
+                      runtime_metadata=None, world_id=None):
     """Validate and persist a single uploaded file as a Model3D.
 
     Returns (model, None) on success or (None, error_message) on failure.
@@ -2253,6 +2253,7 @@ def _store_one_upload(file, base_name, description, is_public, tags, allowed_ext
         limit_mb = max_bytes // (1024 * 1024)
         return None, f'File too large. Maximum size is {limit_mb}MB.'
     content_hash = hashlib.sha256(file_content).hexdigest()
+    generation_id = _upload_generation_id()
     duplicate = Model3D.get_by_content_hash(content_hash)
     if duplicate:
         if duplicate.is_public or duplicate.user_id == owner_id:
@@ -2267,6 +2268,29 @@ def _store_one_upload(file, base_name, description, is_public, tags, allowed_ext
     # involved, the caller passes base_name="" so each model is named from its
     # own filename. A single-file upload keeps the typed name.
     model_name = base_name or _name_from_filename(file.filename)
+    existing_generation = _find_existing_generation_upload(generation_id, owner_id)
+    if existing_generation:
+        if world_id and _is_legacy_pixal3d_direct_model(existing_generation):
+            try:
+                existing_generation.delete()
+            except Exception as e:
+                print(f"Failed to replace legacy Pixal3D generation duplicate {existing_generation.id}: {e}")
+                return None, f'Duplicate generation already exists: {existing_generation.name} ({existing_generation.id}).'
+        else:
+            return None, f'Duplicate generation already exists: {existing_generation.name} ({existing_generation.id}).'
+    stats = _mesh_stats(runtime_metadata)
+    if (
+        stats
+        and _is_legacy_pixal3d_direct_payload(file.filename, model_name, description, tags, world_id)
+    ):
+        existing = _find_recent_authoritative_tellus_duplicate(stats, owner_id)
+        if existing:
+            return None, f'Duplicate generation already exists: {existing.name} ({existing.id}).'
+
+    runtime_metadata = _merge_runtime_metadata(
+        runtime_metadata,
+        {'upload': _upload_provenance(world_id, content_hash=content_hash, generation_id=generation_id)},
+    )
 
     gridfs_file_id = fs.put(
         file_content,
@@ -2303,6 +2327,13 @@ def _store_one_upload(file, base_name, description, is_public, tags, allowed_ext
     # asset gets a small, performant browse preview/download by default.
     _maybe_autostart_game_optimization(model)
     _maybe_autotag_on_upload(model, context={'source': 'api_upload'})
+    deleted_duplicates = _delete_recent_legacy_pixal3d_duplicates(model)
+    if deleted_duplicates:
+        print(
+            f"Deleted {len(deleted_duplicates)} recent legacy Pixal3D duplicate(s) "
+            f"for Tellus upload {model.id}: {deleted_duplicates}",
+            flush=True,
+        )
     return model, None
 
 
@@ -2458,6 +2489,187 @@ def _clean_asset_types(asset_types):
         value for value in Model3D.normalize_tags(asset_types or [])
         if value not in {'static', 'static-mesh', 'generated'}
     ]
+
+
+def _mesh_stats(runtime_metadata):
+    if not isinstance(runtime_metadata, dict):
+        return None
+    stats = runtime_metadata.get('mesh_stats')
+    return stats if isinstance(stats, dict) and stats else None
+
+
+def _mesh_stats_match(left, right):
+    if not isinstance(left, dict) or not isinstance(right, dict):
+        return False
+    try:
+        left_triangles = int(left.get('triangles') or 0)
+        right_triangles = int(right.get('triangles') or 0)
+        left_vertices = int(left.get('vertices') or 0)
+        right_vertices = int(right.get('vertices') or 0)
+        left_primitives = int(left.get('primitives') or 0)
+        right_primitives = int(right.get('primitives') or 0)
+    except (TypeError, ValueError):
+        return False
+    if left_triangles <= 0 or right_triangles <= 0 or left_vertices <= 0 or right_vertices <= 0:
+        return False
+    if left_primitives and right_primitives and left_primitives != right_primitives:
+        return False
+    return abs(left_triangles - right_triangles) <= 2 and abs(left_vertices - right_vertices) <= 8
+
+
+def _has_tellus_world_tag(tags):
+    return any(str(tag or '').lower().startswith('tellus-world-') for tag in (tags or []))
+
+
+def _is_legacy_pixal3d_direct_payload(filename, model_name, description, tags, world_id):
+    if world_id:
+        return False
+    values = ' '.join([
+        str(filename or ''),
+        str(model_name or ''),
+        str(description or ''),
+        ' '.join(str(tag or '') for tag in (tags or [])),
+    ]).lower()
+    return (
+        'pixal3d' in values
+        and (
+            'image-to-3d' in values
+            or 'generated by pixal3d' in values
+            or 'pixal3d-hyades-' in values
+            or 'pixal3d hyades-' in values
+        )
+    )
+
+
+def _is_legacy_pixal3d_direct_model(model):
+    if not model or _has_tellus_world_tag(model.tags):
+        return False
+    return _is_legacy_pixal3d_direct_payload(
+        model.original_filename,
+        model.name,
+        model.description,
+        model.tags,
+        world_id=None,
+    )
+
+
+def _is_authoritative_tellus_world_model(model):
+    tags = [str(tag or '').lower() for tag in (model.tags or [])]
+    return bool(model and 'tellus' in tags and _has_tellus_world_tag(tags))
+
+
+def _recent_owner_models(owner_id, minutes=15, limit=100):
+    try:
+        models_list, _total = Model3D.list_models(
+            page=1,
+            per_page=limit,
+            sort='newest',
+            public_only=False,
+            owner_id=owner_id,
+        )
+        cutoff = datetime.utcnow() - timedelta(minutes=minutes)
+        return [
+            model for model in models_list
+            if model.upload_date and model.upload_date >= cutoff
+        ]
+    except Exception as e:
+        print(f"Recent upload lookup failed: {e}")
+        return []
+
+
+def _owner_models(owner_id, limit=1000):
+    try:
+        models_list, _total = Model3D.list_models(
+            page=1,
+            per_page=limit,
+            sort='newest',
+            public_only=False,
+            owner_id=owner_id,
+        )
+        return models_list
+    except Exception as e:
+        print(f"Owner upload lookup failed: {e}")
+        return []
+
+
+def _find_recent_matching_model(stats, owner_id, predicate, exclude_id=None):
+    for candidate in _recent_owner_models(owner_id):
+        if exclude_id and candidate.id == exclude_id:
+            continue
+        if not predicate(candidate):
+            continue
+        if _mesh_stats_match(stats, _mesh_stats(candidate.runtime_metadata)):
+            return candidate
+    return None
+
+
+def _find_recent_authoritative_tellus_duplicate(stats, owner_id):
+    return _find_recent_matching_model(stats, owner_id, _is_authoritative_tellus_world_model)
+
+
+def _delete_recent_legacy_pixal3d_duplicates(authoritative_model):
+    stats = _mesh_stats(authoritative_model.runtime_metadata)
+    if not stats or not _is_authoritative_tellus_world_model(authoritative_model):
+        return []
+    deleted = []
+    for candidate in list(_recent_owner_models(authoritative_model.user_id)):
+        if candidate.id == authoritative_model.id:
+            continue
+        if not _is_legacy_pixal3d_direct_model(candidate):
+            continue
+        if not _mesh_stats_match(stats, _mesh_stats(candidate.runtime_metadata)):
+            continue
+        try:
+            candidate.delete()
+            deleted.append(candidate.id)
+        except Exception as e:
+            print(f"Failed to delete legacy Pixal3D duplicate {candidate.id}: {e}")
+    return deleted
+
+
+def _upload_generation_id():
+    value = (
+        request.form.get('generationId')
+        or request.form.get('generation_id')
+        or request.form.get('sourceGenerationId')
+        or request.form.get('source_generation_id')
+        or request.headers.get('X-Generation-Id')
+        or request.headers.get('X-Asset-Generation-Id')
+        or request.headers.get('X-Source-Generation-Id')
+    )
+    return str(value or '').strip()
+
+
+def _find_existing_generation_upload(generation_id, owner_id):
+    if not generation_id:
+        return None
+    for model in _owner_models(owner_id):
+        metadata = model.runtime_metadata or {}
+        upload = metadata.get('upload') if isinstance(metadata, dict) else None
+        if not isinstance(upload, dict):
+            continue
+        if str(upload.get('generation_id') or '').strip() == generation_id:
+            return model
+    return None
+
+
+def _upload_provenance(world_id, content_hash=None, generation_id=None):
+    source = (
+        request.form.get('source')
+        or request.form.get('upload_source')
+        or request.headers.get('X-Upload-Source')
+        or request.headers.get('X-Upload-Origin')
+        or request.headers.get('X-Asset-Source')
+    )
+    return {
+        'source': source or ('tellus-world' if world_id else 'api-upload'),
+        'world_id': world_id or '',
+        'asset_username': request.headers.get('X-Asset-Username') or request.headers.get('X-Username') or '',
+        'asset_user_id': request.headers.get('X-Asset-User-Id') or request.headers.get('X-User-Id') or '',
+        'user_agent': request.headers.get('User-Agent') or '',
+        'content_hash': content_hash or '',
+        'generation_id': generation_id or '',
+    }
 
 
 _PROVENANCE_TAGS = {'tellus'}
@@ -3423,6 +3635,7 @@ def upload_model():
         asset_category = Model3D.normalize_category(request.form.get('asset_category'))
         asset_styles = Model3D.normalize_tags(request.form.get('asset_styles', ''))
         asset_types = Model3D.normalize_tags(request.form.get('asset_types', ''))
+        world_id = _tellus_world_id()
         tags, asset_types = _with_generation_defaults(tags, asset_types)
         runtime_metadata = Model3D.normalize_runtime_metadata(request.form.get('runtime_metadata'))
 
@@ -3454,6 +3667,7 @@ def upload_model():
                 allowed_extensions, fs, max_bytes, owner_id=owner_id,
                 asset_category=asset_category, asset_styles=asset_styles,
                 asset_types=asset_types, runtime_metadata=runtime_metadata,
+                world_id=world_id,
             )
             if model:
                 uploaded.append(model)
@@ -3469,7 +3683,8 @@ def upload_model():
                     'message': f'Model "{model.name}" uploaded successfully!',
                     'model': _serialize_model(model)
                 }), 201
-            status = 409 if 'duplicate model' in errors[0]['error'].lower() else 400
+            error_text = errors[0]['error'].lower()
+            status = 409 if ('duplicate model' in error_text or 'duplicate generation' in error_text) else 400
             return jsonify({'error': errors[0]['error']}), status
 
         # Multi-file path: report per-file outcomes.
