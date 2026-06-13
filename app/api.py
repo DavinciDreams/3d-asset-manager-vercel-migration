@@ -2,7 +2,7 @@ from datetime import datetime, timedelta
 from flask import Blueprint, jsonify, request, current_app, make_response, url_for
 from flask_login import current_user, login_required
 from werkzeug.exceptions import HTTPException
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from app.db import asset_files, models as model_rows, optimization_jobs
 from app.models import ApiKey, AssetBundle, Model3D, ModelVariant, User, WorldState
 from app.openapi import get_openapi_spec
@@ -2542,6 +2542,44 @@ def _media_presence_fields(model):
     }
 
 
+def _media_capture_ready(model):
+    """Return True when the detail page can render this model for capture."""
+    fmt = (model.file_format or '').lower()
+    if fmt in ('vrma', 'bvh'):
+        return False
+    if fmt in ('glb', 'gltf', 'vrm'):
+        return True
+    return bool(model.viewable_file_id)
+
+
+def _media_capture_queue_item(model):
+    owner = User.get_by_id(model.user_id)
+    needs_thumbnail = not bool(model.thumbnail_file_id)
+    needs_preview = not bool(model.preview_file_id)
+    needs_enrichment = model.ai_status not in ('done', 'processing', 'pending')
+    return {
+        'id': model.id,
+        'name': model.name,
+        'file_format': model.file_format,
+        'is_public': model.is_public,
+        'owner': {
+            'id': owner.id if owner else None,
+            'username': owner.username if owner else 'Unknown',
+        },
+        'upload_date': model.upload_date.isoformat() if model.upload_date else None,
+        'conversion_status': model.conversion_status,
+        'has_viewable': bool(model.viewable_file_id),
+        'has_thumbnail': bool(model.thumbnail_file_id),
+        'has_preview': bool(model.preview_file_id),
+        'needs_thumbnail': needs_thumbnail,
+        'needs_preview': needs_preview,
+        'needs_enrichment': needs_enrichment,
+        'capture_ready': _media_capture_ready(model),
+        'detail_url': url_for('main.model_detail', model_id=model.id, capture=1),
+        'capture_url': url_for('main.model_detail', model_id=model.id, capture=1),
+    }
+
+
 def _game_optimized_fields(model):
     """Summary of the model's game-optimized variant (if any) for serialization."""
     variant = ModelVariant.get(model.id, 'game')
@@ -3665,6 +3703,57 @@ def _admin_token_ok():
     if not provided:
         return False
     return any(hmac.compare_digest(provided, t) for t in valid)
+
+
+def _admin_or_asset_admin_session_ok():
+    return _admin_token_ok() or (
+        current_user.is_authenticated and is_asset_admin_user(current_user)
+    )
+
+
+@api_bp.route('/admin/media-capture/queue', methods=['GET'])
+def admin_media_capture_queue():
+    """List renderable models that still need thumbnail/video capture.
+
+    The capture itself is browser-side WebGL work, so this endpoint feeds a
+    trusted browser runner. It is intentionally token/admin gated because it can
+    expose private model IDs and owner names.
+    """
+    if not _admin_or_asset_admin_session_ok():
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    limit = max(1, min(request.args.get('limit', 50, type=int), 200))
+    include_not_ready = request.args.get('include_not_ready', 'false').lower() == 'true'
+    missing = or_(
+        model_rows.c.thumbnail_file_id.is_(None),
+        model_rows.c.preview_file_id.is_(None),
+    )
+    with current_app.config['DB_ENGINE'].begin() as conn:
+        rows = conn.execute(
+            select(model_rows)
+            .where(missing)
+            .order_by(model_rows.c.upload_date.desc())
+            .limit(limit * 3)
+        ).mappings().all()
+
+    items = []
+    skipped_not_ready = 0
+    for row in rows:
+        model = Model3D.from_doc(row)
+        item = _media_capture_queue_item(model)
+        if not item['capture_ready'] and not include_not_ready:
+            skipped_not_ready += 1
+            continue
+        items.append(item)
+        if len(items) >= limit:
+            break
+
+    return jsonify({
+        'success': True,
+        'count': len(items),
+        'skipped_not_ready': skipped_not_ready,
+        'models': items,
+    })
 
 
 def _run_backfill_optimization(app):

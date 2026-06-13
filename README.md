@@ -174,6 +174,38 @@ client by referencing local image/video paths; the Flask enrichment endpoint can
 also include stored thumbnails when the selected OpenAI-compatible model accepts
 image content.
 
+## Media Capture Backfill
+
+Thumbnails and rotating previews are captured in a real browser because the
+source is the WebGL/model-viewer canvas. The API exposes an admin-only queue of
+renderable assets that are missing thumbnail or preview media:
+
+```bash
+GET /api/admin/media-capture/queue
+Authorization: Bearer your-service-token
+```
+
+To backfill current assets and queue AI enrichment after thumbnails are saved:
+
+```bash
+pip install playwright
+playwright install chromium
+set ASSET_CAPTURE_TOKEN=your-service-token
+set ASSET_CAPTURE_USERNAME=lisa
+set ASSET_CAPTURE_PASSWORD=your-password
+python scripts/backfill_media_capture.py --base-url https://3d.flobots.xyz --limit 50
+```
+
+For future uploads, run the same worker in poll mode from a machine/container
+with Chromium available:
+
+```bash
+python scripts/backfill_media_capture.py --base-url https://3d.flobots.xyz --poll --interval 60
+```
+
+The queue skips raw animation-only files such as VRMA/BVH and waits for
+convertible sources such as FBX to have a viewable model before capture.
+
 ## Runtime Metadata for Tellus
 
 Asset API responses include a `runtime_metadata` object for in-world behavior

@@ -236,6 +236,49 @@ def test_upload_derives_rig_and_animation_metadata_from_glb():
     assert fetched_model["effective_physical_metadata"]["suggested_scale"] == 1
 
 
+def test_admin_media_capture_queue_lists_only_renderable_missing_media():
+    app = create_app()
+    client = app.test_client()
+    headers = {"Authorization": "Bearer test-token"}
+
+    denied = client.get("/api/admin/media-capture/queue")
+    assert denied.status_code == 401
+
+    native = client.post("/api/upload", headers=headers, data={
+        "is_public": "true",
+        "file": (io.BytesIO(b"glTF" + b"\x01" * 64), "queue_native.glb"),
+    }, content_type="multipart/form-data")
+    assert native.status_code == 201, native.get_json()
+    native_id = native.get_json()["model"]["id"]
+
+    vrma = client.post("/api/upload", headers=headers, data={
+        "is_public": "true",
+        "file": (io.BytesIO(b"VRMA" + b"\x02" * 64), "idle_clip.vrma"),
+    }, content_type="multipart/form-data")
+    assert vrma.status_code == 201, vrma.get_json()
+    vrma_id = vrma.get_json()["model"]["id"]
+
+    fbx = client.post("/api/upload", headers=headers, data={
+        "is_public": "true",
+        "file": (io.BytesIO(b"Kaydara FBX Binary" + b"\x03" * 64), "prop_source.fbx"),
+    }, content_type="multipart/form-data")
+    assert fbx.status_code == 201, fbx.get_json()
+    fbx_id = fbx.get_json()["model"]["id"]
+
+    queue = client.get("/api/admin/media-capture/queue?limit=20", headers=headers)
+    assert queue.status_code == 200, queue.get_json()
+    ids = {item["id"] for item in queue.get_json()["models"]}
+    assert native_id in ids
+    assert vrma_id not in ids
+    assert fbx_id not in ids
+
+    native_item = next(item for item in queue.get_json()["models"] if item["id"] == native_id)
+    assert native_item["needs_thumbnail"] is True
+    assert native_item["needs_preview"] is True
+    assert native_item["capture_ready"] is True
+    assert native_item["capture_url"].endswith(f"/model/{native_id}?capture=1")
+
+
 def test_upload_does_not_tag_static_unrigged_glb():
     app = create_app()
     client = app.test_client()
