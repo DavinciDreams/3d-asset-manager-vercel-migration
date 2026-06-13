@@ -186,7 +186,7 @@ def _vision_subject_metadata(text):
             "title": " ".join(title_parts),
             "asset_category": "environment",
             "tags": tags,
-            "asset_types": ["static", "decorative-prop"],
+            "asset_types": ["decorative-prop"],
             "description": (
                 "A classical two-tiered fountain with stacked circular basins, an octagonal base, "
                 "and weathered stone or marble-like material. Suitable as a decorative water feature "
@@ -211,8 +211,8 @@ def _resolve_style_conflicts(styles, text):
 def _resolve_type_conflicts(asset_types, category, text):
     normalized = []
     for asset_type in Model3D.normalize_tags(asset_types):
-        if asset_type == "static-mesh":
-            asset_type = "static"
+        if asset_type in {"static", "static-mesh"}:
+            continue
         if asset_type not in normalized:
             normalized.append(asset_type)
 
@@ -222,8 +222,6 @@ def _resolve_type_conflicts(asset_types, category, text):
     }
     normalized = [item for item in normalized if item not in category_terms and item != category]
 
-    if "static" in normalized:
-        normalized = [item for item in normalized if item not in {"rigged", "animated"}]
     if "high-poly" in normalized and "low-poly" in normalized:
         high_score = _keyword_score(text, ("high-poly", "high poly", "100,000", "100000", "dense", "high detail"))
         low_score = _keyword_score(text, ("low-poly", "low poly", "optimized", "simple mesh"))
@@ -293,9 +291,6 @@ def _infer_missing_facets(enriched):
 
     asset_types = Model3D.normalize_tags(enriched.get("asset_types", []))
     type_rules = {
-        "static": ("static", "not rigged", "not animated", "no visible joints", "single pose"),
-        "rigged": ("rigged", "skeleton", "armature", "joints"),
-        "animated": ("animated", "animation", "keyframes"),
         "light-emitter": ("light emitter", "emits light", "glowing", "lantern", "lamp", "torch", "candle"),
         "decorative-prop": ("decorative", "prop", "decoration", "ornamental"),
         "pbr": ("pbr", "physically based"),
@@ -320,8 +315,6 @@ def _infer_missing_facets(enriched):
             "offset": [0, 0, 0],
         }
         enriched["runtime_metadata"] = runtime
-    if "static" in asset_types:
-        asset_types = [item for item in asset_types if item not in {"rigged", "animated"}]
     enriched["asset_types"] = _resolve_type_conflicts(asset_types, category, text)
 
     title = str(enriched.get("title") or "").strip()
@@ -1183,7 +1176,7 @@ def _ai_metadata(model, extra_context=None):
                 "type": "array",
                 "items": {"type": "string"},
                 "maxItems": 8,
-                "description": "Technical/use traits such as static, rigged, animated, game-ready, modular, decorative-prop, pbr, tileable, vrm, optimized, light-emitter, high-poly, low-poly. Do not include broad category labels such as building, flora, fauna, person, vehicle, environment, material, or prop.",
+                "description": "Technical/use traits such as game-ready, modular, decorative-prop, pbr, tileable, vrm, optimized, light-emitter, high-poly, low-poly. Do not include static, rigged, or animated; those are derived from the uploaded file.",
             },
             "runtime_metadata": {
                 "type": "object",
@@ -1265,10 +1258,11 @@ def _ai_metadata(model, extra_context=None):
             "Use vision_mcp_analysis as the primary source for visible subject, materials, style, colors, "
             "and light-emitter hints. Avoid generic generation-pipeline wording such as baseline mesh, "
             "background prop, sculpting base, or retopology unless those details are visibly supported. "
-            "Always fill asset_category, asset_styles, and asset_types from the visual analysis. For example, "
+            "Always fill asset_category and asset_styles from the visual analysis, and fill asset_types only for "
+            "non-structural traits. For example, "
             "flowers/plants/leaves should use asset_category flora even when the object is also decorative; "
-            "watercolor or hand-painted looks belong in asset_styles; static/not-rigged/non-animated observations "
-            "belong in asset_types as static. The title should name the visible asset, for example Watercolor "
+            "watercolor or hand-painted looks belong in asset_styles; do not report static, rigged, or animated "
+            "from vision because those are derived from the uploaded file. The title should name the visible asset, for example Watercolor "
             "Floral Arrangement, not Pixal3D AI-Generated 3D Model. The description should read like a Fab "
             "store listing, not a visual-analysis report."
         )
@@ -1283,11 +1277,10 @@ def _ai_metadata(model, extra_context=None):
         "Prefer concrete visible or file-derived details over generic filler. "
         "Write the title as a concise product/catalog name for the visible subject and style; never use the "
         "generator/provider name or generic source labels as the title. "
-            "Do not leave asset_category, asset_styles, or asset_types empty when visual analysis provides evidence. "
+            "Do not leave asset_category or asset_styles empty when visual analysis provides evidence. "
             "Use asset_category for the broad subject bucket, asset_styles for aesthetic/genre/medium, "
-            "and asset_types for technical/use traits. Avoid contradictory facet pairs such as realistic with "
-            "cartoon/painterly/stylized, high-poly with low-poly, or static with rigged/animated unless the "
-            "asset truly contains both distinct components. "
+            "and asset_types for non-structural technical/use traits. Avoid contradictory facet pairs such as realistic with "
+            "cartoon/painterly/stylized or high-poly with low-poly. "
             "If visual analysis is unavailable, say only what can be inferred from the filename and asset fields, "
         "and avoid pretending to know the object's appearance.\n\n"
         + json.dumps(prompt, sort_keys=True)

@@ -143,6 +143,88 @@ def _glb_is_meshopt_compressed(glb_bytes):
     return False
 
 
+def _gltf_json_from_bytes(file_content, file_extension):
+    fmt = (file_extension or '').lower()
+    try:
+        if fmt == 'glb':
+            if not file_content or file_content[:4] != _GLB_MAGIC or len(file_content) < 20:
+                return None
+            magic, version, declared_length = struct.unpack_from('<4sII', file_content, 0)
+            if magic != _GLB_MAGIC or version != 2 or declared_length > len(file_content):
+                return None
+            offset = 12
+            while offset + 8 <= declared_length:
+                chunk_length, chunk_type = struct.unpack_from('<II', file_content, offset)
+                data_start = offset + 8
+                data_end = data_start + chunk_length
+                if data_end > declared_length:
+                    return None
+                if chunk_type == _GLB_JSON_CHUNK:
+                    return json.loads(file_content[data_start:data_end].decode('utf-8').rstrip(' \t\r\n\0'))
+                offset = data_end
+        if fmt == 'gltf':
+            return json.loads(file_content.decode('utf-8', errors='ignore'))
+    except Exception as error:
+        print(f"GLTF metadata parse warning: {error}")
+    return None
+
+
+def _file_derived_metadata(file_content, file_extension):
+    gltf = _gltf_json_from_bytes(file_content, file_extension)
+    if not isinstance(gltf, dict):
+        return [], {}
+
+    asset_types = []
+    runtime = {}
+    skins = gltf.get('skins') if isinstance(gltf.get('skins'), list) else []
+    nodes = gltf.get('nodes') if isinstance(gltf.get('nodes'), list) else []
+    has_skinned_mesh = any(isinstance(node, dict) and node.get('skin') is not None for node in nodes)
+    has_joint_list = any(isinstance(skin, dict) and skin.get('joints') for skin in skins)
+    if has_skinned_mesh or has_joint_list:
+        asset_types.append('rigged')
+
+    animations = gltf.get('animations') if isinstance(gltf.get('animations'), list) else []
+    animation_items = []
+    for index, animation in enumerate(animations):
+        if not isinstance(animation, dict):
+            continue
+        name = str(animation.get('name') or f'animation-{index + 1}').strip()
+        if not name:
+            name = f'animation-{index + 1}'
+        item = {'name': name}
+        duration = _gltf_animation_duration(gltf, animation)
+        if duration is not None:
+            item['duration'] = duration
+        animation_items.append(item)
+    if animation_items:
+        asset_types.append('animated')
+        runtime['animations'] = animation_items
+
+    return asset_types, runtime
+
+
+def _gltf_animation_duration(gltf, animation):
+    accessors = gltf.get('accessors') if isinstance(gltf.get('accessors'), list) else []
+    max_time = None
+    for sampler in animation.get('samplers') or []:
+        if not isinstance(sampler, dict):
+            continue
+        input_index = sampler.get('input')
+        if not isinstance(input_index, int) or input_index < 0 or input_index >= len(accessors):
+            continue
+        accessor = accessors[input_index]
+        if not isinstance(accessor, dict):
+            continue
+        values = accessor.get('max')
+        if isinstance(values, list) and values:
+            try:
+                time_value = float(values[0])
+            except (TypeError, ValueError):
+                continue
+            max_time = time_value if max_time is None else max(max_time, time_value)
+    return round(max_time, 3) if max_time is not None else None
+
+
 def _can_access_model(model):
     if model.is_public:
         return True
@@ -246,6 +328,43 @@ def _tellus_world_tag(world_id):
     cleaned = ''.join(c if c.isalnum() else '-' for c in str(world_id or '').strip().lower())
     cleaned = '-'.join(part for part in cleaned.split('-') if part)
     return f'tellus-world-{cleaned}' if cleaned else None
+
+
+_WORLD_ASSET_ID_KEYS = {
+    'assetid', 'asset_id', 'assetstoreid', 'asset_store_id',
+    'modelid', 'model_id', 'model', 'asset',
+}
+
+
+def _iter_world_asset_ids(value):
+    if isinstance(value, dict):
+        for key, child in value.items():
+            key_normalized = str(key or '').replace('-', '_').lower()
+            if key_normalized in _WORLD_ASSET_ID_KEYS and isinstance(child, str):
+                yield child
+            yield from _iter_world_asset_ids(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _iter_world_asset_ids(child)
+
+
+def _tag_assets_for_tellus_world(world_id, state):
+    world_tag = _tellus_world_tag(world_id)
+    if not world_tag:
+        return
+    seen = set()
+    for asset_id in _iter_world_asset_ids(state):
+        asset_id = str(asset_id or '').strip()
+        if not asset_id or asset_id in seen:
+            continue
+        seen.add(asset_id)
+        model = Model3D.get_by_id(asset_id)
+        if not model:
+            continue
+        updated_tags = _merge_tags(model.tags, ['tellus', world_tag])
+        if updated_tags != (model.tags or []):
+            model.tags = updated_tags
+            model.save()
 
 
 def _api_principal(required_scope='upload'):
@@ -1786,6 +1905,7 @@ def put_tellus_world_state(world_id):
         principal, service = _api_principal()
         owner_id = principal.id if principal and (service or current_user.is_authenticated) else None
         world = WorldState.upsert(world_id, payload, owner_id=owner_id)
+        _tag_assets_for_tellus_world(world_id, world.state)
         return jsonify(world.to_api(include_state=True))
     except Exception as e:
         print(f"Tellus save world error: {e}")
@@ -1920,6 +2040,10 @@ def _store_one_upload(file, base_name, description, is_public, tags, allowed_ext
             return None, f'Duplicate model already exists: {duplicate.name} ({duplicate.id}).'
         return None, 'Duplicate model already exists in the asset library.'
 
+    derived_asset_types, derived_runtime_metadata = _file_derived_metadata(file_content, file_extension)
+    asset_types = _merge_tags(_clean_asset_types(asset_types), derived_asset_types)
+    runtime_metadata = _merge_runtime_metadata(runtime_metadata, derived_runtime_metadata)
+
     # Per-file name: when a shared base name is given AND multiple files are
     # involved, the caller passes base_name="" so each model is named from its
     # own filename. A single-file upload keeps the typed name.
@@ -2040,13 +2164,57 @@ def _merge_tags(*tag_lists):
     return merged
 
 
+def _merge_runtime_metadata(base, extra):
+    merged = dict(base or {})
+    extra = extra or {}
+    if not isinstance(extra, dict):
+        return Model3D.normalize_runtime_metadata(merged)
+    for key, value in extra.items():
+        if key == 'animations' and isinstance(value, list):
+            existing = merged.get('animations') if isinstance(merged.get('animations'), list) else []
+            seen = {
+                str(item.get('name') or '').strip().lower()
+                for item in existing
+                if isinstance(item, dict)
+            }
+            additions = []
+            for item in value:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get('name') or '').strip()
+                if not name or name.lower() in seen:
+                    continue
+                seen.add(name.lower())
+                additions.append(item)
+            if existing or additions:
+                merged['animations'] = [*existing, *additions]
+        elif key not in merged or merged.get(key) in (None, {}, [], ''):
+            merged[key] = value
+    return Model3D.normalize_runtime_metadata(merged)
+
+
+def _clean_asset_types(asset_types):
+    return [
+        value for value in Model3D.normalize_tags(asset_types or [])
+        if value not in {'static', 'static-mesh', 'generated'}
+    ]
+
+
 _PROVENANCE_TAGS = {'tellus'}
+_STRUCTURAL_ASSET_TYPES = {'rigged', 'animated'}
 
 
 def _preserved_provenance_tags(existing):
     return [
         value for value in Model3D.normalize_tags(existing or [])
         if value in _PROVENANCE_TAGS or value.startswith('tellus-world-')
+    ]
+
+
+def _preserved_structural_asset_types(existing):
+    return [
+        value for value in Model3D.normalize_tags(existing or [])
+        if value in _STRUCTURAL_ASSET_TYPES
     ]
 
 
@@ -2087,7 +2255,11 @@ def _run_ai_enrichment(model, data=None):
         model.tags = _merge_tags(_preserved_provenance_tags(model.tags), model.ai_tags)
         model.asset_category = enriched.get('asset_category') or model.asset_category
         model.asset_styles = Model3D.normalize_tags(enriched.get('asset_styles', []))
-        model.asset_types = Model3D.normalize_tags(enriched.get('asset_types', []))
+        ai_asset_types = [
+            value for value in Model3D.normalize_tags(enriched.get('asset_types', []))
+            if value not in {'static', 'static-mesh', *_STRUCTURAL_ASSET_TYPES}
+        ]
+        model.asset_types = _merge_tags(_preserved_structural_asset_types(model.asset_types), ai_asset_types)
         model.runtime_metadata = Model3D.normalize_runtime_metadata(enriched.get('runtime_metadata'))
         if include_title and enriched.get('title'):
             model.name = enriched['title']

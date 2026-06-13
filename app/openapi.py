@@ -188,6 +188,17 @@ def get_openapi_spec(base_url=''):
                                 },
                             },
                         },
+                        'animations': {
+                            'type': 'array',
+                            'description': 'Animation clips detected directly from GLB/GLTF animation metadata.',
+                            'items': {
+                                'type': 'object',
+                                'properties': {
+                                    'name': {'type': 'string', 'example': 'Idle'},
+                                    'duration': {'type': 'number', 'example': 1.75},
+                                },
+                            },
+                        },
                     },
                 },
                 'Pagination': _pagination_schema(),
@@ -1436,9 +1447,10 @@ def get_openapi_spec(base_url=''):
                         'account with `X-Asset-Username` or `X-Asset-User-Id`. '
                         '`TELLUS_ADMIN_API_TOKEN` can also default ownership through '
                         '`TELLUS_ADMIN_USERNAME` / `TELLUS_ADMIN_USER_ID`, and '
-                        'admin-token uploads are tagged with `tellus`. Send a '
-                        'world id to add a `tellus-world-<world-id>` tag for '
-                        'world-specific store/search coupling.'
+                        'admin-token uploads are tagged with `tellus`. Assets '
+                        'referenced later in Tellus world state are automatically '
+                        'tagged `tellus-world-<world-id>`; a world id may also '
+                        'be supplied at upload time to stamp that tag immediately.'
                     ),
                     'security': [{'sessionCookie': []}, {'uploadApiKey': []}, {'bearerAuth': []}],
                     'parameters': [

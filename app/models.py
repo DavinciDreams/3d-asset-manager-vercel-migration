@@ -516,6 +516,30 @@ class Model3D:
         normalized = {}
         if behaviors:
             normalized["behaviors"] = behaviors
+        animations = []
+        if isinstance(metadata.get("animations"), list):
+            seen_animations = set()
+            for index, item in enumerate(metadata.get("animations") or []):
+                if isinstance(item, dict):
+                    name = str(item.get("name") or f"animation-{index + 1}").strip()
+                    clip = {"name": name}
+                    if item.get("duration") is not None:
+                        try:
+                            clip["duration"] = round(max(0, float(item.get("duration"))), 3)
+                        except (TypeError, ValueError):
+                            pass
+                else:
+                    name = str(item or "").strip()
+                    clip = {"name": name}
+                if not name:
+                    continue
+                key = name.lower()
+                if key in seen_animations:
+                    continue
+                seen_animations.add(key)
+                animations.append(clip)
+        if animations:
+            normalized["animations"] = animations
         if isinstance(light, dict):
             enabled = bool(light.get("enabled"))
             light_type = str(light.get("type") or ("point" if enabled else "none")).strip().lower()

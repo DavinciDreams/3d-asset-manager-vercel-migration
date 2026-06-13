@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import struct
 from pathlib import Path
 
 import pytest
@@ -30,6 +31,13 @@ def _ensure_user(username):
     user = User(username=username, email=f"{username}@example.com")
     user.set_password("pw123456")
     return user.save()
+
+
+def _minimal_glb(gltf):
+    raw = json.dumps(gltf, separators=(",", ":")).encode("utf-8")
+    json_chunk = raw + (b" " * ((4 - len(raw) % 4) % 4))
+    length = 12 + 8 + len(json_chunk)
+    return b"glTF" + struct.pack("<II", 2, length) + struct.pack("<II", len(json_chunk), 0x4E4F534A) + json_chunk
 
 
 def test_bearer_upload_enrich_approve_and_bundle():
@@ -146,6 +154,52 @@ def test_bearer_upload_enrich_approve_and_bundle():
     assert download.data.startswith(b"PK")
 
 
+def test_upload_derives_rig_and_animation_metadata_from_glb():
+    app = create_app()
+    client = app.test_client()
+    headers = {"Authorization": "Bearer test-token"}
+    glb = _minimal_glb({
+        "asset": {"version": "2.0"},
+        "nodes": [
+            {"name": "Mesh", "mesh": 0, "skin": 0},
+            {"name": "Hips"},
+            {"name": "Spine"},
+        ],
+        "skins": [{"joints": [1, 2]}],
+        "accessors": [{"max": [1.75]}],
+        "animations": [{"name": "Idle", "samplers": [{"input": 0}]}],
+    })
+
+    upload = client.post("/api/upload", headers=headers, data={
+        "is_public": "false",
+        "file": (io.BytesIO(glb), "animated_avatar.glb"),
+    }, content_type="multipart/form-data")
+    assert upload.status_code == 201, upload.get_json()
+    model = upload.get_json()["model"]
+    assert model["asset_types"] == ["rigged", "animated"]
+    assert model["runtime_metadata"]["animations"] == [{"name": "Idle", "duration": 1.75}]
+
+
+def test_upload_does_not_tag_static_unrigged_glb():
+    app = create_app()
+    client = app.test_client()
+    headers = {"Authorization": "Bearer test-token"}
+    glb = _minimal_glb({
+        "asset": {"version": "2.0"},
+        "nodes": [{"name": "Crate", "mesh": 0}],
+        "meshes": [{}],
+    })
+
+    upload = client.post("/api/upload", headers=headers, data={
+        "is_public": "false",
+        "file": (io.BytesIO(glb), "static_crate.glb"),
+    }, content_type="multipart/form-data")
+    assert upload.status_code == 201, upload.get_json()
+    model = upload.get_json()["model"]
+    assert model["asset_types"] == []
+    assert "animations" not in model["runtime_metadata"]
+
+
 def test_service_token_can_target_owners_search_private_metadata_and_dedupe_across_titles():
     app = create_app()
     client = app.test_client()
@@ -170,6 +224,7 @@ def test_service_token_can_target_owners_search_private_metadata_and_dedupe_acro
     }, content_type="multipart/form-data")
     assert upload.status_code == 201, upload.get_json()
     model = upload.get_json()["model"]
+    assert model["asset_types"] == []
 
     all_private = client.get(
         "/api/models?include_private=true&search=instant",
@@ -1358,7 +1413,8 @@ def test_ai_enrichment_infers_facets_and_title_from_floral_vision(monkeypatch):
     assert enriched["title"] == "Watercolor Floral Arrangement"
     assert enriched["asset_category"] == "flora"
     assert {"watercolor", "painterly", "stylized"}.issubset(set(enriched["asset_styles"]))
-    assert {"static", "decorative-prop"}.issubset(set(enriched["asset_types"]))
+    assert "decorative-prop" in enriched["asset_types"]
+    assert "static" not in enriched["asset_types"]
 
 
 def test_ai_enrichment_corrects_house_category_and_title(monkeypatch):
@@ -1566,7 +1622,7 @@ def test_ai_enrichment_removes_contradictory_facets(monkeypatch):
     assert {"stylized", "cartoon", "painterly", "fantasy"}.issubset(set(enriched["asset_styles"]))
     assert "building" not in enriched["asset_types"]
     assert "static-mesh" not in enriched["asset_types"]
-    assert "static" in enriched["asset_types"]
+    assert "static" not in enriched["asset_types"]
     assert "light-emitter" not in enriched["asset_types"]
     assert {"high-poly", "low-poly"} != set(enriched["asset_types"]).intersection({"high-poly", "low-poly"})
 

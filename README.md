@@ -103,11 +103,12 @@ Set `TELLUS_ADMIN_USERNAME` or `TELLUS_ADMIN_USER_ID` to the asset-manager
 account that should own default in-world generations. If a generation should
 belong to a specific player account, Tellus can still override the owner per
 request with `X-Asset-Username` or `X-Asset-User-Id`. Uploads made with the
-Tellus admin token automatically receive the `tellus` tag. If the request also
-includes `worldId`, `world_id`, `tellusWorldId`, `tellus_world_id`, or the
-`X-Tellus-World-Id` header, the upload also receives a normalized
-`tellus-world-<world-id>` tag so Tellus and asset-store search can couple
-assets to the specific world where they are deployed.
+Tellus admin token automatically receive the `tellus` tag. World-specific
+coupling is automatic when Tellus saves world state: any referenced asset/model
+ids in `/api/tellus/worlds/:worldId/state` are tagged with normalized
+`tellus-world-<world-id>` tags. If the world id is already known during upload,
+`worldId`, `world_id`, `tellusWorldId`, `tellus_world_id`, or
+`X-Tellus-World-Id` may also be sent to stamp the same tag immediately.
 
 ## AI Metadata Enrichment
 
@@ -168,6 +169,10 @@ image content.
 
 Asset API responses include a `runtime_metadata` object for in-world behavior
 hints. Tellus can use this when it places models from the OpenAPI/tool surface.
+GLB/GLTF uploads are inspected directly: skinned files receive the `rigged`
+asset type, files with animation clips receive `animated`, and clip names are
+listed in `runtime_metadata.animations`. Assets without a rig are treated as
+static by default and are not tagged `static`.
 For example, lantern-like assets may be enriched or edited to include:
 
 ```json

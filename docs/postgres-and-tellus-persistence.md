@@ -65,11 +65,17 @@ All in-world asset generation workers, including Instant Mesh and Pixal3D-style
 pipelines, should upload through `TELLUS_ADMIN_API_TOKEN`. If Tellus does not
 send a per-request owner header, the asset manager assigns the upload/world to
 `TELLUS_ADMIN_USERNAME` or `TELLUS_ADMIN_USER_ID`. Admin-token uploads are
-automatically tagged with `tellus`. To couple an asset to the specific world
-where it is deployed, send `worldId`, `world_id`, `tellusWorldId`,
-`tellus_world_id`, or `X-Tellus-World-Id`; the asset receives a normalized
-`tellus-world-<world-id>` tag that Tellus search and asset-store search can use
-even when generator titles differ.
+automatically tagged with `tellus`. World-specific coupling is automatic when
+Tellus saves world state: assets referenced by id in
+`/api/tellus/worlds/:worldId/state` receive a normalized
+`tellus-world-<world-id>` tag. If the world id is already known during upload,
+Tellus may also send `worldId`, `world_id`, `tellusWorldId`,
+`tellus_world_id`, or `X-Tellus-World-Id` to stamp that tag immediately.
+
+GLB/GLTF uploads are inspected directly for structural metadata. Skinned files
+receive the `rigged` asset type, files with animation clips receive `animated`,
+and clip names are listed in `runtime_metadata.animations`. Assets without a rig
+are treated as static by default and do not need a `static` tag.
 
 ## World API
 
