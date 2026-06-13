@@ -18,6 +18,8 @@ from app.db import models
 
 NATIVE_VIEWABLE = {"glb", "gltf", "vrm"}
 CONVERTIBLE_TO_GLB = {"fbx", "obj", "stl", "dae", "ply", "3ds"}
+# Animation-only formats: no mesh to view, converted straight to a VRMA clip.
+CONVERTIBLE_TO_VRMA = {"bvh"}
 
 MIXAMO_BONES = {
     "mixamorig:Hips", "mixamorig:Spine", "mixamorig:Spine1", "mixamorig:Spine2",
@@ -86,6 +88,35 @@ def fbx_to_vrma(node_bin, converter_dir, fbx2gltf_bin, input_path, output_path, 
     return output_path
 
 
+def bvh_to_vrma(node_bin, converter_dir, input_path, output_path, clip_name=None, timeout=120):
+    """Convert a BVH mocap clip straight to a VRMA animation (pure JS, no FBX2glTF)."""
+    script = os.path.join(converter_dir, "bvh2vrma-converter.js")
+    cmd = [node_bin, script, "-i", input_path, "-o", output_path]
+    if clip_name:
+        cmd += ["--name", clip_name]
+    _run(cmd, timeout)
+    if not os.path.exists(output_path):
+        raise RuntimeError("bvh2vrma produced no output")
+    return output_path
+
+
+def glb_to_vrm(node_bin, converter_dir, input_path, output_path,
+               name=None, author=None, timeout=120):
+    """Turn a rigged GLB (humanoid/mixamorig skeleton, e.g. from mesh2motion)
+    into a VRM by injecting the VRMC_vrm humanoid extension. Pure JS; the mesh
+    and binary buffer are preserved untouched."""
+    script = os.path.join(converter_dir, "glb2vrm-converter.js")
+    cmd = [node_bin, script, "-i", input_path, "-o", output_path]
+    if name:
+        cmd += ["--name", name]
+    if author:
+        cmd += ["--author", author]
+    _run(cmd, timeout)
+    if not os.path.exists(output_path):
+        raise RuntimeError("glb2vrm produced no output")
+    return output_path
+
+
 def gltf_node_names(glb_or_gltf_path):
     try:
         with open(glb_or_gltf_path, "rb") as f:
@@ -135,7 +166,7 @@ def process_model_doc(app, doc):
     if fmt in NATIVE_VIEWABLE:
         patch_model(app, model_id, conversion_status="skipped", conversion_error=None)
         return "skipped"
-    if fmt not in CONVERTIBLE_TO_GLB:
+    if fmt not in CONVERTIBLE_TO_GLB and fmt not in CONVERTIBLE_TO_VRMA:
         patch_model(app, model_id, conversion_status="skipped", conversion_error=None)
         return "skipped"
 
@@ -149,6 +180,29 @@ def process_model_doc(app, doc):
         in_path = os.path.join(workdir, "input." + fmt)
         with open(in_path, "wb") as f:
             f.write(fs.get(src_id).read())
+
+        # BVH is animation-only: no mesh to view, so produce a VRMA clip directly.
+        if fmt in CONVERTIBLE_TO_VRMA:
+            vrma_path = os.path.join(workdir, "clip.vrma")
+            bvh_to_vrma(
+                paths["node"], paths["fbx2vrma_dir"], in_path, vrma_path,
+                clip_name=(doc.get("name") or None),
+            )
+            with open(vrma_path, "rb") as f:
+                vrma_bytes = f.read()
+            vrma_id = fs.put(
+                vrma_bytes,
+                filename=f"clip_{model_id}.vrma",
+                content_type="application/octet-stream",
+                metadata={"derived_for": str(model_id), "kind": "vrma"},
+            )
+            patch_model(
+                app, model_id,
+                vrma_file_id=str(vrma_id),
+                conversion_status="done",
+                conversion_error=None,
+            )
+            return "done"
 
         if fmt == "fbx":
             glb_path = fbx2gltf_to_glb(paths["fbx2gltf"], in_path, workdir)
@@ -185,6 +239,47 @@ def process_model_doc(app, doc):
                 ))
             except Exception as e:
                 print(f"VRMA generation failed for {model_id} (non-fatal): {e}")
+
+            # The viewable GLB from a humanoid (Mixamo-rigged) FBX already has a
+            # mixamorig:* skeleton -- exactly what glb2vrm needs. Auto-produce a
+            # VRM avatar variant so the model can play VRMA clips in the VRM
+            # viewer. Non-fatal: a non-humanoid-enough GLB just won't get a VRM.
+            try:
+                vrm_path = os.path.join(workdir, "avatar.vrm")
+                glb_to_vrm(
+                    paths["node"], paths["fbx2vrma_dir"], glb_path, vrm_path,
+                    name=(doc.get("name") or None),
+                )
+                with open(vrm_path, "rb") as f:
+                    vrm_bytes = f.read()
+                vrm_id = fs.put(
+                    vrm_bytes,
+                    filename=f"avatar_{model_id}.vrm",
+                    content_type="model/gltf-binary",
+                    metadata={"derived_for": str(model_id), "kind": "vrm"},
+                )
+                from app.models import ModelVariant, Model3D
+                _, old_vrm_id = ModelVariant.upsert(
+                    model_id, "vrm", str(vrm_id),
+                    file_format="vrm", size=len(vrm_bytes), status="ready",
+                )
+                if old_vrm_id and old_vrm_id != str(vrm_id):
+                    try:
+                        fs.delete(old_vrm_id)
+                    except Exception as e:
+                        print(f"Old VRM blob {old_vrm_id} not deleted: {e}")
+
+                # Auto-produce the rig-safe optimized avatar. Best-effort:
+                # imported lazily to avoid an api<->conversion import cycle.
+                try:
+                    from app.api import _optimize_vrm_variant
+                    model_obj = Model3D.get_by_id(model_id)
+                    if model_obj:
+                        _optimize_vrm_variant(model_obj)
+                except Exception as e:
+                    print(f"Auto VRM optimization skipped for {model_id}: {e}")
+            except Exception as e:
+                print(f"VRM generation failed for {model_id} (non-fatal): {e}")
 
         fields["conversion_status"] = "done"
         patch_model(app, model_id, **fields)
@@ -266,7 +361,7 @@ def enqueue(model, enabled=True):
     fmt = (model.file_format or "").lower()
     if fmt in NATIVE_VIEWABLE:
         status = "skipped"
-    elif fmt in CONVERTIBLE_TO_GLB:
+    elif fmt in CONVERTIBLE_TO_GLB or fmt in CONVERTIBLE_TO_VRMA:
         status = "pending" if enabled else "skipped"
         if not enabled:
             model.conversion_error = "Conversion is disabled on this server."

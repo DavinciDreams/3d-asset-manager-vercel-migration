@@ -1,0 +1,44 @@
+{
+  "_comment": "Curated Mixamo animation library. Download each clip's FBX from mixamo.com (or via download-mixamo.js) into the raw directory, then run convert-raw-to-vrma.js to produce VRMA files. Filenames are matched to 'mixamoName' (case/space/punctuation-insensitive); the camelCase 'name' becomes the output .vrma filename.",
+  "animations": [
+    { "name": "idle", "mixamoName": "Idle", "category": "idle", "description": "Default standing pose" },
+    { "name": "happyIdle", "mixamoName": "Happy Idle", "category": "idle", "description": "Happy standing pose" },
+    { "name": "sadIdle", "mixamoName": "Sad Idle", "category": "idle", "description": "Sad standing pose" },
+    { "name": "weightShift", "mixamoName": "Weight Shift", "category": "idle", "description": "Shifting weight between feet" },
+    { "name": "breathingIdle", "mixamoName": "Breathing Idle", "category": "idle", "description": "Relaxed breathing idle" },
+
+    { "name": "wave", "mixamoName": "Waving", "category": "gesture", "description": "Friendly wave" },
+    { "name": "waving2", "mixamoName": "Waving Gesture", "category": "gesture", "description": "Alternate wave" },
+    { "name": "salute", "mixamoName": "Salute", "category": "gesture", "description": "Military salute" },
+    { "name": "clapping", "mixamoName": "Clapping", "category": "gesture", "description": "Applause" },
+    { "name": "thumbsUp", "mixamoName": "Thumbs Up", "category": "gesture", "description": "Thumbs up approval" },
+    { "name": "nod", "mixamoName": "Head Nod Yes", "category": "gesture", "description": "Nodding yes" },
+    { "name": "shakeHead", "mixamoName": "Head Shake No", "category": "gesture", "description": "Shaking head no" },
+    { "name": "bow", "mixamoName": "Quick Formal Bow", "category": "gesture", "description": "Polite bow" },
+    { "name": "pointing", "mixamoName": "Pointing", "category": "gesture", "description": "Pointing forward" },
+    { "name": "shrug", "mixamoName": "Shrugging", "category": "gesture", "description": "Shrug of uncertainty" },
+
+    { "name": "talking", "mixamoName": "Talking", "category": "social", "description": "Standing and talking" },
+    { "name": "talking2", "mixamoName": "Standing Greeting", "category": "social", "description": "Greeting someone" },
+    { "name": "laughing", "mixamoName": "Laughing", "category": "social", "description": "Laughing" },
+    { "name": "thinking", "mixamoName": "Thinking", "category": "social", "description": "Pondering pose" },
+
+    { "name": "hipHopDancing", "mixamoName": "Hip Hop Dancing", "category": "dance", "description": "Hip hop dance loop" },
+    { "name": "samba", "mixamoName": "Samba Dancing", "category": "dance", "description": "Samba dance" },
+    { "name": "breakdance", "mixamoName": "Breakdance 1990", "category": "dance", "description": "Breakdance move" },
+    { "name": "robotDance", "mixamoName": "Robot Hip Hop Dance", "category": "dance", "description": "Robot dance" },
+    { "name": "rumbaDancing", "mixamoName": "Rumba Dancing", "category": "dance", "description": "Rumba dance" },
+
+    { "name": "walking", "mixamoName": "Walking", "category": "movement", "description": "Forward walk loop" },
+    { "name": "running", "mixamoName": "Running", "category": "movement", "description": "Run loop" },
+    { "name": "jump", "mixamoName": "Jump", "category": "movement", "description": "Standing jump" },
+    { "name": "crouch", "mixamoName": "Crouching", "category": "movement", "description": "Crouch idle" },
+    { "name": "turn", "mixamoName": "Standing Turn 90", "category": "movement", "description": "Turn in place" },
+
+    { "name": "sitting", "mixamoName": "Sitting Idle", "category": "action", "description": "Sitting idle" },
+    { "name": "standUp", "mixamoName": "Stand Up", "category": "action", "description": "Standing up from floor" },
+    { "name": "fallDown", "mixamoName": "Falling Back Death", "category": "action", "description": "Fall over backward" },
+    { "name": "punch", "mixamoName": "Punching", "category": "action", "description": "Boxing punch" },
+    { "name": "kick", "mixamoName": "Roundhouse Kick", "category": "action", "description": "Roundhouse kick" }
+  ]
+}

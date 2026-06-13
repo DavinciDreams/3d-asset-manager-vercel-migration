@@ -77,6 +77,35 @@ Tellus should store one of these generated keys in its generation backend as
 owning user, so generated assets persist in that user's inventory and the shared
 asset library.
 
+For trusted automation that needs to operate across accounts, use a configured
+service token (`ASSET_MANAGER_API_TOKEN`, `API_UPLOAD_TOKEN`,
+`TELLUS_PERSISTENCE_API_TOKEN`, or `TELLUS_ADMIN_API_TOKEN`) and set
+`X-Asset-Username` or `X-Asset-User-Id` on upload/search/world persistence
+requests. For example, Tellus can upload as `rsafier` with:
+
+```bash
+curl -X POST "https://your-asset-manager.example.com/api/upload" \
+  -H "Authorization: Bearer your-service-token" \
+  -H "X-Asset-Username: rsafier" \
+  -F "file=@generated.glb" \
+  -F "name=Generated Prop" \
+  -F "tags=tellus,generated"
+```
+
+Service-token searches can use
+`/api/models?include_private=true&search=instant%20mesh` to search public and
+private asset metadata across all owners, or `/api/models?user_only=true` with
+`X-Asset-Username` to inspect one account.
+
+In-world generators such as Instant Mesh should use `TELLUS_ADMIN_API_TOKEN`.
+Set `TELLUS_ADMIN_USERNAME` or `TELLUS_ADMIN_USER_ID` to the asset-manager
+account that should own default in-world generations. If a generation should
+belong to a specific player account, Tellus can still override the owner per
+request with `X-Asset-Username` or `X-Asset-User-Id`. Uploads made with the
+Tellus admin token automatically receive `tellus`, `generated`, and
+`in-world-generation` tags plus the `generated` asset type so they register in
+asset-store and Tellus search even when titles differ.
+
 ## AI Metadata Enrichment
 
 The asset manager can generate catalog titles, descriptions, and tags from model

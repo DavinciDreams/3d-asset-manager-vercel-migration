@@ -195,6 +195,11 @@
                            class="block px-4 py-2 text-sm text-purple-700 hover:bg-purple-50 {% if not fixed_eyes_variant %}hidden{% endif %}">
                             <i class="fas fa-eye mr-1"></i>Fixed-eyes GLB
                         </a>
+                        <div id="export-vrm-divider" class="border-t border-gray-100 my-1 {% if not vrm_variant %}hidden{% endif %}"></div>
+                        <a id="export-vrm-link" href="{{ url_for('api.get_vrm_variant', model_id=model.id, download=1) }}"
+                           class="block px-4 py-2 text-sm text-emerald-700 hover:bg-emerald-50 {% if not vrm_variant %}hidden{% endif %}">
+                            <i class="fas fa-child mr-1"></i>VRM avatar
+                        </a>
                     </div>
                 </div>
                 {% if current_user.is_authenticated %}
@@ -211,6 +216,17 @@
                 <button type="button" id="fix-mouth-toggle"
                         class="w-full sm:w-auto bg-pink-600 text-white py-3 px-6 rounded-lg hover:bg-pink-700 transition flex items-center justify-center">
                     <i class="fas fa-comment mr-2"></i>Fix Mouth
+                </button>
+                <!-- Rig round-trip: send the mesh to mesh2motion (browser auto-rigger),
+                     then turn the rigged GLB back into a VRM avatar in one click. -->
+                <a href="https://app.mesh2motion.org/" target="_blank" rel="noopener"
+                   id="rig-mesh2motion-link"
+                   class="w-full sm:w-auto bg-slate-700 text-white py-3 px-6 rounded-lg hover:bg-slate-800 transition flex items-center justify-center">
+                    <i class="fas fa-bone mr-2"></i>Rig in mesh2motion
+                </a>
+                <button type="button" id="make-vrm-btn"
+                        class="w-full sm:w-auto bg-emerald-600 text-white py-3 px-6 rounded-lg hover:bg-emerald-700 transition flex items-center justify-center">
+                    <i class="fas fa-child mr-2"></i><span id="make-vrm-label">Make VRM avatar</span>
                 </button>
                 {% endif %}
             </div>
@@ -1317,6 +1333,50 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 });
+
+// --- Make VRM avatar: convert a rigged GLB into a VRM (glb2vrm) --------------
+// The mesh must already be rigged (e.g. round-tripped through "Rig in
+// mesh2motion" and re-uploaded as a GLB). This injects the VRM humanoid
+// extension server-side and stores a 'vrm' variant, then offers the download.
+(function () {
+    const btn = document.getElementById('make-vrm-btn');
+    if (!btn) return;
+    const label = document.getElementById('make-vrm-label');
+    const exportVrmLink = document.getElementById('export-vrm-link');
+    const exportVrmDivider = document.getElementById('export-vrm-divider');
+
+    btn.addEventListener('click', async () => {
+        const original = label ? label.textContent : '';
+        btn.disabled = true;
+        btn.classList.add('opacity-70', 'cursor-not-allowed');
+        if (label) label.textContent = 'Converting…';
+        try {
+            const resp = await fetch('/api/model/{{ model.id }}/to-vrm', {
+                method: 'POST',
+                headers: { 'Accept': 'application/json' }
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok || !data.success) {
+                // 422 = not rigged / required bones missing: actionable message.
+                throw new Error(data.error || 'Conversion failed.');
+            }
+            // Reveal the VRM download in the Export menu.
+            if (exportVrmLink) exportVrmLink.classList.remove('hidden');
+            if (exportVrmDivider) exportVrmDivider.classList.remove('hidden');
+            if (label) label.textContent = 'VRM ready ✓';
+            alert('VRM avatar created. Download it from the "Export as" menu (VRM avatar), '
+                + 'or upload the .vrm to view it in the VRM viewer and apply animations.');
+        } catch (err) {
+            if (label) label.textContent = original;
+            alert('Could not make a VRM: ' + err.message
+                + '\n\nTip: the model must be rigged first. Use "Rig in mesh2motion", '
+                + 'then upload the rigged GLB and try again.');
+        } finally {
+            btn.disabled = false;
+            btn.classList.remove('opacity-70', 'cursor-not-allowed');
+        }
+    });
+})();
 
 // --- Fix Eyes: add blinker eyeballs, then bake them into a GLB variant -------
 (function () {

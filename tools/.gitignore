@@ -1,0 +1,9 @@
+# Installed in the Docker image (npm install --omit=dev); never commit.
+node_modules/
+package-lock.json
+
+# Local Mixamo library working dirs (raw downloads + converted output).
+animations-raw/
+animations-vrma/
+*.vrma
+*.bvh

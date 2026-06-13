@@ -164,6 +164,7 @@ def _configured_bearer_tokens():
         os.environ.get('ASSET_MANAGER_API_TOKEN'),
         os.environ.get('API_UPLOAD_TOKEN'),
         os.environ.get('TELLUS_PERSISTENCE_API_TOKEN'),
+        os.environ.get('TELLUS_ADMIN_API_TOKEN'),
     ]
     return [token.strip() for token in tokens if token and token.strip()]
 
@@ -171,6 +172,13 @@ def _configured_bearer_tokens():
 def _bearer_token_valid():
     header = request.headers.get('Authorization', '')
     return any(hmac.compare_digest(header, f'Bearer {token}') for token in _configured_bearer_tokens())
+
+
+def _tellus_admin_token_valid():
+    token = (os.environ.get('TELLUS_ADMIN_API_TOKEN') or '').strip()
+    if not token:
+        return False
+    return hmac.compare_digest(request.headers.get('Authorization', ''), f'Bearer {token}')
 
 
 def _bearer_token():
@@ -191,26 +199,47 @@ def _upload_actor_user():
     return None, 'Authentication required'
 
 
+def _service_target_user():
+    """Resolve the user a trusted service token wants to act as."""
+    user_id = (
+        request.headers.get('X-Asset-User-Id')
+        or request.headers.get('X-User-Id')
+        or (_tellus_admin_token_valid() and os.environ.get('TELLUS_ADMIN_USER_ID'))
+        or os.environ.get('API_UPLOAD_USER_ID')
+        or os.environ.get('ASSET_MANAGER_DEFAULT_USER_ID')
+    )
+    user = User.get_by_id(user_id) if user_id else None
+    if user:
+        return user
+
+    username = (
+        request.headers.get('X-Asset-Username')
+        or request.headers.get('X-Username')
+        or (_tellus_admin_token_valid() and os.environ.get('TELLUS_ADMIN_USERNAME'))
+        or os.environ.get('API_UPLOAD_USERNAME')
+        or os.environ.get('ASSET_MANAGER_DEFAULT_USERNAME')
+    )
+    return User.get_by_username(username) if username else None
+
+
+def _with_generation_defaults(tags, asset_types):
+    if not _tellus_admin_token_valid():
+        return tags, asset_types
+    tags = Model3D.normalize_tags([*(tags or []), 'tellus', 'generated', 'in-world-generation'])
+    asset_types = Model3D.normalize_tags([*(asset_types or []), 'generated'])
+    return tags, asset_types
+
+
 def _api_principal(required_scope='upload'):
     if current_user.is_authenticated:
         return current_user, False
-    api_key = ApiKey.verify_token(_bearer_token(), required_scope='upload')
+    api_key = ApiKey.verify_token(_bearer_token(), required_scope=required_scope)
     if api_key:
         user = User.get_by_id(api_key.user_id)
         return user, False
     if not _bearer_token_valid():
         return None, False
-    user_id = (
-        request.headers.get('X-Asset-User-Id')
-        or request.headers.get('X-User-Id')
-        or os.environ.get('API_UPLOAD_USER_ID')
-        or os.environ.get('ASSET_MANAGER_DEFAULT_USER_ID')
-    )
-    user = User.get_by_id(user_id) if user_id else None
-    if not user:
-        username = os.environ.get('API_UPLOAD_USERNAME') or os.environ.get('ASSET_MANAGER_DEFAULT_USERNAME')
-        user = User.get_by_username(username) if username else None
-    return user, True
+    return _service_target_user(), True
 
 
 def _require_api_principal():
@@ -323,6 +352,7 @@ def list_models():
         per_page = min(request.args.get('per_page', 20, type=int), 100)  # Max 100 per page
         search = request.args.get('search', '').strip()
         user_only = request.args.get('user_only', 'false').lower() == 'true'
+        include_private = request.args.get('include_private', 'false').lower() == 'true'
         category = request.args.get('category')
         styles = Model3D.normalize_tags(request.args.getlist('style'))
         asset_types = Model3D.normalize_tags(request.args.getlist('type'))
@@ -335,6 +365,11 @@ def list_models():
                 category=category, style=styles or None, asset_type=asset_types or None)
         elif user_only and service:
             return jsonify({'error': 'API token is valid, but no API upload user is configured.'}), 409
+        elif include_private and service:
+            models, total = Model3D.list_models(
+                page=page, per_page=per_page, search=search if search else None,
+                category=category, style=styles or None, asset_type=asset_types or None,
+                public_only=False)
         else:
             # Get public models
             models, total = Model3D.get_public_models(
@@ -696,6 +731,199 @@ def get_fixed_eyes(model_id):
     except Exception as e:
         print(f"API fixed-eyes fetch error: {e}")
         return jsonify({'error': 'Fixed-eyes fetch failed'}), 500
+
+
+# A rigged GLB can be large; cap generously above any real avatar.
+TO_VRM_MAX_BYTES = 200 * 1024 * 1024
+
+
+@api_bp.route('/model/<model_id>/to-vrm', methods=['POST'])
+@login_required
+def post_to_vrm(model_id):
+    """Convert this model's rigged GLB into a VRM avatar by injecting the
+    VRMC_vrm humanoid extension (via tools/glb2vrm-converter.js), and store it as
+    the model's 'vrm' variant. Intended for GLBs rigged in mesh2motion and
+    exported with Mixamo bone naming -- the mesh/skeleton are preserved; only VRM
+    humanoid metadata is added. The resulting VRM works in the VRM viewer and can
+    play the VRMA clips produced by the FBX/BVH pipeline."""
+    import shutil
+    import tempfile
+    from app.conversion import glb_to_vrm, tool_paths
+    try:
+        model = Model3D.get_by_id(model_id)
+        if not model:
+            return jsonify({'error': 'Model not found'}), 404
+        if not (current_user.is_authenticated and model.user_id == current_user.id):
+            return jsonify({'error': 'Only the owner can convert this model to VRM.'}), 403
+
+        # Source bytes: the rigged GLB. Prefer the viewable GLB (covers FBX→GLB
+        # uploads); fall back to the original file. Must be a binary glTF.
+        data, fmt = model.get_viewable_data()
+        if data is None:
+            return jsonify({'error': 'Model has no GLB data to convert.'}), 400
+        if (fmt or '').lower() not in ('glb', 'gltf') or data[:4] != b'glTF':
+            return jsonify({
+                'error': 'VRM conversion needs a binary GLB. Rig the model first '
+                         '(e.g. in mesh2motion) and upload the rigged .glb.'
+            }), 400
+        if len(data) > TO_VRM_MAX_BYTES:
+            return jsonify({'error': 'Model is too large to convert.'}), 413
+
+        paths = tool_paths(current_app)
+        author = current_user.username if current_user.is_authenticated else None
+        workdir = tempfile.mkdtemp(prefix='to_vrm_')
+        try:
+            in_path = os.path.join(workdir, 'input.glb')
+            out_path = os.path.join(workdir, 'avatar.vrm')
+            with open(in_path, 'wb') as f:
+                f.write(data)
+            try:
+                glb_to_vrm(
+                    paths['node'], paths['fbx2vrma_dir'], in_path, out_path,
+                    name=(model.name or None), author=author,
+                )
+            except RuntimeError as e:
+                # glb2vrm exits non-zero with a human-readable reason (e.g. the
+                # GLB isn't rigged / required bones unmapped). Surface it.
+                return jsonify({'error': f'VRM conversion failed: {e}'}), 422
+            with open(out_path, 'rb') as f:
+                vrm_bytes = f.read()
+        finally:
+            shutil.rmtree(workdir, ignore_errors=True)
+
+        if not vrm_bytes or vrm_bytes[:4] != b'glTF':
+            return jsonify({'error': 'Converter produced an invalid VRM.'}), 500
+
+        fs = current_app.config['FILE_STORE']
+        filename = f'{_safe_stem(model)}.vrm'
+        file_id = fs.put(
+            vrm_bytes,
+            filename=filename,
+            content_type=_mime_for('vrm'),
+            metadata={'kind': 'vrm', 'source_model_id': model.id, 'size': len(vrm_bytes)},
+        )
+        variant, old_file_id = ModelVariant.upsert(
+            model.id, 'vrm', str(file_id),
+            file_format='vrm', size=len(vrm_bytes), status='ready',
+        )
+        if old_file_id and old_file_id != str(file_id):
+            try:
+                fs.delete(old_file_id)
+            except Exception as e:
+                print(f"Old VRM blob {old_file_id} not deleted: {e}")
+
+        # Auto-produce the rig-safe optimized avatar too. Best-effort: a failure
+        # here (e.g. gltfpack missing) must not fail the conversion.
+        optimized = False
+        try:
+            opt_variant, _ = _optimize_vrm_variant(model)
+            optimized = bool(opt_variant and opt_variant.file_id)
+        except Exception as e:
+            print(f"Auto VRM optimization skipped for {model.id}: {e}")
+
+        return jsonify({
+            'success': True,
+            'variant': variant.to_api() if variant else None,
+            'optimized': optimized,
+        })
+    except Exception as e:
+        print(f"API to-vrm error: {e}")
+        return jsonify({'error': 'Could not convert model to VRM.'}), 500
+
+
+def _serve_vrm_variant(model_id, kind, etag_prefix, filename_suffix):
+    """Shared serving for VRM variants (raw + optimized): ETag + immutable
+    cache, inline by default, ?download=1 for an attachment."""
+    model = Model3D.get_by_id(model_id)
+    if not model:
+        return jsonify({'error': 'Model not found'}), 404
+    if not _can_access_model(model):
+        return jsonify({'error': 'Access denied'}), 403
+
+    variant = ModelVariant.get(model.id, kind)
+    if not variant or not variant.file_id:
+        return jsonify({'error': f'No {kind} variant'}), 404
+
+    etag = f'"{etag_prefix}-{variant.file_id}"'
+    cache_control = 'public, max-age=31536000, immutable'
+    if request.if_none_match and etag in request.if_none_match:
+        resp = make_response('', 304)
+        resp.headers['ETag'] = etag
+        resp.headers['Cache-Control'] = cache_control
+        return resp
+
+    data = variant.read_data()
+    if data is None:
+        return jsonify({'error': 'Variant file not found'}), 404
+
+    response = make_response(data)
+    response.headers['Content-Type'] = _mime_for('vrm')
+    response.headers['Content-Length'] = str(len(data))
+    response.headers['Accept-Ranges'] = 'bytes'
+    response.headers['ETag'] = etag
+    response.headers['Cache-Control'] = cache_control
+    if request.args.get('download') in ('1', 'true', 'yes'):
+        response.headers['Content-Disposition'] = (
+            f'attachment; filename="{_safe_stem(model)}{filename_suffix}.vrm"'
+        )
+    return response
+
+
+@api_bp.route('/model/<model_id>/vrm', methods=['GET'])
+def get_vrm_variant(model_id):
+    """Serve the converted VRM variant. Inline by default; ?download=1 for an
+    attachment. Mirrors get_fixed_eyes (ETag + immutable cache)."""
+    try:
+        return _serve_vrm_variant(model_id, 'vrm', 'vrm', '')
+    except Exception as e:
+        print(f"API get-vrm error: {e}")
+        return jsonify({'error': 'VRM fetch failed'}), 500
+
+
+@api_bp.route('/model/<model_id>/optimized-vrm', methods=['GET'])
+def get_optimized_vrm(model_id):
+    """Serve the rig-safe optimized VRM avatar variant."""
+    try:
+        return _serve_vrm_variant(model_id, 'vrm_optimized', 'vrmopt', '-optimized')
+    except Exception as e:
+        print(f"API get-optimized-vrm error: {e}")
+        return jsonify({'error': 'Optimized VRM fetch failed'}), 500
+
+
+@api_bp.route('/model/<model_id>/optimize-vrm', methods=['POST'])
+@login_required
+def post_optimize_vrm(model_id):
+    """Produce a rig-safe optimized version of the model's VRM avatar (owner
+    only). Meshopt + texture compression with the skeleton preserved -- no mesh
+    simplification, so the humanoid rig and VRMA retargeting still work."""
+    try:
+        model = Model3D.get_by_id(model_id)
+        if not model:
+            return jsonify({'error': 'Model not found'}), 404
+        if not (current_user.is_authenticated and model.user_id == current_user.id):
+            return jsonify({'error': 'Only the owner can optimize this avatar.'}), 403
+        if not ModelVariant.get(model.id, 'vrm'):
+            return jsonify({'error': 'This model has no VRM avatar to optimize yet.'}), 400
+
+        try:
+            texture_limit = int(request.args.get('texture_limit', 2048))
+        except (TypeError, ValueError):
+            texture_limit = 2048
+
+        try:
+            opt_variant, info = _optimize_vrm_variant(model, texture_limit=texture_limit)
+        except RuntimeError as e:
+            return jsonify({'error': f'VRM optimization failed: {e}'}), 422
+
+        return jsonify({
+            'success': True,
+            'variant': opt_variant.to_api() if opt_variant else None,
+            'download_url': url_for('api.get_optimized_vrm', model_id=model.id) + '?download=1',
+            **info,
+        })
+    except Exception as e:
+        print(f"API optimize-vrm error: {e}")
+        return jsonify({'error': 'Could not optimize VRM.'}), 500
 
 
 @api_bp.route('/model/<model_id>/status')
@@ -1125,30 +1353,109 @@ def list_vrma():
         user_id = current_user.id if current_user.is_authenticated else None
         items = []
         for model in Model3D.list_vrma_for_user(user_id):
+            view_url = url_for('api.view_model', model_id=model.id)
             items.append({
                 'id': model.id,
                 'name': model.name or 'Untitled',
-                'view_url': url_for('api.view_model', model_id=model.id),
+                'view_url': view_url,
+                'download_url': url_for('api.download_model', model_id=model.id),
                 'source': 'upload',
+                'model_id': model.id,
             })
         for model in Model3D.list_generated_vrma_for_user(user_id):
+            vrma_url = url_for('api.export_model', model_id=model.id) + '?format=vrma'
             items.append({
                 'id': model.id + ':vrma',
                 'name': (model.name or 'Untitled') + ' (animation)',
-                'view_url': url_for('api.export_model', model_id=model.id) + '?format=vrma',
+                'view_url': vrma_url,
+                # The generated VRMA is served via export; expose an explicit
+                # download URL so API consumers can fetch the .vrma file.
+                'download_url': vrma_url,
                 'source': 'generated',
+                'model_id': model.id,
             })
         default = _pick_default_vrma(items)
         for item in items:
             item['is_default'] = bool(default and item['id'] == default['id'])
+
+        # `clips` is the external-client contract: a flat list keyed by name and
+        # loaded by URL, with a stable `id` for a static fallback map. Kept
+        # alongside `animations` (the in-app viewer reads `animations`/view_url).
+        clips = [{
+            'id': it['id'],
+            'name': it['name'],
+            'downloadUrl': it.get('download_url') or it['view_url'],
+            'source': it['source'],
+        } for it in items]
+
         return jsonify({
+            'clips': clips,
             'animations': items,
             'default_id': default['id'] if default else None,
             'default_url': default['view_url'] if default else None,
         })
     except Exception as e:
         print(f"API list vrma error: {e}")
-        return jsonify({'animations': [], 'default_id': None, 'default_url': None})
+        return jsonify({'clips': [], 'animations': [], 'default_id': None, 'default_url': None})
+
+
+@api_bp.route('/vrm')
+def list_vrm():
+    """List VRM avatar assets visible to the caller: models uploaded as native
+    .vrm, plus models that have a derived VRM avatar (a 'vrm' variant from
+    glb2vrm). Each item carries fetch + download URLs so an external client can
+    load or save the avatar. The counterpart to GET /api/vrma."""
+    try:
+        user_id = current_user.id if current_user.is_authenticated else None
+        items = []
+        seen = set()
+
+        # Native .vrm uploads: served via the standard view/download routes.
+        for model in Model3D.list_vrm_for_user(user_id):
+            if model.id in seen:
+                continue
+            seen.add(model.id)
+            items.append({
+                'id': model.id,
+                'model_id': model.id,
+                'name': model.name or 'Untitled',
+                'source': 'upload',
+                'view_url': url_for('api.view_model', model_id=model.id),
+                'download_url': url_for('api.download_model', model_id=model.id),
+                'thumbnail_url': (url_for('api.get_thumbnail', model_id=model.id)
+                                  if model.thumbnail_file_id else None),
+                'size': model.file_size or 0,
+            })
+
+        # Derived VRM variants (e.g. a rigged GLB converted via glb2vrm).
+        for model in Model3D.list_with_vrm_variant_for_user(user_id):
+            if model.id in seen:
+                continue
+            seen.add(model.id)
+            variant = ModelVariant.get(model.id, 'vrm')
+            if not variant or not variant.file_id:
+                continue
+            opt = ModelVariant.get(model.id, 'vrm_optimized')
+            items.append({
+                'id': model.id + ':vrm',
+                'model_id': model.id,
+                'name': (model.name or 'Untitled') + ' (avatar)',
+                'source': 'generated',
+                'view_url': url_for('api.get_vrm_variant', model_id=model.id),
+                'download_url': url_for('api.get_vrm_variant', model_id=model.id) + '?download=1',
+                'thumbnail_url': (url_for('api.get_thumbnail', model_id=model.id)
+                                  if model.thumbnail_file_id else None),
+                'size': variant.size or 0,
+                'optimized': bool(opt and opt.file_id),
+                'optimized_url': (url_for('api.get_optimized_vrm', model_id=model.id)
+                                  if opt and opt.file_id else None),
+                'optimized_size': (opt.size if opt and opt.file_id else None),
+            })
+
+        return jsonify({'avatars': items, 'count': len(items)})
+    except Exception as e:
+        print(f"API list vrm error: {e}")
+        return jsonify({'avatars': [], 'count': 0})
 
 
 @api_bp.route('/model/<model_id>/preview', methods=['POST'])
@@ -1457,7 +1764,8 @@ def put_tellus_world_state(world_id):
         if payload.get('worldId') not in (None, world_id):
             return jsonify({'error': 'worldId mismatch'}), 400
 
-        owner_id = current_user.id if current_user.is_authenticated else None
+        principal, service = _api_principal()
+        owner_id = principal.id if principal and (service or current_user.is_authenticated) else None
         world = WorldState.upsert(world_id, payload, owner_id=owner_id)
         return jsonify(world.to_api(include_state=True))
     except Exception as e:
@@ -2012,6 +2320,129 @@ def _patch_optimization_job(app, job_id, **fields):
         )
 
 
+def _optimize_vrm_variant(model, texture_limit=2048):
+    """Rig-safe optimization of the model's VRM avatar.
+
+    A VRM is a GLB, but the game optimizer's mesh simplification (-si) would
+    destroy the skeleton + skin weights that the VRMC_vrm humanoid map and VRMA
+    retargeting depend on. So this uses a RIG-PRESERVING gltfpack profile:
+    meshopt geometry compression (-cc) + optional texture compression
+    (-tc/-tl, KTX2/Basis), and -kn to keep all named nodes (skeleton intact),
+    with NO -si. gltfpack drops the (unknown-to-it) VRMC_vrm extension but keeps
+    the named mixamorig:* skeleton, so we RE-INJECT the VRM humanoid metadata via
+    glb2vrm afterwards. The result is a smaller, still-rigged VRM.
+
+    Stores the result as a 'vrm_optimized' variant. Returns (variant, info) or
+    raises. Best-effort: callers in the worker treat failure as non-fatal.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+    from app.conversion import glb_to_vrm, tool_paths
+
+    variant = ModelVariant.get(model.id, 'vrm')
+    if not variant or not variant.file_id:
+        raise FileNotFoundError('No VRM variant to optimize.')
+    src_bytes = variant.read_data()
+    if not src_bytes:
+        raise FileNotFoundError('VRM variant file not found.')
+    if src_bytes[:4] != b'glTF':
+        raise ValueError('VRM variant is not a binary glTF.')
+
+    fs = current_app.config['FILE_STORE']
+
+    # Already meshopt-compressed? Then it's effectively optimized; register as-is.
+    if _glb_is_meshopt_compressed(src_bytes):
+        out_bytes = src_bytes
+        report = {'already_optimized': True}
+    else:
+        gltfpack_bin = shutil.which('gltfpack')
+        if not gltfpack_bin:
+            raise RuntimeError('VRM optimization is unavailable because gltfpack is not installed.')
+        workdir = tempfile.mkdtemp(prefix='vrm_optimize_')
+        try:
+            in_path = os.path.join(workdir, 'input.glb')
+            packed_path = os.path.join(workdir, 'packed.glb')
+            out_path = os.path.join(workdir, 'avatar-opt.vrm')
+            report_path = os.path.join(workdir, 'report.json')
+            with open(in_path, 'wb') as f:
+                f.write(src_bytes)
+            cmd = [
+                gltfpack_bin,
+                '-i', in_path,
+                '-o', packed_path,
+                '-cc',   # meshopt geometry compression
+                '-kn',   # keep named nodes -> skeleton survives for the rig
+                '-km',   # keep named materials (preserves VRM material refs)
+                '-r', report_path,
+            ]
+            if texture_limit:
+                cmd.extend(['-tc', '-tl', str(texture_limit)])
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300, check=False)
+            if result.returncode != 0:
+                msg = (result.stderr or result.stdout or 'gltfpack failed.').strip()
+                raise RuntimeError(msg[-1000:] or 'gltfpack failed.')
+
+            # gltfpack stripped VRMC_vrm but kept the mixamorig:* skeleton.
+            # Re-inject the VRM humanoid extension over the compressed file.
+            paths = tool_paths(current_app)
+            glb_to_vrm(
+                paths['node'], paths['fbx2vrma_dir'], packed_path, out_path,
+                name=(model.name or None),
+            )
+            with open(out_path, 'rb') as f:
+                out_bytes = f.read()
+            report = {}
+            if os.path.exists(report_path):
+                try:
+                    with open(report_path, 'r', encoding='utf-8') as f:
+                        report = json.load(f)
+                except Exception as e:
+                    print(f"Could not read VRM gltfpack report: {e}")
+        finally:
+            shutil.rmtree(workdir, ignore_errors=True)
+
+    # Sanity: the final file must carry the VRM extension (re-injected above),
+    # else the rig didn't survive and we must NOT store it.
+    if b'VRMC_vrm' not in out_bytes:
+        raise RuntimeError('Optimized output lost the VRMC_vrm extension; refusing to store.')
+
+    original_size = len(src_bytes)
+    optimized_size = len(out_bytes)
+    savings = 0 if original_size <= 0 else 1 - (optimized_size / original_size)
+
+    file_id = fs.put(
+        out_bytes,
+        filename=f'{_safe_stem(model)}-avatar-opt.vrm',
+        content_type=_mime_for('vrm'),
+        metadata={
+            'kind': 'vrm_optimized',
+            'source_model_id': model.id,
+            'source_size': original_size,
+            'optimized_size': optimized_size,
+            'texture_limit': texture_limit,
+        },
+    )
+    opt_variant, old_file_id = ModelVariant.upsert(
+        model.id, 'vrm_optimized', str(file_id),
+        file_format='vrm', size=optimized_size,
+        settings={'source_size': original_size, 'savings_ratio': round(savings, 4),
+                  'texture_limit': texture_limit},
+        status='ready',
+    )
+    if old_file_id and old_file_id != str(file_id):
+        try:
+            fs.delete(old_file_id)
+        except Exception as e:
+            print(f"Old vrm_optimized blob {old_file_id} not deleted: {e}")
+
+    return opt_variant, {
+        'source_size': original_size,
+        'optimized_size': optimized_size,
+        'savings_ratio': round(savings, 4),
+    }
+
+
 def _run_game_optimizer(model, owner_id, settings):
     import shutil
     import subprocess
@@ -2488,6 +2919,7 @@ def upload_model():
         asset_category = Model3D.normalize_category(request.form.get('asset_category'))
         asset_styles = Model3D.normalize_tags(request.form.get('asset_styles', ''))
         asset_types = Model3D.normalize_tags(request.form.get('asset_types', ''))
+        tags, asset_types = _with_generation_defaults(tags, asset_types)
         runtime_metadata = Model3D.normalize_runtime_metadata(request.form.get('runtime_metadata'))
 
         # Collect all uploaded files (supports repeated 'file' fields).

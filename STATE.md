@@ -78,6 +78,129 @@ A Flask web app for uploading, viewing, browsing, and optimizing 3D assets
 
 ## Recent Changes
 
+### 2026-06-12 — VRM/VRMA API endpoints + rig-safe VRM optimization
+**Three asks:** surface animations + avatars via API, and optimize VRM avatars.
+
+**Endpoints (`api.py`):**
+- `GET /api/vrma` — now also returns a **`clips`** array (external-client
+  contract): `[{ id, name, downloadUrl, source }]`, kept ALONGSIDE the existing
+  `animations`/`view_url` (in-app viewer unchanged). Every item gained a
+  `download_url` + `model_id`.
+- `GET /api/vrm` — NEW. Lists VRM avatars: native `.vrm` uploads + models with a
+  `vrm` variant (glb2vrm). Each `avatars[]` item has view/download/thumbnail
+  URLs, size, and `optimized`/`optimized_url`/`optimized_size`.
+- `POST /api/model/<id>/optimize-vrm` (owner) + `GET .../optimized-vrm` (serve).
+- `models.py`: `list_vrm_for_user` (native .vrm) + `list_with_vrm_variant_for_user`
+  (join on model_variants kind='vrm').
+
+**Rig-safe VRM optimization (`_optimize_vrm_variant`):** a VRM is a GLB, but
+gltfpack `-si` would wreck the skeleton/skin. KEY FINDING (verified): gltfpack
+ALSO STRIPS the unknown `VRMC_vrm` extension even with `-kn -km` — BUT the named
+`mixamorig:*` skeleton survives. So the pipeline is **gltfpack `-cc -kn -km`
+(+ `-tc -tl` textures, NO `-si`) → then RE-INJECT VRMC_vrm via glb2vrm** over the
+compressed file. Stored as `vrm_optimized` variant. Refuses to store if the final
+bytes lack `VRMC_vrm`. Auto-run after every VRM creation (worker auto-VRM branch
++ to-vrm route; best-effort/non-fatal).
+- `glb2vrm-converter.js` `writeGlb` now guarantees `buffers[0].byteLength` for the
+  embedded BIN (else gltfpack-less re-pack could emit invalid glTF). glb2vrm is
+  now reused as a post-gltfpack step.
+
+**Verification:** py_compile (api/conversion/models); no circular import (api
+imported lazily in worker); all 6 vrm endpoints register; `/api/vrma` returns
+`clips` in exact `{id,name,downloadUrl,source}` shape + `/api/vrm` returns
+populated `avatars` with `optimized:true` (seeded sqlite). **End-to-end optimize
+on real gltfpack 1.1: pack (meshopt) → glb2vrm re-inject → 15 humanoid bones
+restored, EXT_meshopt_compression present, skin/mesh intact, all node refs
+valid.** ⚠️ Not yet run through the live worker on Coolify; no browser load of an
+optimized .vrm + VRMA playback yet.
+
+### 2026-06-12 — GLB→VRM converter + mesh2motion rigging round-trip
+**Why:** "Easily add a humanoid rig." Auto-rigging an unrigged mesh (skinning) is
+hard; we DON'T do it in-app. Instead use the browser auto-rigger
+**mesh2motion** (app.mesh2motion.org) and kill the format friction around it.
+mesh2motion imports FBX/GLB directly but exports **GLB only** (no VRM) — so the
+real gap is **rigged GLB → VRM**. A VRM is just a GLB + `VRMC_vrm` humanoid
+metadata, and a mesh2motion "Mixamo"-named export (or a Mixamo FBX's GLB) already
+has `mixamorig:*` bones — exactly what `vrm-bone-map.js` maps.
+
+**New: `tools/glb2vrm-converter.js`** — parses the GLB container, injects
+`VRMC_vrm` (humanoid bone map from joints referenced by `skin.joints`, + minimal
+VRM meta), and re-packs **preserving the BIN buffer byte-for-byte** (no mesh/skin
+surgery). Refuses unless all VRM-required bones map (`--lenient`/`--map` escape
+hatches). Reuses `vrm-bone-map.js` (+ new `VRM_REQUIRED_BONES`).
+
+**Wiring:**
+- `conversion.py` — `glb_to_vrm()` helper. Humanoid-FBX branch now ALSO
+  auto-produces a **VRM variant** (kind `vrm`) from the rigged viewable GLB via
+  `ModelVariant.upsert` (runs under app_context in `drain_once`).
+- `api.py` — `POST /api/model/<id>/to-vrm` (owner-only: reads the model's
+  viewable GLB, runs glb2vrm, stores `vrm` variant; 422 with actionable message
+  if not rigged) + `GET /api/model/<id>/vrm` (serve/download, ETag).
+- `main.py` — `model_detail` passes `vrm_variant`.
+- `model_detail.html` — owner buttons **"Rig in mesh2motion"** (opens
+  app.mesh2motion.org) + **"Make VRM avatar"** (`make-vrm-btn`, calls to-vrm,
+  reveals Export-menu VRM link). Export menu gets a **VRM avatar** download.
+- `tools/`: package.json `glb2vrm` bin; README "Rigging round-trip" section.
+
+**Round-trip:** unrigged mesh → Rig in mesh2motion (fit + auto-skin + export GLB
+w/ Mixamo naming) → upload rigged GLB → Make VRM avatar. **Mixamo-rigged FBX
+skips the rigger** — worker auto-makes the VRM on upload.
+
+**Verification:** node --check all 6 tools; py_compile api/conversion/main/init;
+routes register (`post_to_vrm`,`get_vrm_variant`); Jinja render of model_detail
+(anon + owner) shows all new markup; glb2vrm CLI: 15-bone GLB→valid VRM (BIN
+preserved, mesh-node named "Head" correctly excluded), under-rigged GLB refused
+with named-missing-bones error. ⚠️ NOT live-tested through real upload/worker on
+Coolify; no browser load of a converted .vrm + VRMA playback yet.
+
+### 2026-06-12 — BVH→VRMA converter + Mixamo animation library tooling
+**Why:** Extend animation support beyond humanoid FBX. Add BVH (mocap) → VRMA,
+and tooling to build a curated Mixamo VRMA library. Inspired by DavinciDreams/3dchat.
+
+**FBX→VRMA status (pre-existing, verified working):** `fbx` uploads convert to a
+viewable GLB via FBX2glTF; **humanoid** FBX (≥6 Mixamo bones, `looks_humanoid`)
+ALSO get a VRMA via `tools/fbx2vrma-converter.js` → sets `vrma_file_id`. Plays via
+`@pixiv/three-vrm-animation` in `_vrm_viewer.html`. Non-humanoid FBX → GLB only.
+
+**New files (`tools/`):**
+- `bvh2vrma-converter.js` — pure-JS BVH parser → VRMA. Parses HIERARCHY/MOTION,
+  Euler-channels→quaternion (respects per-joint channel order), emits self-
+  contained glTF with `VRMC_vrm_animation` (base64 data-URI buffer). No
+  FBX2glTF/assimp/Blender. `--map overrides.json` for custom rigs.
+- `vrm-bone-map.js` — shared joint→VRM-bone map (Mixamo + CMU/Rokoko/Biped
+  aliases, `normalizeJointName`, `jointToVrmBone`). Used by BVH converter.
+- `animation-list.json` — 34 curated Mixamo clips (name/mixamoName/category/desc).
+- `convert-raw-to-vrma.js` — batch-convert a folder of raw FBX/BVH → VRMA,
+  fuzzy-matches filenames to the curated list, writes `manifest.json`.
+- `download-mixamo.js` — OPTIONAL admin-only Puppeteer CLI (Adobe login + Mixamo
+  API → bulk FBX). Puppeteer intentionally NOT a dependency (kept out of the
+  server image; lazy-required with install hint). ToS caveat documented.
+- `.gitignore` — excludes node_modules, package-lock, animations-raw/-vrma, *.vrma/*.bvh.
+
+**Wiring (`app/`):**
+- `conversion.py` — new `CONVERTIBLE_TO_VRMA = {"bvh"}`; `bvh_to_vrma()` helper;
+  `process_model_doc` BVH branch converts straight to VRMA (animation-only, no
+  GLB) and marks `done` + sets `vrma_file_id`; `enqueue()` queues BVH too.
+- `__init__.py` — `bvh` added to `ALLOWED_EXTENSIONS`.
+- **No API change needed:** any model with `vrma_file_id` auto-appears in
+  `GET /api/vrma` via `list_generated_vrma_for_user`, applicable to any VRM.
+
+**Verification:**
+- `node --check` on all 5 JS files ✓; `animation-list.json`/`package.json` valid ✓.
+- `py_compile app/conversion.py app/__init__.py` ✓.
+- BVH converter smoke test: synthetic Mixamo-named BVH → 9 humanoid bones, valid
+  `VRMC_vrm_animation`, identity quat at frame 0 (rot=0), buffer byte-lengths
+  match, all bufferViews in range ✓.
+- Auto-mapping verified across Mixamo / CMU (`LeftUpArm`,`RightThigh`,`Neck1`) /
+  `Character1_` prefix; CMU dummy `LHipJoint`→null; unknown→null ✓.
+- Batch path: CMU-named `Waving.bvh` → fuzzy-matched `wave.vrma` [gesture] +
+  manifest, valid VRMA (9 bones) ✓. Test artifacts cleaned.
+- Known gap: 3ds Max Biped "Bip001 L UpperArm" side-prefix not auto-mapped
+  (use `--map`); covered by override JSON, not over-engineered.
+- ⚠️ NOT yet live-tested through the real upload→worker path on Coolify (needs
+  FBX2glTF/node in the image — already present). No browser playback test of a
+  BVH-derived VRMA on a VRM yet.
+
 ### 2026-06-09 — "Fix Eyes" blinker eyeballs (client-side bake)
 **Why:** Image-to-3D pipeline produces character models with holes/black voids in
 the eye sockets (reconstruction can't resolve dark recessed regions). Feature lets

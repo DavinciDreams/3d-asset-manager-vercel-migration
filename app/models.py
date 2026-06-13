@@ -629,13 +629,27 @@ class Model3D:
         return or_(
             func.lower(models.c.name).like(pattern),
             func.lower(models.c.description).like(pattern),
+            func.lower(models.c.original_filename).like(pattern),
+            func.lower(models.c.asset_category).like(pattern),
+            func.lower(models.c.ai_description).like(pattern),
+            func.lower(cast(models.c.tags, String)).like(pattern),
+            func.lower(cast(models.c.asset_styles, String)).like(pattern),
+            func.lower(cast(models.c.asset_types, String)).like(pattern),
+            func.lower(cast(models.c.runtime_metadata, String)).like(pattern),
+            func.lower(cast(models.c.ai_tags, String)).like(pattern),
+            func.lower(cast(models.c.ai_metadata, String)).like(pattern),
         )
 
     @staticmethod
-    def get_public_models(page=1, per_page=20, search=None, sort="newest", tag=None,
-                          category=None, style=None, asset_type=None):
+    def list_models(page=1, per_page=20, search=None, sort="newest", tag=None,
+                    category=None, style=None, asset_type=None, public_only=True,
+                    owner_id=None):
         engine = current_app.config["DB_ENGINE"]
-        predicates = [models.c.is_public.is_(True)]
+        predicates = []
+        if public_only:
+            predicates.append(models.c.is_public.is_(True))
+        if owner_id:
+            predicates.append(models.c.user_id == str(owner_id))
         search_predicate = Model3D._search_predicate(search)
         if search_predicate is not None:
             predicates.append(search_predicate)
@@ -654,6 +668,15 @@ class Model3D:
             ).mappings().all()
 
         return [Model3D.from_doc(row) for row in rows], total
+
+    @staticmethod
+    def get_public_models(page=1, per_page=20, search=None, sort="newest", tag=None,
+                          category=None, style=None, asset_type=None):
+        return Model3D.list_models(
+            page=page, per_page=per_page, search=search, sort=sort, tag=tag,
+            category=category, style=style, asset_type=asset_type,
+            public_only=True,
+        )
 
     @staticmethod
     def get_user_models(user_id, page=1, per_page=20, sort="newest", tag=None,
@@ -777,6 +800,46 @@ class Model3D:
         with engine.begin() as conn:
             rows = conn.execute(
                 select(models).where(and_(*predicates)).order_by(models.c.name.asc())
+            ).mappings().all()
+        return [Model3D.from_doc(row) for row in rows]
+
+    @staticmethod
+    def list_vrm_for_user(user_id=None):
+        """Models uploaded as a native .vrm avatar, visible to the user."""
+        engine = current_app.config["DB_ENGINE"]
+        predicates = [models.c.file_format == "vrm"]
+        if user_id:
+            predicates.append(or_(models.c.is_public.is_(True), models.c.user_id == str(user_id)))
+        else:
+            predicates.append(models.c.is_public.is_(True))
+
+        with engine.begin() as conn:
+            rows = conn.execute(
+                select(models).where(and_(*predicates)).order_by(models.c.name.asc())
+            ).mappings().all()
+        return [Model3D.from_doc(row) for row in rows]
+
+    @staticmethod
+    def list_with_vrm_variant_for_user(user_id=None):
+        """Models that have a derived VRM avatar (a 'vrm' ModelVariant) -- e.g.
+        a rigged GLB converted via glb2vrm. Visible to the user. Joins
+        model_variants so we return the source models (one row each)."""
+        engine = current_app.config["DB_ENGINE"]
+        predicates = [
+            model_variants.c.kind == "vrm",
+            model_variants.c.file_id.is_not(None),
+        ]
+        if user_id:
+            predicates.append(or_(models.c.is_public.is_(True), models.c.user_id == str(user_id)))
+        else:
+            predicates.append(models.c.is_public.is_(True))
+
+        with engine.begin() as conn:
+            rows = conn.execute(
+                select(models)
+                .select_from(models.join(model_variants, model_variants.c.model_id == models.c.id))
+                .where(and_(*predicates))
+                .order_by(models.c.name.asc())
             ).mappings().all()
         return [Model3D.from_doc(row) for row in rows]
 
