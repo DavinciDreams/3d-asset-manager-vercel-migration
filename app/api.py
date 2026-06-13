@@ -2022,6 +2022,14 @@ def _merge_tags(*tag_lists):
     return merged
 
 
+_PROVENANCE_TAGS = {'tellus', 'generated', 'in-world-generation', 'asset-store'}
+_PROVENANCE_ASSET_TYPES = {'generated'}
+
+
+def _preserved_values(existing, protected):
+    return [value for value in Model3D.normalize_tags(existing or []) if value in protected]
+
+
 def _run_ai_enrichment(model, data=None):
     data = data or {}
     overwrite = _as_bool(data.get('overwrite', True))
@@ -2056,10 +2064,13 @@ def _run_ai_enrichment(model, data=None):
         'updated_at': datetime.utcnow().isoformat(),
     }
     if overwrite:
-        model.tags = _merge_tags(model.ai_tags)
+        model.tags = _merge_tags(_preserved_values(model.tags, _PROVENANCE_TAGS), model.ai_tags)
         model.asset_category = enriched.get('asset_category') or model.asset_category
         model.asset_styles = Model3D.normalize_tags(enriched.get('asset_styles', []))
-        model.asset_types = Model3D.normalize_tags(enriched.get('asset_types', []))
+        model.asset_types = _merge_tags(
+            _preserved_values(model.asset_types, _PROVENANCE_ASSET_TYPES),
+            enriched.get('asset_types', []),
+        )
         model.runtime_metadata = Model3D.normalize_runtime_metadata(enriched.get('runtime_metadata'))
         if include_title and enriched.get('title'):
             model.name = enriched['title']

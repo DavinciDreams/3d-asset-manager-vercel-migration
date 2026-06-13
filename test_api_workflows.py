@@ -269,6 +269,34 @@ def test_tellus_admin_token_defaults_owner_and_generation_search_metadata(monkey
     assert listed[0]["has_game_optimized"] is True
     assert listed[0]["has_thumbnail"] is False
 
+    def fake_enrich(stored_model, extra_context=None):
+        return {
+            "title": "Castle Tower",
+            "description": "A stone tower generated for a game world.",
+            "summary": "Stone tower.",
+            "tags": ["castle", "stone", "tower"],
+            "asset_category": "architecture",
+            "asset_styles": ["fantasy"],
+            "asset_types": ["prop"],
+            "runtime_metadata": {"collidable": True},
+            "categories": [],
+            "quality_notes": [],
+            "provider": "test",
+        }
+
+    monkeypatch.setattr("app.ai_enrichment.enrich_model", fake_enrich)
+    enrich = client.post(
+        f"/api/model/{model['id']}/ai/autotag",
+        headers={"Authorization": "Bearer tellus-admin-token"},
+        json={"overwrite": True, "include_title": True, "include_description": True},
+    )
+    assert enrich.status_code == 200, enrich.get_json()
+    enriched_model = enrich.get_json()["model"]
+    assert {"tellus", "generated", "in-world-generation", "castle", "stone", "tower"}.issubset(
+        set(enriched_model["tags"])
+    )
+    assert {"generated", "prop"}.issubset(set(enriched_model["asset_types"]))
+
 
 def test_openapi_documents_workflow_and_bearer_auth():
     app = create_app()
