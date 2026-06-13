@@ -1,4 +1,4 @@
-"""Import a VRMA animation library into the asset store.
+"""Import a VRMA animation library or source animation files into the asset store.
 
 This writes through the app's configured DB_ENGINE and FILE_STORE, so run it in
 the same environment as the asset-store service for production imports.
@@ -7,6 +7,7 @@ Examples:
     python scripts/import_vrma_library.py --dry-run
     python scripts/import_vrma_library.py --owner-username lisa
     python scripts/import_vrma_library.py --source "Z:\\3d\\assets\\animation-rigs\\legacy\\animations"
+    python scripts/import_vrma_library.py --api-base https://3d.flobots.xyz --format fbx --source "Z:\\3d\\assets\\legacy\\3d\\fbx"
 """
 import argparse
 import hashlib
@@ -26,6 +27,10 @@ os.environ.setdefault("AI_AUTOTAG_ON_UPLOAD", "0")
 DEFAULT_SOURCES = [
     Path(r"C:\Users\lmwat\3dchat\3dchat\public\animations\vrma"),
     Path(r"Z:\3d\assets\animation-rigs\legacy\animations"),
+]
+
+DEFAULT_FBX_SOURCES = [
+    Path(r"Z:\3d\assets\legacy\3d\fbx"),
 ]
 
 DEFAULT_MANIFESTS = [
@@ -78,11 +83,18 @@ def _load_manifest(paths):
 
 def _file_metadata(path, manifest):
     stem = path.stem
+    if stem.lower().startswith("animations_"):
+        stem = stem[len("Animations_"):]
     item = manifest.get(stem.lower(), {})
     title = item.get("title") or _title_from_stem(stem)
     category = item.get("category") or _infer_category(stem)
     description = item.get("description") or f"Humanoid VRMA animation clip: {title}."
-    tags = ["vrma-library", "humanoid-animation", "avatar-animation", "animation"]
+    ext = path.suffix.lower().lstrip(".")
+    tags = ["animation-library", "humanoid-animation", "avatar-animation", "animation", ext]
+    if ext == "vrma":
+        tags.append("vrma-library")
+    elif ext in {"fbx", "bvh"}:
+        tags.append("animation-source")
     if category:
         tags.append(category)
     return title, description, category, tags
@@ -103,14 +115,20 @@ def _infer_category(stem):
     return "humanoid"
 
 
-def _iter_vrma_files(sources):
+def _iter_animation_files(sources, formats):
     seen = set()
+    suffixes = {f".{fmt.lower().lstrip('.')}" for fmt in formats}
     for source in sources:
         if not source.exists():
             print(f"Missing source: {source}")
             continue
-        paths = source.rglob("*.vrma") if source.is_dir() else [source]
+        if source.is_dir():
+            paths = (path for path in source.rglob("*") if path.is_file() and path.suffix.lower() in suffixes)
+        else:
+            paths = [source] if source.suffix.lower() in suffixes else []
         for path in paths:
+            if path.suffix.lower() == ".fbx" and not path.name.lower().startswith("animations_"):
+                continue
             resolved = path.resolve()
             if resolved in seen:
                 continue
@@ -118,10 +136,11 @@ def _iter_vrma_files(sources):
             yield path
 
 
-def import_library(sources, manifests, owner_username=None, public=True, dry_run=False, limit=None):
+def import_library(sources, manifests, owner_username=None, public=True, dry_run=False, limit=None, formats=None):
     from app import create_app
     from app.models import Model3D, User
 
+    formats = formats or ["vrma"]
     app = create_app()
     manifest = _load_manifest(manifests)
     with app.app_context():
@@ -131,7 +150,7 @@ def import_library(sources, manifests, owner_username=None, public=True, dry_run
 
         fs = app.config["FILE_STORE"]
         changed = skipped = failed = 0
-        for index, path in enumerate(_iter_vrma_files(sources), 1):
+        for index, path in enumerate(_iter_animation_files(sources, formats), 1):
             if limit and (changed + skipped + failed) >= limit:
                 break
             try:
@@ -154,16 +173,17 @@ def import_library(sources, manifests, owner_username=None, public=True, dry_run
                     filename=path.name,
                     content_type="application/octet-stream",
                     metadata={
-                        "kind": "vrma",
+                        "kind": path.suffix.lower().lstrip("."),
                         "original_filename": path.name,
                         "source_path": str(path),
                         "content_hash": digest,
                     },
                 )
+                ext = path.suffix.lower().lstrip(".")
                 model = Model3D(
                     name=title,
                     description=description,
-                    file_format="vrma",
+                    file_format=ext,
                     file_size=len(data),
                     content_hash=digest,
                     original_filename=path.name,
@@ -173,7 +193,7 @@ def import_library(sources, manifests, owner_username=None, public=True, dry_run
                     tags=Model3D.normalize_tags(tags),
                     asset_category=Model3D.normalize_category("animation"),
                     asset_styles=Model3D.normalize_tags(["humanoid", "vrm"]),
-                    asset_types=Model3D.normalize_tags(["animation", "humanoid", "vrma"]),
+                    asset_types=Model3D.normalize_tags(["animation", "humanoid", ext]),
                     runtime_metadata=Model3D.normalize_runtime_metadata({
                         "animations": [{"name": title}],
                         "behaviors": ["avatar-animation"],
@@ -184,6 +204,9 @@ def import_library(sources, manifests, owner_username=None, public=True, dry_run
                     }),
                 )
                 model.save()
+                if ext in {"fbx", "bvh"}:
+                    from app.conversion import enqueue
+                    enqueue(model, enabled=app.config.get("ENABLE_CONVERSION", True))
             except Exception as error:
                 failed += 1
                 print(f"[{index}] fail {path}: {str(error)[:300]}")
@@ -191,7 +214,7 @@ def import_library(sources, manifests, owner_username=None, public=True, dry_run
         print(f"Done. imported={changed} skipped={skipped} failed={failed} dry_run={dry_run}")
 
 
-def import_library_via_api(sources, manifests, api_base, token_env, public=True, dry_run=False, limit=None):
+def import_library_via_api(sources, manifests, api_base, token_env, public=True, dry_run=False, limit=None, formats=None):
     try:
         import requests
     except ImportError as error:
@@ -203,14 +226,16 @@ def import_library_via_api(sources, manifests, api_base, token_env, public=True,
 
     manifest = _load_manifest(manifests)
     api_base = api_base.rstrip("/")
+    formats = formats or ["vrma"]
     changed = skipped = failed = 0
-    for index, path in enumerate(_iter_vrma_files(sources), 1):
+    for index, path in enumerate(_iter_animation_files(sources, formats), 1):
         if limit and (changed + skipped + failed) >= limit:
             break
         try:
             data = path.read_bytes()
             digest = hashlib.sha256(data).hexdigest()
             title, description, category, tags = _file_metadata(path, manifest)
+            ext = path.suffix.lower().lstrip(".")
             changed += 1
             print(f"[{index}] upload {title!r} to {api_base} from {path}")
             if dry_run:
@@ -234,7 +259,7 @@ def import_library_via_api(sources, manifests, api_base, token_env, public=True,
                         "tags": ",".join(tags),
                         "asset_category": "animation",
                         "asset_styles": "humanoid,vrm",
-                        "asset_types": "animation,humanoid,vrma",
+                        "asset_types": f"animation,humanoid,{ext}",
                         "runtime_metadata": json.dumps(runtime_metadata),
                     },
                     files={"file": (path.name, handle, "application/octet-stream")},
@@ -261,6 +286,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", action="append", type=Path, help="VRMA file or directory. Repeatable.")
     parser.add_argument("--manifest", action="append", type=Path, help="animation-list.json file. Repeatable.")
+    parser.add_argument("--format", action="append", choices=["vrma", "fbx", "bvh", "all"], help="Animation source format to import. Repeatable. Default: vrma.")
     parser.add_argument("--owner-username", help="Asset owner username, e.g. lisa.")
     parser.add_argument("--private", action="store_true", help="Import as private assets.")
     parser.add_argument("--api-base", help="Upload through a live asset-store API instead of direct DB/FILE_STORE.")
@@ -269,7 +295,16 @@ def main():
     parser.add_argument("--limit", type=int)
     args = parser.parse_args()
 
-    sources = args.source or [path for path in DEFAULT_SOURCES if path.exists()]
+    raw_formats = args.format or ["vrma"]
+    formats = ["vrma", "fbx", "bvh"] if "all" in raw_formats else raw_formats
+    if args.source:
+        sources = args.source
+    elif formats == ["vrma"]:
+        sources = [path for path in DEFAULT_SOURCES if path.exists()]
+    elif formats == ["fbx"]:
+        sources = [path for path in DEFAULT_FBX_SOURCES if path.exists()]
+    else:
+        sources = [path for path in [*DEFAULT_SOURCES, *DEFAULT_FBX_SOURCES] if path.exists()]
     manifests = args.manifest or [path for path in DEFAULT_MANIFESTS if path.exists()]
     if not sources:
         raise SystemExit("No VRMA sources found. Pass --source.")
@@ -282,6 +317,7 @@ def main():
             public=not args.private,
             dry_run=args.dry_run,
             limit=args.limit,
+            formats=formats,
         )
         return
     import_library(
@@ -291,6 +327,7 @@ def main():
         public=not args.private,
         dry_run=args.dry_run,
         limit=args.limit,
+        formats=formats,
     )
 
 
