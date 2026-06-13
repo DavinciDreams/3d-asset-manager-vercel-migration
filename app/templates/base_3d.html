@@ -1502,6 +1502,51 @@
                         let bbox = null, centerX = 0;
                         let meshes = [];
                         let onChange = null;         // UI callback(progress)
+                        // Which side the ortho cam sits on: -1 = camera at -Z
+                        // looking toward +Z (shows a -Z-facing model's FRONT,
+                        // which is the common image-to-3D case); +1 = the other
+                        // side. Auto-detected in enter(); flippable by the user.
+                        let facing = -1;
+                        let bboxCenter = null, viewDepth = 0;
+
+                        // Place the ortho cam on the current `facing` side and aim
+                        // it at the model center. Looking along ±Z with up=+Y, so
+                        // screen-X maps to world-X consistently (mirroring math in
+                        // world space stays correct regardless of side).
+                        function positionCamera() {
+                            if (!orthoCam || !bboxCenter) return;
+                            const c = bboxCenter;
+                            orthoCam.position.set(c.x, c.y, c.z + facing * viewDepth);
+                            orthoCam.up.set(0, 1, 0);
+                            orthoCam.lookAt(c);
+                            orthoCam.updateProjectionMatrix();
+                        }
+
+                        // Heuristic front detection: count how many mesh triangles
+                        // face each ±Z direction (weighted by area). Characters
+                        // usually have more forward-facing surface area on their
+                        // front (face, chest) than back. Returns -1 or +1 for the
+                        // side the camera should sit on to see the front.
+                        function detectFacing() {
+                            let zPos = 0, zNeg = 0;
+                            const nrm = new THREE.Vector3();
+                            for (const mesh of meshes) {
+                                const g = mesh.geometry;
+                                const normal = g.attributes.normal;
+                                if (!normal) continue;
+                                mesh.updateMatrixWorld(true);
+                                const nm = new THREE.Matrix3().getNormalMatrix(mesh.matrixWorld);
+                                const step = Math.max(1, Math.floor(normal.count / 2000)); // sample
+                                for (let i = 0; i < normal.count; i += step) {
+                                    nrm.fromBufferAttribute(normal, i).applyMatrix3(nm).normalize();
+                                    if (nrm.z > 0.3) zPos += nrm.z;
+                                    else if (nrm.z < -0.3) zNeg += -nrm.z;
+                                }
+                            }
+                            // If more surface faces +Z, the front is +Z -> put the
+                            // camera on the +Z side (facing=+1). Else -Z (facing=-1).
+                            return zPos >= zNeg ? 1 : -1;
+                        }
 
                         function meshList() {
                             const out = [];
@@ -1611,22 +1656,34 @@
                                 const c = bbox.getCenter(new THREE.Vector3());
                                 const size = bbox.getSize(new THREE.Vector3());
                                 centerX = c.x;
+                                bboxCenter = c.clone();
+                                viewDepth = size.z + size.length();
                                 const pad = 1.12;
                                 const halfW = (size.x / 2) * pad, halfH = (size.y / 2) * pad;
-                                const depth = size.z + size.length();
-                                orthoCam = new THREE.OrthographicCamera(-halfW, halfW, halfH, -halfH, 0.001, depth * 4);
-                                orthoCam.position.set(c.x, c.y, c.z + depth);
-                                orthoCam.up.set(0, 1, 0);
-                                orthoCam.lookAt(c);
-                                orthoCam.updateProjectionMatrix();
+                                orthoCam = new THREE.OrthographicCamera(-halfW, halfW, halfH, -halfH, 0.001, viewDepth * 4);
+                                raycaster = new THREE.Raycaster();
+                                meshes = meshList();
+                                facing = detectFacing();     // auto-pick the front
+                                positionCamera();
                                 prevCamera = camera;
                                 camera = orthoCam;           // animate() renders `camera`
                                 controls.enabled = false;    // lock orbit during picking
-                                raycaster = new THREE.Raycaster();
-                                meshes = meshList();
                                 renderer.domElement.addEventListener('pointerdown', onPointerDown);
                                 if (onChange) onChange(progress());
                             },
+
+                            // Turn the model around (look at the other side). Use
+                            // when auto-detect guessed wrong and the front view is
+                            // showing the back. Clears any placed markers since
+                            // their screen meaning changed.
+                            flip() {
+                                if (!active) return;
+                                facing = -facing;
+                                positionCamera();
+                                this.reset();
+                                return facing;
+                            },
+                            get facing() { return facing; },
 
                             // Remove a placed marker (re-place flow).
                             clearMarker(key) {
@@ -1657,7 +1714,7 @@
                                 if (!p.complete) throw new Error('Place all joint markers first.');
                                 const m = {};
                                 for (const k of Object.keys(markers)) m[k] = markers[k].world.clone();
-                                const { root } = rigModel(model, m, bbox);
+                                const { root } = rigModel(model, m, bbox, facing);
 
                                 const exportRoot = new THREE.Scene();
                                 exportRoot.add(root);

@@ -78,6 +78,29 @@ A Flask web app for uploading, viewing, browsing, and optimizing 3D assets
 
 ## Recent Changes
 
+### 2026-06-13 — Rigging: fix backward/back-facing placement + flip
+**Bug (user-reported):** the rig front view showed the model's BACK. Most
+image-to-3D characters face -Z (same note as Fix-Eyes), but the ortho cam sat at
++Z looking -Z → saw the back. Worse, the skeleton derivation assumed
+character-left == world +X, so a -Z-facing model also got left/right swapped.
+
+**Fixes:**
+- `base_3d.html` autorig: camera placement now goes through `positionCamera()`
+  driven by a `facing` state (±1). `detectFacing()` auto-picks the side by
+  counting mesh-normal Z-orientation (more forward-facing surface area = front);
+  default -1. New `flip()` method + "Turn model around" button in the rig panel
+  re-aims the cam 180° and clears markers.
+- `autorig-skinning.js`: `buildSkeletonFromMarkers(markers, bbox, facing)` and
+  `rigModel(..., facing)`. **Left/right now derived from each marker's OWN side**
+  (`sign(elbowL.x - centerX)`), NOT a fixed +X==left assumption — so L/R is
+  correct regardless of facing. Toes point forward = `facing` direction in Z.
+
+**Verified:** Node + in-browser (Playwright/three 0.184): LeftArm/RightArm land
+on the correct marker side for BOTH facings; `detectFacing` returns -1 for a
+-Z-front mesh and +1 for +Z; full rig still 0 bad weight rows, valid GLB with
+mixamorig:Hips. Flip button + handler + viewer flip() wired across all 3 files.
+⚠️ Still not human-tested on a real uploaded model in the browser UI.
+
 ### 2026-06-12 — In-app Mixamo-style rigging (Phase 1, manual MVP)
 **Why:** User finds 3D skeleton alignment (Blender/mesh2motion) too hard; wants
 Mixamo's easy 2D "pick the joints" flow IN the app. Also: FBX export 502s (assimp

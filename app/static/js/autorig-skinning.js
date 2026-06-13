@@ -20,7 +20,10 @@ const MAX_INFLUENCES = 4;
 // `bbox` is a THREE.Box3 of the whole model. Returns { bones, skeleton,
 // hipsBone, boneWorld } where boneWorld is a Map<name, Vector3> of rest world
 // positions and crotchY (= groin.y) is attached to the result.
-export function buildSkeletonFromMarkers(markers, bbox) {
+// `facing` is +1 if the character faces +Z, -1 if it faces -Z (the side the rig
+// camera sat on). It only affects which way the toes point; left/right is taken
+// from each marker's own side, so the rig is correct regardless of facing.
+export function buildSkeletonFromMarkers(markers, bbox, facing = -1) {
   const need = ['chin', 'groin', 'wristL', 'wristR', 'elbowL', 'elbowR', 'kneeL', 'kneeR'];
   for (const k of need) {
     if (!markers[k]) throw new Error(`autorig: missing marker "${k}"`);
@@ -57,14 +60,21 @@ export function buildSkeletonFromMarkers(markers, bbox) {
   world['HeadTop_End'] = V(chin.x, topY, chin.z);
 
   // Shoulder sockets: at upper-chest height, offset laterally toward each elbow.
+  // IMPORTANT: derive the lateral direction from the MARKER's own side
+  // (sign of elbow.x - centerX), NOT a fixed +X==left assumption. This keeps
+  // the skeleton's left/right tied to the markers the user labeled L/R,
+  // regardless of which way the model faces (±Z) -- so a back-facing or
+  // flipped model still rigs correctly.
   const shoulderY = lerp(world['Spine2'], world['Neck'], 0.5).y;
   const shoulderHalf = Math.abs(elbowL.x - elbowR.x) / 2 * 0.45; // narrower than elbows
-  world['LeftShoulder'] = V(centerX + shoulderHalf * 0.4, shoulderY, midZ);
-  world['LeftArm'] = V(centerX + shoulderHalf, shoulderY, midZ);
+  const leftArmSign = Math.sign(elbowL.x - centerX) || 1;        // +1 or -1
+  const rightArmSign = Math.sign(elbowR.x - centerX) || -1;
+  world['LeftShoulder'] = V(centerX + leftArmSign * shoulderHalf * 0.4, shoulderY, midZ);
+  world['LeftArm'] = V(centerX + leftArmSign * shoulderHalf, shoulderY, midZ);
   world['LeftForeArm'] = elbowL.clone();
   world['LeftHand'] = wristL.clone();
-  world['RightShoulder'] = V(centerX - shoulderHalf * 0.4, shoulderY, midZ);
-  world['RightArm'] = V(centerX - shoulderHalf, shoulderY, midZ);
+  world['RightShoulder'] = V(centerX + rightArmSign * shoulderHalf * 0.4, shoulderY, midZ);
+  world['RightArm'] = V(centerX + rightArmSign * shoulderHalf, shoulderY, midZ);
   world['RightForeArm'] = elbowR.clone();
   world['RightHand'] = wristR.clone();
 
@@ -72,19 +82,25 @@ export function buildSkeletonFromMarkers(markers, bbox) {
   world['LeftHand_End'] = wristL.clone().add(wristL.clone().sub(elbowL).normalize().multiplyScalar(0.08 * (topY - floorY)));
   world['RightHand_End'] = wristR.clone().add(wristR.clone().sub(elbowR).normalize().multiplyScalar(0.08 * (topY - floorY)));
 
-  // Hip sockets: laterally offset from Hips toward each knee's X.
+  // Hip sockets: laterally offset from Hips, each toward its own knee's side
+  // (marker-relative sign, facing-agnostic like the arms above).
   const hipHalf = Math.abs(kneeL.x - kneeR.x) / 2 * 0.85;
-  world['LeftUpLeg'] = V(centerX + hipHalf, groin.y, midZ);
+  const leftLegSign = Math.sign(kneeL.x - centerX) || 1;
+  const rightLegSign = Math.sign(kneeR.x - centerX) || -1;
+  // Toes point "forward" = the direction the character faces. `facing` is the
+  // side the rig camera sat on (-1 => faces -Z, +1 => faces +Z), so forward Z
+  // = facing. footFwd is applied toward +Z*facing.
+  const footFwd = 0.10 * (topY - floorY) * facing;
+  world['LeftUpLeg'] = V(centerX + leftLegSign * hipHalf, groin.y, midZ);
   world['LeftLeg'] = kneeL.clone();
   world['LeftFoot'] = V(kneeL.x, floorY + (topY - floorY) * 0.04, kneeL.z);
-  const footFwd = 0.10 * (topY - floorY);
-  world['LeftToeBase'] = V(kneeL.x, floorY + (topY - floorY) * 0.01, kneeL.z - footFwd);
-  world['LeftToe_End'] = V(kneeL.x, floorY, kneeL.z - footFwd * 1.6);
-  world['RightUpLeg'] = V(centerX - hipHalf, groin.y, midZ);
+  world['LeftToeBase'] = V(kneeL.x, floorY + (topY - floorY) * 0.01, kneeL.z + footFwd);
+  world['LeftToe_End'] = V(kneeL.x, floorY, kneeL.z + footFwd * 1.6);
+  world['RightUpLeg'] = V(centerX + rightLegSign * hipHalf, groin.y, midZ);
   world['RightLeg'] = kneeR.clone();
   world['RightFoot'] = V(kneeR.x, floorY + (topY - floorY) * 0.04, kneeR.z);
-  world['RightToeBase'] = V(kneeR.x, floorY + (topY - floorY) * 0.01, kneeR.z - footFwd);
-  world['RightToe_End'] = V(kneeR.x, floorY, kneeR.z - footFwd * 1.6);
+  world['RightToeBase'] = V(kneeR.x, floorY + (topY - floorY) * 0.01, kneeR.z + footFwd);
+  world['RightToe_End'] = V(kneeR.x, floorY, kneeR.z + footFwd * 1.6);
 
   // Parent → children tree (names without the mixamorig: prefix here).
   const tree = {
@@ -341,8 +357,8 @@ export function skinMesh(mesh, skeleton, bones, midpoints, crotchY, rigidThresho
 
 // Full pipeline helper: given the loaded model root + a markers map + bbox,
 // returns { root, skeleton, skinnedMeshes } ready for GLTFExporter.
-export function rigModel(modelRoot, markers, bbox) {
-  const { bones, skeleton, hipsBone, crotchY } = buildSkeletonFromMarkers(markers, bbox);
+export function rigModel(modelRoot, markers, bbox, facing = -1) {
+  const { bones, skeleton, hipsBone, crotchY } = buildSkeletonFromMarkers(markers, bbox, facing);
   hipsBone.updateMatrixWorld(true);
   const midpoints = computeBoneMidpoints(bones);
 
