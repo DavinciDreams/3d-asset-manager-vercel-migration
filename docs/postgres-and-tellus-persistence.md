@@ -46,7 +46,28 @@ Set these on the Tellus Cloudflare Worker:
 ```bash
 TELLUS_PERSISTENCE_API_BASE=https://your-asset-manager.example.com
 TELLUS_PERSISTENCE_API_TOKEN=the-same-long-random-shared-secret
+TELLUS_ADMIN_API_TOKEN=separate-long-random-admin-secret
+TELLUS_ADMIN_USERNAME=tellusadmin
 ```
+
+When Tellus writes assets or worlds for a specific asset-manager account, include
+one of these headers with the service token:
+
+```text
+Authorization: Bearer $TELLUS_PERSISTENCE_API_TOKEN
+X-Asset-Username: rsafier
+```
+
+`X-Asset-User-Id` is also supported when Tellus already knows the asset-manager
+user id.
+
+All in-world asset generation workers, including Instant Mesh and Pixal3D-style
+pipelines, should upload through `TELLUS_ADMIN_API_TOKEN`. If Tellus does not
+send a per-request owner header, the asset manager assigns the upload/world to
+`TELLUS_ADMIN_USERNAME` or `TELLUS_ADMIN_USER_ID`. Admin-token uploads are
+automatically tagged with `tellus`, `generated`, and `in-world-generation`, and
+receive the `generated` asset type, so Tellus search and asset-store search
+couple those generated assets even when generator titles differ.
 
 ## World API
 
@@ -67,7 +88,24 @@ PATCH /api/tellus/worlds/:worldId
 
 World records carry `is_public`, `owner_id`, `source`, and a full JSON state
 payload. The `main` Tellus world can remain public, while private worlds can be
-owned by logged-in asset-manager users.
+owned by logged-in asset-manager users or by service-token writes that include
+`X-Asset-Username` / `X-Asset-User-Id`.
+
+## Asset Search for Tellus
+
+Tellus can search the coupled asset store through:
+
+```text
+GET /api/models?include_private=true&search=instant%20mesh
+GET /api/models?user_only=true
+```
+
+`include_private=true` requires the service token and returns matches across
+public/private owner inventories. `user_only=true` can be combined with
+`X-Asset-Username` or `X-Asset-User-Id` to view one account. Search matches
+names, descriptions, original filenames, tags, asset categories/styles/types, AI
+metadata, and runtime metadata, so asset-store approval metadata is visible to
+Tellus search even when titles differ.
 
 ## Mongo Migration
 

@@ -20,6 +20,16 @@ os.environ.pop("ZAI_API_KEY", None)
 os.environ.pop("Z_AI_API_KEY", None)
 
 from app import create_app
+from app.models import User
+
+
+def _ensure_user(username):
+    user = User.get_by_username(username)
+    if user:
+        return user
+    user = User(username=username, email=f"{username}@example.com")
+    user.set_password("pw123456")
+    return user.save()
 
 
 def test_bearer_upload_enrich_approve_and_bundle():
@@ -134,6 +144,100 @@ def test_bearer_upload_enrich_approve_and_bundle():
     assert download.status_code == 200
     assert download.content_type == "application/zip"
     assert download.data.startswith(b"PK")
+
+
+def test_service_token_can_target_owners_search_private_metadata_and_dedupe_across_titles():
+    app = create_app()
+    client = app.test_client()
+
+    with app.app_context():
+        rsafier = _ensure_user("rsafier")
+        lisa = _ensure_user("lisa")
+
+    glb = b"glTF-service-targets" + b"\x00" * 64
+    headers = {
+        "Authorization": "Bearer test-token",
+        "X-Asset-Username": "rsafier",
+    }
+    upload = client.post("/api/upload", headers=headers, data={
+        "name": "Blue Thing From Source",
+        "is_public": "false",
+        "tags": "instant mesh, pixel 3d, tellus",
+        "asset_category": "character",
+        "asset_types": "generated, static-mesh",
+        "runtime_metadata": json.dumps({"behaviors": ["placeable"]}),
+        "file": (io.BytesIO(glb), "source_generation.glb"),
+    }, content_type="multipart/form-data")
+    assert upload.status_code == 201, upload.get_json()
+    model = upload.get_json()["model"]
+
+    all_private = client.get(
+        "/api/models?include_private=true&search=instant",
+        headers={"Authorization": "Bearer test-token"},
+    )
+    assert all_private.status_code == 200, all_private.get_json()
+    assert [m["id"] for m in all_private.get_json()["models"]] == [model["id"]]
+    assert all_private.get_json()["models"][0]["owner"]["id"] == rsafier.id
+
+    rsafier_private = client.get(
+        "/api/models?user_only=true",
+        headers=headers,
+    )
+    assert rsafier_private.status_code == 200, rsafier_private.get_json()
+    assert [m["id"] for m in rsafier_private.get_json()["models"]] == [model["id"]]
+
+    lisa_duplicate = client.post("/api/upload", headers={
+        "Authorization": "Bearer test-token",
+        "X-Asset-Username": "lisa",
+    }, data={
+        "name": "Different Pixel 3D Title",
+        "is_public": "false",
+        "file": (io.BytesIO(glb), "renamed_generation.glb"),
+    }, content_type="multipart/form-data")
+    assert lisa_duplicate.status_code == 409, lisa_duplicate.get_json()
+    assert "duplicate model" in lisa_duplicate.get_json()["error"].lower()
+
+    lisa_private = client.get(
+        "/api/models?user_only=true",
+        headers={
+            "Authorization": "Bearer test-token",
+            "X-Asset-Username": "lisa",
+        },
+    )
+    assert lisa_private.status_code == 200, lisa_private.get_json()
+    assert lisa_private.get_json()["models"] == []
+    assert lisa.id
+
+
+def test_tellus_admin_token_defaults_owner_and_generation_search_metadata(monkeypatch):
+    monkeypatch.setenv("TELLUS_ADMIN_API_TOKEN", "tellus-admin-token")
+    monkeypatch.setenv("TELLUS_ADMIN_USERNAME", "tellusadmin")
+    app = create_app()
+    client = app.test_client()
+
+    with app.app_context():
+        admin = _ensure_user("tellusadmin")
+
+    upload = client.post("/api/upload", headers={
+        "Authorization": "Bearer tellus-admin-token",
+    }, data={
+        "name": "Instant Mesh Castle Result",
+        "is_public": "false",
+        "file": (io.BytesIO(b"glTF-instant-mesh" + b"\x00" * 64), "instant_mesh_castle.glb"),
+    }, content_type="multipart/form-data")
+    assert upload.status_code == 201, upload.get_json()
+    model = upload.get_json()["model"]
+    assert model["tags"] == ["tellus", "generated", "in-world-generation"]
+    assert "generated" in model["asset_types"]
+
+    search = client.get(
+        "/api/models?include_private=true&search=in-world-generation",
+        headers={"Authorization": "Bearer tellus-admin-token"},
+    )
+    assert search.status_code == 200, search.get_json()
+    models = search.get_json()["models"]
+    assert [m["id"] for m in models] == [model["id"]]
+    assert models[0]["owner"]["id"] == admin.id
 
 
 def test_openapi_documents_workflow_and_bearer_auth():

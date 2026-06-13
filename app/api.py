@@ -164,6 +164,7 @@ def _configured_bearer_tokens():
         os.environ.get('ASSET_MANAGER_API_TOKEN'),
         os.environ.get('API_UPLOAD_TOKEN'),
         os.environ.get('TELLUS_PERSISTENCE_API_TOKEN'),
+        os.environ.get('TELLUS_ADMIN_API_TOKEN'),
     ]
     return [token.strip() for token in tokens if token and token.strip()]
 
@@ -171,6 +172,13 @@ def _configured_bearer_tokens():
 def _bearer_token_valid():
     header = request.headers.get('Authorization', '')
     return any(hmac.compare_digest(header, f'Bearer {token}') for token in _configured_bearer_tokens())
+
+
+def _tellus_admin_token_valid():
+    token = (os.environ.get('TELLUS_ADMIN_API_TOKEN') or '').strip()
+    if not token:
+        return False
+    return hmac.compare_digest(request.headers.get('Authorization', ''), f'Bearer {token}')
 
 
 def _bearer_token():
@@ -191,26 +199,47 @@ def _upload_actor_user():
     return None, 'Authentication required'
 
 
+def _service_target_user():
+    """Resolve the user a trusted service token wants to act as."""
+    user_id = (
+        request.headers.get('X-Asset-User-Id')
+        or request.headers.get('X-User-Id')
+        or (_tellus_admin_token_valid() and os.environ.get('TELLUS_ADMIN_USER_ID'))
+        or os.environ.get('API_UPLOAD_USER_ID')
+        or os.environ.get('ASSET_MANAGER_DEFAULT_USER_ID')
+    )
+    user = User.get_by_id(user_id) if user_id else None
+    if user:
+        return user
+
+    username = (
+        request.headers.get('X-Asset-Username')
+        or request.headers.get('X-Username')
+        or (_tellus_admin_token_valid() and os.environ.get('TELLUS_ADMIN_USERNAME'))
+        or os.environ.get('API_UPLOAD_USERNAME')
+        or os.environ.get('ASSET_MANAGER_DEFAULT_USERNAME')
+    )
+    return User.get_by_username(username) if username else None
+
+
+def _with_generation_defaults(tags, asset_types):
+    if not _tellus_admin_token_valid():
+        return tags, asset_types
+    tags = Model3D.normalize_tags([*(tags or []), 'tellus', 'generated', 'in-world-generation'])
+    asset_types = Model3D.normalize_tags([*(asset_types or []), 'generated'])
+    return tags, asset_types
+
+
 def _api_principal(required_scope='upload'):
     if current_user.is_authenticated:
         return current_user, False
-    api_key = ApiKey.verify_token(_bearer_token(), required_scope='upload')
+    api_key = ApiKey.verify_token(_bearer_token(), required_scope=required_scope)
     if api_key:
         user = User.get_by_id(api_key.user_id)
         return user, False
     if not _bearer_token_valid():
         return None, False
-    user_id = (
-        request.headers.get('X-Asset-User-Id')
-        or request.headers.get('X-User-Id')
-        or os.environ.get('API_UPLOAD_USER_ID')
-        or os.environ.get('ASSET_MANAGER_DEFAULT_USER_ID')
-    )
-    user = User.get_by_id(user_id) if user_id else None
-    if not user:
-        username = os.environ.get('API_UPLOAD_USERNAME') or os.environ.get('ASSET_MANAGER_DEFAULT_USERNAME')
-        user = User.get_by_username(username) if username else None
-    return user, True
+    return _service_target_user(), True
 
 
 def _require_api_principal():
@@ -323,6 +352,7 @@ def list_models():
         per_page = min(request.args.get('per_page', 20, type=int), 100)  # Max 100 per page
         search = request.args.get('search', '').strip()
         user_only = request.args.get('user_only', 'false').lower() == 'true'
+        include_private = request.args.get('include_private', 'false').lower() == 'true'
         category = request.args.get('category')
         styles = Model3D.normalize_tags(request.args.getlist('style'))
         asset_types = Model3D.normalize_tags(request.args.getlist('type'))
@@ -335,6 +365,11 @@ def list_models():
                 category=category, style=styles or None, asset_type=asset_types or None)
         elif user_only and service:
             return jsonify({'error': 'API token is valid, but no API upload user is configured.'}), 409
+        elif include_private and service:
+            models, total = Model3D.list_models(
+                page=page, per_page=per_page, search=search if search else None,
+                category=category, style=styles or None, asset_type=asset_types or None,
+                public_only=False)
         else:
             # Get public models
             models, total = Model3D.get_public_models(
@@ -1729,7 +1764,8 @@ def put_tellus_world_state(world_id):
         if payload.get('worldId') not in (None, world_id):
             return jsonify({'error': 'worldId mismatch'}), 400
 
-        owner_id = current_user.id if current_user.is_authenticated else None
+        principal, service = _api_principal()
+        owner_id = principal.id if principal and (service or current_user.is_authenticated) else None
         world = WorldState.upsert(world_id, payload, owner_id=owner_id)
         return jsonify(world.to_api(include_state=True))
     except Exception as e:
@@ -2883,6 +2919,7 @@ def upload_model():
         asset_category = Model3D.normalize_category(request.form.get('asset_category'))
         asset_styles = Model3D.normalize_tags(request.form.get('asset_styles', ''))
         asset_types = Model3D.normalize_tags(request.form.get('asset_types', ''))
+        tags, asset_types = _with_generation_defaults(tags, asset_types)
         runtime_metadata = Model3D.normalize_runtime_metadata(request.form.get('runtime_metadata'))
 
         # Collect all uploaded files (supports repeated 'file' fields).

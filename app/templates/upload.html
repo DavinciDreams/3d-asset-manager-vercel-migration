@@ -96,7 +96,7 @@
                            id="file"
                            name="file"
                            multiple
-                           accept=".obj,.fbx,.gltf,.glb,.dae,.3ds,.ply,.stl,.vrm,.vrma"
+                           accept=".obj,.fbx,.gltf,.glb,.dae,.3ds,.ply,.stl,.vrm,.vrma,.bvh"
                            class="hidden">
                     <!-- Whole folder (webkitdirectory). Same handler, separate input. -->
                     <input type="file"
@@ -119,7 +119,7 @@
                         </button>
                     </div>
                     <p class="text-sm text-gray-500 mt-2">
-                        Supported: OBJ, FBX, GLTF, GLB, DAE, 3DS, PLY, STL, VRM, VRMA
+                        Supported: OBJ, FBX, GLTF, GLB, DAE, 3DS, PLY, STL, VRM, VRMA, BVH
                         (Max {{ max_upload_mb }}MB per file)
                     </p>
                     <p class="text-xs text-gray-400 mt-1">
@@ -169,7 +169,7 @@
 </div>
 
 <script>
-const ALLOWED_EXTENSIONS = ['obj', 'fbx', 'gltf', 'glb', 'dae', '3ds', 'ply', 'stl', 'vrm', 'vrma'];
+const ALLOWED_EXTENSIONS = ['obj', 'fbx', 'gltf', 'glb', 'dae', '3ds', 'ply', 'stl', 'vrm', 'vrma', 'bvh'];
 const MAX_UPLOAD_MB = {{ max_upload_mb }};
 const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024;
 

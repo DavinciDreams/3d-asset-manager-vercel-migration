@@ -9,7 +9,7 @@ Keep this in sync with ``app/api.py`` when routes change.
 
 # Allowed upload extensions are duplicated from create_app() config so the spec
 # stays self-contained; update both if the list changes.
-ALLOWED_EXTENSIONS = ['obj', 'fbx', 'gltf', 'glb', 'dae', '3ds', 'ply', 'stl', 'vrm', 'vrma']
+ALLOWED_EXTENSIONS = ['obj', 'fbx', 'gltf', 'glb', 'dae', '3ds', 'ply', 'stl', 'vrm', 'vrma', 'bvh']
 
 
 def _model_summary_schema():
@@ -102,7 +102,8 @@ def get_openapi_spec(base_url=''):
                 'REST API for browsing, uploading, viewing and downloading 3D '
                 'models. Authenticated endpoints accept either the session cookie '
                 'set by `/auth/login` or `Authorization: Bearer <token>` when '
-                'ASSET_MANAGER_API_TOKEN/API_UPLOAD_TOKEN is configured.'
+                'ASSET_MANAGER_API_TOKEN/API_UPLOAD_TOKEN/TELLUS_ADMIN_API_TOKEN '
+                'is configured.'
             ),
             'version': '1.0.0',
         },
@@ -356,7 +357,10 @@ def get_openapi_spec(base_url=''):
                     'description': (
                         'Returns public models by default. Pass `user_only=true` '
                         'with an authenticated session to list the current '
-                        "user's models instead."
+                        "user's models instead. Trusted service tokens can pass "
+                        '`include_private=true` to search all owner inventories, '
+                        'or combine `user_only=true` with `X-Asset-Username` / '
+                        '`X-Asset-User-Id` to inspect one account.'
                     ),
                     'parameters': [
                         {
@@ -370,13 +374,28 @@ def get_openapi_spec(base_url=''):
                         },
                         {
                             'name': 'search', 'in': 'query',
-                            'description': 'Full-text search over name and description.',
+                            'description': 'Search over title, description, filename, tags, asset facets, AI metadata, and runtime metadata.',
                             'schema': {'type': 'string'},
                         },
                         {
                             'name': 'user_only', 'in': 'query',
                             'description': "Restrict to the logged-in user's models.",
                             'schema': {'type': 'boolean', 'default': False},
+                        },
+                        {
+                            'name': 'include_private', 'in': 'query',
+                            'description': 'Trusted service tokens only. Include private assets across all owners.',
+                            'schema': {'type': 'boolean', 'default': False},
+                        },
+                        {
+                            'name': 'X-Asset-Username', 'in': 'header',
+                            'description': 'Trusted service tokens only. Resolve user_only=true as this username.',
+                            'schema': {'type': 'string'},
+                        },
+                        {
+                            'name': 'X-Asset-User-Id', 'in': 'header',
+                            'description': 'Trusted service tokens only. Resolve user_only=true as this user id.',
+                            'schema': {'type': 'string'},
                         },
                     ],
                     'responses': {
@@ -418,6 +437,90 @@ def get_openapi_spec(base_url=''):
                         },
                         '401': _error_response('Authentication required'),
                         '500': _error_response('Failed to retrieve user models'),
+                    },
+                }
+            },
+            '/vrma': {
+                'get': {
+                    'tags': ['Files'],
+                    'summary': 'List VRMA animation clips',
+                    'description': (
+                        'Lists uploaded .vrma clips plus generated VRMA clips, '
+                        'including the external-client `clips` contract and the '
+                        'legacy in-app `animations` shape.'
+                    ),
+                    'responses': {
+                        '200': {
+                            'description': 'Available VRMA clips',
+                            'content': {
+                                'application/json': {
+                                    'schema': {
+                                        'type': 'object',
+                                        'properties': {
+                                            'clips': {
+                                                'type': 'array',
+                                                'items': {
+                                                    'type': 'object',
+                                                    'properties': {
+                                                        'id': {'type': 'string'},
+                                                        'name': {'type': 'string'},
+                                                        'downloadUrl': {'type': 'string'},
+                                                        'source': {'type': 'string', 'enum': ['upload', 'generated']},
+                                                    },
+                                                },
+                                            },
+                                            'animations': {'type': 'array', 'items': {'type': 'object'}},
+                                            'default_id': {'type': 'string', 'nullable': True},
+                                            'default_url': {'type': 'string', 'nullable': True},
+                                        },
+                                    }
+                                }
+                            },
+                        },
+                    },
+                }
+            },
+            '/vrm': {
+                'get': {
+                    'tags': ['Files'],
+                    'summary': 'List VRM avatars',
+                    'description': (
+                        'Lists visible VRM avatars, including native .vrm uploads '
+                        'and derived GLB-to-VRM avatar variants.'
+                    ),
+                    'responses': {
+                        '200': {
+                            'description': 'Available VRM avatars',
+                            'content': {
+                                'application/json': {
+                                    'schema': {
+                                        'type': 'object',
+                                        'properties': {
+                                            'avatars': {
+                                                'type': 'array',
+                                                'items': {
+                                                    'type': 'object',
+                                                    'properties': {
+                                                        'id': {'type': 'string'},
+                                                        'model_id': {'type': 'string'},
+                                                        'name': {'type': 'string'},
+                                                        'source': {'type': 'string', 'enum': ['upload', 'generated']},
+                                                        'view_url': {'type': 'string'},
+                                                        'download_url': {'type': 'string'},
+                                                        'thumbnail_url': {'type': 'string', 'nullable': True},
+                                                        'size': {'type': 'integer'},
+                                                        'optimized': {'type': 'boolean'},
+                                                        'optimized_url': {'type': 'string', 'nullable': True},
+                                                        'optimized_size': {'type': 'integer', 'nullable': True},
+                                                    },
+                                                },
+                                            },
+                                            'count': {'type': 'integer'},
+                                        },
+                                    }
+                                }
+                            },
+                        },
                     },
                 }
             },
@@ -567,6 +670,158 @@ def get_openapi_spec(base_url=''):
                         '500': _error_response('Delete failed'),
                     },
                 },
+            },
+            '/model/{model_id}/to-vrm': {
+                'post': {
+                    'tags': ['Workflows'],
+                    'summary': 'Convert a rigged GLB to a VRM avatar',
+                    'description': (
+                        'Owner-only. Injects VRMC_vrm humanoid metadata into a '
+                        'rigged binary GLB and stores the result as the model\'s '
+                        '`vrm` variant. The source must already be skinned/rigged, '
+                        'for example by mesh2motion.'
+                    ),
+                    'security': [{'sessionCookie': []}],
+                    'parameters': [
+                        {
+                            'name': 'model_id', 'in': 'path', 'required': True,
+                            'schema': {'type': 'string'},
+                        }
+                    ],
+                    'responses': {
+                        '200': {
+                            'description': 'VRM variant created',
+                            'content': {
+                                'application/json': {
+                                    'schema': {
+                                        'type': 'object',
+                                        'properties': {
+                                            'success': {'type': 'boolean'},
+                                            'variant': {'type': 'object'},
+                                            'optimized': {'type': 'boolean'},
+                                        },
+                                    }
+                                }
+                            },
+                        },
+                        '400': _error_response('Model has no binary GLB data to convert'),
+                        '401': _error_response('Authentication required'),
+                        '403': _error_response('Only the owner can convert this model'),
+                        '404': _error_response('Model not found'),
+                        '413': _error_response('Model is too large to convert'),
+                        '422': _error_response('VRM conversion failed'),
+                        '500': _error_response('Could not convert model to VRM'),
+                    },
+                }
+            },
+            '/model/{model_id}/vrm': {
+                'get': {
+                    'tags': ['Files'],
+                    'summary': 'Fetch a derived VRM avatar variant',
+                    'description': 'Returns the GLB-to-VRM avatar variant inline, or as an attachment with `download=1`.',
+                    'parameters': [
+                        {
+                            'name': 'model_id', 'in': 'path', 'required': True,
+                            'schema': {'type': 'string'},
+                        },
+                        {
+                            'name': 'download', 'in': 'query',
+                            'schema': {'type': 'boolean', 'default': False},
+                        },
+                    ],
+                    'responses': {
+                        '200': {
+                            'description': 'VRM binary',
+                            'content': {
+                                'model/gltf-binary': {
+                                    'schema': {'type': 'string', 'format': 'binary'}
+                                }
+                            },
+                        },
+                        '304': {'description': 'Not modified'},
+                        '403': _error_response('Access denied'),
+                        '404': _error_response('Model or VRM variant not found'),
+                        '500': _error_response('VRM fetch failed'),
+                    },
+                }
+            },
+            '/model/{model_id}/optimize-vrm': {
+                'post': {
+                    'tags': ['Workflows'],
+                    'summary': 'Create a rig-safe optimized VRM variant',
+                    'description': (
+                        'Owner-only. Optimizes the derived VRM avatar without mesh '
+                        'simplification, preserving the humanoid rig for VRMA playback.'
+                    ),
+                    'security': [{'sessionCookie': []}],
+                    'parameters': [
+                        {
+                            'name': 'model_id', 'in': 'path', 'required': True,
+                            'schema': {'type': 'string'},
+                        },
+                        {
+                            'name': 'texture_limit', 'in': 'query',
+                            'schema': {'type': 'integer', 'default': 2048},
+                        },
+                    ],
+                    'responses': {
+                        '200': {
+                            'description': 'Optimized VRM variant created',
+                            'content': {
+                                'application/json': {
+                                    'schema': {
+                                        'type': 'object',
+                                        'properties': {
+                                            'success': {'type': 'boolean'},
+                                            'variant': {'type': 'object'},
+                                            'download_url': {'type': 'string'},
+                                            'source_size': {'type': 'integer'},
+                                            'optimized_size': {'type': 'integer'},
+                                            'savings_ratio': {'type': 'number'},
+                                        },
+                                    }
+                                }
+                            },
+                        },
+                        '400': _error_response('No VRM avatar to optimize'),
+                        '401': _error_response('Authentication required'),
+                        '403': _error_response('Only the owner can optimize this avatar'),
+                        '404': _error_response('Model not found'),
+                        '422': _error_response('VRM optimization failed'),
+                        '500': _error_response('Could not optimize VRM'),
+                    },
+                }
+            },
+            '/model/{model_id}/optimized-vrm': {
+                'get': {
+                    'tags': ['Files'],
+                    'summary': 'Fetch the optimized VRM avatar variant',
+                    'description': 'Returns the rig-safe optimized VRM variant inline, or as an attachment with `download=1`.',
+                    'parameters': [
+                        {
+                            'name': 'model_id', 'in': 'path', 'required': True,
+                            'schema': {'type': 'string'},
+                        },
+                        {
+                            'name': 'download', 'in': 'query',
+                            'schema': {'type': 'boolean', 'default': False},
+                        },
+                    ],
+                    'responses': {
+                        '200': {
+                            'description': 'Optimized VRM binary',
+                            'content': {
+                                'model/gltf-binary': {
+                                    'schema': {'type': 'string', 'format': 'binary'}
+                                }
+                            },
+                        },
+                        '304': {'description': 'Not modified'},
+                        '403': _error_response('Access denied'),
+                        '404': _error_response('Model or optimized VRM variant not found'),
+                        '500': _error_response('Optimized VRM fetch failed'),
+                    },
+                }
             },
             '/download/{model_id}': {
                 'get': {
@@ -1170,9 +1425,27 @@ def get_openapi_spec(base_url=''):
                         '**Response shape:** a single-file request returns '
                         '`{success, message, model}`; a multi-file request returns '
                         '`{success, message, uploaded[], errors[]}`. Duplicate '
-                        'model binaries are rejected by SHA-256 content hash.'
+                        'model binaries are rejected by SHA-256 content hash.\n\n'
+                        'Trusted service tokens can upload on behalf of a specific '
+                        'account with `X-Asset-Username` or `X-Asset-User-Id`. '
+                        '`TELLUS_ADMIN_API_TOKEN` can also default ownership through '
+                        '`TELLUS_ADMIN_USERNAME` / `TELLUS_ADMIN_USER_ID`, and '
+                        'admin-token uploads are tagged as Tellus in-world generated '
+                        'assets for store/search coupling.'
                     ),
-                    'security': [{'sessionCookie': []}, {'uploadApiKey': []}],
+                    'security': [{'sessionCookie': []}, {'uploadApiKey': []}, {'bearerAuth': []}],
+                    'parameters': [
+                        {
+                            'name': 'X-Asset-Username', 'in': 'header',
+                            'description': 'Trusted service tokens only. Own this upload as the named user.',
+                            'schema': {'type': 'string'},
+                        },
+                        {
+                            'name': 'X-Asset-User-Id', 'in': 'header',
+                            'description': 'Trusted service tokens only. Own this upload as the given user id.',
+                            'schema': {'type': 'string'},
+                        },
+                    ],
                     'requestBody': {
                         'required': True,
                         'content': {
