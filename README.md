@@ -110,6 +110,11 @@ ids in `/api/tellus/worlds/:worldId/state` are tagged with normalized
 `worldId`, `world_id`, `tellusWorldId`, `tellus_world_id`, or
 `X-Tellus-World-Id` may also be sent to stamp the same tag immediately.
 
+To let a human store account clean up admin-owned assets, set one or more of
+`ASSET_MANAGER_ADMIN_USERNAMES`, `ASSET_MANAGER_ADMIN_EMAILS`, or
+`ASSET_MANAGER_ADMIN_USER_IDS`. These are comma-separated allowlists for logged
+in users who can view, edit, enrich, and delete assets owned by any account.
+
 ## AI Metadata Enrichment
 
 The asset manager can generate catalog titles, descriptions, and tags from model

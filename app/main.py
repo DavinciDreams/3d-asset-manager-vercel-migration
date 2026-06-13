@@ -1,6 +1,7 @@
 from flask import Blueprint, render_template, request, redirect, url_for, flash, current_app, session
 from flask_login import login_required, current_user
 from app.models import ApiKey, Model3D, ModelVariant, User
+from app.permissions import can_manage_model, is_asset_admin_user
 from werkzeug.utils import secure_filename
 import hashlib
 import io
@@ -277,7 +278,8 @@ def browse():
                            sort=sort, tags=tags, all_tags=all_tags,
                            category=category, styles=styles,
                            asset_types=asset_types, facets=facets,
-                           has_vrm=has_vrm)
+                           has_vrm=has_vrm,
+                           asset_admin=is_asset_admin_user(current_user) if current_user.is_authenticated else False)
 
 
 @main_bp.route('/local-assets')
@@ -296,10 +298,11 @@ def model_detail(model_id):
             flash('Model not found.', 'error')
             return redirect(url_for('main.browse'))
         
+        user_can_manage_model = can_manage_model(current_user, model) if current_user.is_authenticated else False
         
         # Check access permissions
         if not model.is_public:
-            if not current_user.is_authenticated or model.user_id != current_user.id:
+            if not user_can_manage_model:
                 flash('You do not have permission to view this model.', 'error')
                 return redirect(url_for('main.browse'))
         
@@ -307,8 +310,7 @@ def model_detail(model_id):
         owner = User.get_by_id(model.user_id)
 
         # Tag suggestions for the owner's edit form (autocomplete).
-        all_tags = Model3D.get_user_tags(model.user_id) if (
-            current_user.is_authenticated and current_user.id == model.user_id) else []
+        all_tags = Model3D.get_user_tags(model.user_id) if user_can_manage_model else []
 
         # Game-optimized variant (if any) so the detail page can show the
         # Original/Game-Optimized toggle + download on a fresh load.
@@ -339,7 +341,8 @@ def model_detail(model_id):
                                fixed_eyes_variant=fixed_eyes_variant,
                                vrm_variant=vrm_variant,
                                rigged_variant=rigged_variant,
-                               model_is_meshopt=model_is_meshopt)
+                               model_is_meshopt=model_is_meshopt,
+                               can_manage_model=user_can_manage_model)
         
     except Exception as e:
         print(f"Model detail error: {e}")

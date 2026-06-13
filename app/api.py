@@ -6,6 +6,7 @@ from sqlalchemy import select, update
 from app.db import asset_files, models as model_rows, optimization_jobs
 from app.models import ApiKey, AssetBundle, Model3D, ModelVariant, User, WorldState
 from app.openapi import get_openapi_spec
+from app.permissions import can_manage_model, is_asset_admin_user
 import hashlib
 import hmac
 import io
@@ -283,6 +284,8 @@ def _can_access_model(model):
 def _can_access_model_as(model, principal=None, service=False):
     if service or _can_access_model(model):
         return True
+    if principal and is_asset_admin_user(principal):
+        return True
     return bool(principal and model.user_id == principal.id)
 
 
@@ -439,7 +442,7 @@ def _can_write_model(model):
     user, service = _api_principal()
     if service:
         return True
-    return bool(user and model.user_id == user.id)
+    return can_manage_model(user, model)
 
 
 def _can_read_world(world):
@@ -1909,7 +1912,7 @@ def get_preview(model_id):
 
 def _serialize_browse_card(model):
     """Compact payload the browse gallery card needs (lazy-loaded client-side)."""
-    is_owner = current_user.is_authenticated and current_user.id == model.user_id
+    is_owner = can_manage_model(current_user, model) if current_user.is_authenticated else False
     # Live preview is possible for renderable mesh formats (the Three.js viewer
     # handles GLB/GLTF incl. Draco/meshopt). VRM/VRMA use other viewers, so we
     # leave those to their thumbnail/icon on browse.

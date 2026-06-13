@@ -72,6 +72,11 @@ Tellus saves world state: assets referenced by id in
 Tellus may also send `worldId`, `world_id`, `tellusWorldId`,
 `tellus_world_id`, or `X-Tellus-World-Id` to stamp that tag immediately.
 
+For asset-store cleanup, set `ASSET_MANAGER_ADMIN_USERNAMES`,
+`ASSET_MANAGER_ADMIN_EMAILS`, or `ASSET_MANAGER_ADMIN_USER_IDS` to allow logged
+in human users to view, edit, enrich, and delete assets across owners, including
+assets uploaded under the Tellus admin account. Values are comma-separated.
+
 GLB/GLTF uploads are inspected directly for structural metadata. Skinned files
 receive the `rigged` asset type, files with animation clips receive `animated`,
 and clip names are listed in `runtime_metadata.animations`. Assets without a rig

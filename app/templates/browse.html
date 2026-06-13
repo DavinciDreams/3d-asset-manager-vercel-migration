@@ -139,7 +139,7 @@
             {% for model in models.items %}
             <div class="model-card bg-white rounded-lg card-shadow hover-scale overflow-hidden flex flex-col">
                 <!-- Square preview -->
-                {% set is_owner = current_user.is_authenticated and current_user.id == model.user_id %}
+                {% set is_owner = current_user.is_authenticated and (current_user.id == model.user_id or asset_admin) %}
                 {% set viewable = model.viewable_file_id or model.file_format in ['glb', 'gltf'] %}
                 <a href="{{ url_for('main.model_detail', model_id=model.id) }}"
                    class="block relative aspect-square bg-gray-100 card-media"
