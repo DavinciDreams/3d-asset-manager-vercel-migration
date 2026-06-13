@@ -225,9 +225,27 @@ def _service_target_user():
 def _with_generation_defaults(tags, asset_types):
     if not _tellus_admin_token_valid():
         return tags, asset_types
-    tags = Model3D.normalize_tags([*(tags or []), 'tellus', 'generated', 'in-world-generation'])
-    asset_types = Model3D.normalize_tags([*(asset_types or []), 'generated'])
+    world_tag = _tellus_world_tag(_tellus_world_id())
+    tags = Model3D.normalize_tags([*(tags or []), 'tellus', *([world_tag] if world_tag else [])])
     return tags, asset_types
+
+
+def _tellus_world_id():
+    value = (
+        request.form.get('worldId')
+        or request.form.get('world_id')
+        or request.form.get('tellusWorldId')
+        or request.form.get('tellus_world_id')
+        or request.headers.get('X-Tellus-World-Id')
+        or request.headers.get('X-World-Id')
+    )
+    return str(value or '').strip()
+
+
+def _tellus_world_tag(world_id):
+    cleaned = ''.join(c if c.isalnum() else '-' for c in str(world_id or '').strip().lower())
+    cleaned = '-'.join(part for part in cleaned.split('-') if part)
+    return f'tellus-world-{cleaned}' if cleaned else None
 
 
 def _api_principal(required_scope='upload'):
@@ -2022,12 +2040,14 @@ def _merge_tags(*tag_lists):
     return merged
 
 
-_PROVENANCE_TAGS = {'tellus', 'generated', 'in-world-generation', 'asset-store'}
-_PROVENANCE_ASSET_TYPES = {'generated'}
+_PROVENANCE_TAGS = {'tellus'}
 
 
-def _preserved_values(existing, protected):
-    return [value for value in Model3D.normalize_tags(existing or []) if value in protected]
+def _preserved_provenance_tags(existing):
+    return [
+        value for value in Model3D.normalize_tags(existing or [])
+        if value in _PROVENANCE_TAGS or value.startswith('tellus-world-')
+    ]
 
 
 def _run_ai_enrichment(model, data=None):
@@ -2064,13 +2084,10 @@ def _run_ai_enrichment(model, data=None):
         'updated_at': datetime.utcnow().isoformat(),
     }
     if overwrite:
-        model.tags = _merge_tags(_preserved_values(model.tags, _PROVENANCE_TAGS), model.ai_tags)
+        model.tags = _merge_tags(_preserved_provenance_tags(model.tags), model.ai_tags)
         model.asset_category = enriched.get('asset_category') or model.asset_category
         model.asset_styles = Model3D.normalize_tags(enriched.get('asset_styles', []))
-        model.asset_types = _merge_tags(
-            _preserved_values(model.asset_types, _PROVENANCE_ASSET_TYPES),
-            enriched.get('asset_types', []),
-        )
+        model.asset_types = Model3D.normalize_tags(enriched.get('asset_types', []))
         model.runtime_metadata = Model3D.normalize_runtime_metadata(enriched.get('runtime_metadata'))
         if include_title and enriched.get('title'):
             model.name = enriched['title']
@@ -3092,7 +3109,6 @@ def update_approval(model_id):
         model.tags = _merge_tags(
             model.tags,
             ['game-ready'] if model.approve_game_ready else [],
-            ['asset-store'] if model.approve_asset_store else [],
         )
         model.save()
         return jsonify({'success': True, 'model': _serialize_model(model)})

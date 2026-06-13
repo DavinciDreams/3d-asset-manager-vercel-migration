@@ -223,12 +223,13 @@ def test_tellus_admin_token_defaults_owner_and_generation_search_metadata(monkey
     }, data={
         "name": "Instant Mesh Castle Result",
         "is_public": "false",
+        "worldId": "Forest Hub",
         "file": (io.BytesIO(b"glTF-instant-mesh" + b"\x00" * 64), "instant_mesh_castle.glb"),
     }, content_type="multipart/form-data")
     assert upload.status_code == 201, upload.get_json()
     model = upload.get_json()["model"]
-    assert model["tags"] == ["tellus", "generated", "in-world-generation"]
-    assert "generated" in model["asset_types"]
+    assert model["tags"] == ["tellus", "tellus-world-forest-hub"]
+    assert model["asset_types"] == []
     assert model["has_thumbnail"] is False
     assert model["thumbnail_url"] is None
     assert model["has_game_optimized"] is False
@@ -247,7 +248,7 @@ def test_tellus_admin_token_defaults_owner_and_generation_search_metadata(monkey
         )
 
     search = client.get(
-        "/api/models?include_private=true&search=in-world-generation",
+        "/api/models?include_private=true&search=tellus-world-forest-hub",
         headers={"Authorization": "Bearer tellus-admin-token"},
     )
     assert search.status_code == 200, search.get_json()
@@ -292,10 +293,10 @@ def test_tellus_admin_token_defaults_owner_and_generation_search_metadata(monkey
     )
     assert enrich.status_code == 200, enrich.get_json()
     enriched_model = enrich.get_json()["model"]
-    assert {"tellus", "generated", "in-world-generation", "castle", "stone", "tower"}.issubset(
+    assert {"tellus", "tellus-world-forest-hub", "castle", "stone", "tower"}.issubset(
         set(enriched_model["tags"])
     )
-    assert {"generated", "prop"}.issubset(set(enriched_model["asset_types"]))
+    assert enriched_model["asset_types"] == ["prop"]
 
 
 def test_openapi_documents_workflow_and_bearer_auth():

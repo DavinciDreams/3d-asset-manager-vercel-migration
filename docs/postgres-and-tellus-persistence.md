@@ -65,9 +65,11 @@ All in-world asset generation workers, including Instant Mesh and Pixal3D-style
 pipelines, should upload through `TELLUS_ADMIN_API_TOKEN`. If Tellus does not
 send a per-request owner header, the asset manager assigns the upload/world to
 `TELLUS_ADMIN_USERNAME` or `TELLUS_ADMIN_USER_ID`. Admin-token uploads are
-automatically tagged with `tellus`, `generated`, and `in-world-generation`, and
-receive the `generated` asset type, so Tellus search and asset-store search
-couple those generated assets even when generator titles differ.
+automatically tagged with `tellus`. To couple an asset to the specific world
+where it is deployed, send `worldId`, `world_id`, `tellusWorldId`,
+`tellus_world_id`, or `X-Tellus-World-Id`; the asset receives a normalized
+`tellus-world-<world-id>` tag that Tellus search and asset-store search can use
+even when generator titles differ.
 
 ## World API
 

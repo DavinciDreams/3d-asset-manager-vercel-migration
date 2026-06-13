@@ -69,7 +69,7 @@ curl -X POST "https://your-asset-manager.example.com/api/upload" \
   -F "file=@model.glb" \
   -F "name=Golden Apple Tree" \
   -F "is_public=true" \
-  -F "tags=tellus,generated"
+  -F "tags=tellus"
 ```
 
 Tellus should store one of these generated keys in its generation backend as
@@ -89,7 +89,8 @@ curl -X POST "https://your-asset-manager.example.com/api/upload" \
   -H "X-Asset-Username: rsafier" \
   -F "file=@generated.glb" \
   -F "name=Generated Prop" \
-  -F "tags=tellus,generated"
+  -F "tags=tellus" \
+  -F "worldId=forest-hub"
 ```
 
 Service-token searches can use
@@ -102,9 +103,11 @@ Set `TELLUS_ADMIN_USERNAME` or `TELLUS_ADMIN_USER_ID` to the asset-manager
 account that should own default in-world generations. If a generation should
 belong to a specific player account, Tellus can still override the owner per
 request with `X-Asset-Username` or `X-Asset-User-Id`. Uploads made with the
-Tellus admin token automatically receive `tellus`, `generated`, and
-`in-world-generation` tags plus the `generated` asset type so they register in
-asset-store and Tellus search even when titles differ.
+Tellus admin token automatically receive the `tellus` tag. If the request also
+includes `worldId`, `world_id`, `tellusWorldId`, `tellus_world_id`, or the
+`X-Tellus-World-Id` header, the upload also receives a normalized
+`tellus-world-<world-id>` tag so Tellus and asset-store search can couple
+assets to the specific world where they are deployed.
 
 ## AI Metadata Enrichment
 

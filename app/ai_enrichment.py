@@ -65,8 +65,6 @@ def _heuristic_metadata(model):
         tags.append("3d-model")
     if model.approve_game_ready:
         tags.append("game-ready")
-    if model.approve_asset_store:
-        tags.append("asset-store")
     clean_name = model.name
     if not clean_name and model.original_filename:
         clean_name = model.original_filename.rsplit(".", 1)[0].replace("_", " ").replace("-", " ")

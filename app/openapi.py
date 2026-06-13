@@ -1436,8 +1436,9 @@ def get_openapi_spec(base_url=''):
                         'account with `X-Asset-Username` or `X-Asset-User-Id`. '
                         '`TELLUS_ADMIN_API_TOKEN` can also default ownership through '
                         '`TELLUS_ADMIN_USERNAME` / `TELLUS_ADMIN_USER_ID`, and '
-                        'admin-token uploads are tagged as Tellus in-world generated '
-                        'assets for store/search coupling.'
+                        'admin-token uploads are tagged with `tellus`. Send a '
+                        'world id to add a `tellus-world-<world-id>` tag for '
+                        'world-specific store/search coupling.'
                     ),
                     'security': [{'sessionCookie': []}, {'uploadApiKey': []}, {'bearerAuth': []}],
                     'parameters': [
@@ -1449,6 +1450,11 @@ def get_openapi_spec(base_url=''):
                         {
                             'name': 'X-Asset-User-Id', 'in': 'header',
                             'description': 'Trusted service tokens only. Own this upload as the given user id.',
+                            'schema': {'type': 'string'},
+                        },
+                        {
+                            'name': 'X-Tellus-World-Id', 'in': 'header',
+                            'description': 'Optional Tellus world id. Admin-token uploads receive a normalized tellus-world-<world-id> tag.',
                             'schema': {'type': 'string'},
                         },
                     ],
@@ -1482,6 +1488,10 @@ def get_openapi_spec(base_url=''):
                                         'runtime_metadata': {
                                             'type': 'string',
                                             'description': 'Optional JSON runtime metadata. See RuntimeMetadata schema.',
+                                        },
+                                        'worldId': {
+                                            'type': 'string',
+                                            'description': 'Optional Tellus world id. Also accepted as world_id, tellusWorldId, or tellus_world_id.',
                                         },
                                     },
                                 }
