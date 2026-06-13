@@ -852,6 +852,35 @@ def get_game_optimized(model_id):
 FIXED_EYES_MAX_BYTES = 200 * 1024 * 1024
 
 
+def _delete_file_quietly(file_id, label):
+    if not file_id:
+        return
+    try:
+        current_app.config['FILE_STORE'].delete(file_id)
+    except Exception as e:
+        print(f"{label} cleanup warning: {e}")
+
+
+def _delete_model_variant(model, kind):
+    variant = ModelVariant.get(model.id, kind)
+    file_id = variant.file_id if variant else None
+    if variant:
+        ModelVariant.delete_for(model.id, kind)
+    _delete_file_quietly(file_id, f"Old {kind} variant")
+    return bool(variant)
+
+
+def _invalidate_captured_media(model):
+    had_media = bool(model.thumbnail_file_id or model.preview_file_id)
+    _delete_file_quietly(model.thumbnail_file_id, 'Thumbnail')
+    _delete_file_quietly(model.preview_file_id, 'Preview')
+    if had_media:
+        model.thumbnail_file_id = None
+        model.preview_file_id = None
+        model.save()
+    return had_media
+
+
 @api_bp.route('/model/<model_id>/fixed-eyes', methods=['POST'])
 @login_required
 def post_fixed_eyes(model_id):
@@ -899,17 +928,19 @@ def post_fixed_eyes(model_id):
             settings={'has_blink': blink}, status='ready',
         )
         if old_file_id and old_file_id != str(file_id):
-            try:
-                fs.delete(old_file_id)
-            except Exception as e:
-                print(f"Old fixed-eyes blob {old_file_id} not deleted: {e}")
+            _delete_file_quietly(old_file_id, 'Old fixed-eyes blob')
+
+        # The fixed GLB is now the canonical preview source until a fresh game
+        # optimized variant is rebuilt from it. Clear stale media and stale game
+        # output immediately so browse/detail never show the pre-fix asset.
+        had_game = _delete_model_variant(model, 'game')
+        invalidated_media = _invalidate_captured_media(model)
 
         # Re-run game optimization so the preferred 'game' variant includes the
         # baked eyes. _run_game_optimizer uses the fixed-eyes GLB as its source;
         # force=True replaces any existing (eyeless) game variant. Previews
         # prefer 'game', so once it finishes the small + fixed-eyes file is used.
         import shutil
-        had_game = ModelVariant.get(model.id, 'game') is not None
         _maybe_autostart_game_optimization(model, force=True)
         reoptimizing = bool(shutil.which('gltfpack'))
 
@@ -918,6 +949,8 @@ def post_fixed_eyes(model_id):
             'variant': variant.to_api() if variant else None,
             'reoptimizing': reoptimizing,
             'replaced_game_variant': had_game,
+            'invalidated_media': invalidated_media,
+            'recapture_url': url_for('main.model_detail', model_id=model.id, capture=1),
         })
     except Exception as e:
         print(f"API fixed-eyes upload error: {e}")
@@ -2049,13 +2082,18 @@ def _serialize_browse_card(model):
     # handles GLB/GLTF incl. Draco/meshopt). VRM/VRMA use other viewers, so we
     # leave those to their thumbnail/icon on browse.
     viewable = bool(model.viewable_file_id) or (model.file_format or '').lower() in ('glb', 'gltf')
-    # Preview source priority: game-optimized (smallest AND includes any baked
-    # eyes/mouth) -> fixed-eyes (eyes/mouth baked but not yet game-optimized) ->
-    # original. This matches the server-rendered cards + detail page so the live
-    # browse preview always shows the best available (fixed) version.
+    # Preview source priority: fixed-sourced game variant -> fixed-eyes/mouth ->
+    # original. A stale game variant from before a bake must not hide the fixed
+    # GLB while a fresh optimization is queued/running.
     game_variant = ModelVariant.get(model.id, 'game') if viewable else None
     fixed_variant = ModelVariant.get(model.id, 'fixed_eyes') if viewable else None
-    if game_variant and game_variant.file_id:
+    game_uses_fixed = bool(
+        game_variant
+        and isinstance(game_variant.settings, dict)
+        and game_variant.settings.get('source_is_fixed_eyes')
+    )
+    current_game = bool(game_variant and game_variant.file_id and (not fixed_variant or game_uses_fixed))
+    if current_game:
         view_url = url_for('api.get_game_optimized', model_id=model.id)
     elif fixed_variant and fixed_variant.file_id:
         view_url = url_for('api.get_fixed_eyes', model_id=model.id)
@@ -2084,8 +2122,9 @@ def _serialize_browse_card(model):
         'is_owner': bool(is_owner),
         'viewable': viewable,
         'view_url': view_url,
-        'has_game_optimized': bool(game_variant and game_variant.file_id),
+        'has_game_optimized': current_game,
         'has_fixed_eyes': bool(fixed_variant and fixed_variant.file_id),
+        'game_uses_fixed': game_uses_fixed,
         'camera_orbit': model.camera_orbit or None,
         'default_animation': model.default_animation or None,
     }

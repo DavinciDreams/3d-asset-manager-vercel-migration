@@ -8,7 +8,7 @@ os.environ.setdefault("AI_AUTOTAG_WORKER", "0")
 os.environ.setdefault("AI_AUTOTAG_KICK_ON_REQUEST", "0")
 
 from app import create_app
-from app.models import Model3D, User
+from app.models import Model3D, ModelVariant, User
 
 
 def _login(app, client, username="profileuser", email="profile@example.com"):
@@ -178,6 +178,64 @@ def test_detail_defaults_auto_capture_missing_media():
     assert "const FORCE_CAPTURE = DETAIL_PARAMS.get('capture') === '1';" in html
     assert "const shouldCaptureThumbnail = FORCE_REGEN || (!HAS_THUMBNAIL && (FORCE_CAPTURE || AUTO_CAPTURE_THUMBNAIL));" in html
     assert "const shouldCapturePreview = FORCE_REGEN || (!HAS_PREVIEW && (FORCE_CAPTURE || AUTO_CAPTURE_PREVIEW));" in html
+
+
+def test_fixed_bake_invalidates_stale_game_variant_and_media(monkeypatch):
+    monkeypatch.setattr("shutil.which", lambda _name: None)
+    app = create_app()
+    client = app.test_client()
+    _login(app, client)
+
+    glb = b"glTF" + b"\x00" * 64
+    response = client.post("/api/upload", data={
+        "name": "Fixable Avatar",
+        "is_public": "true",
+        "file": (io.BytesIO(glb), "fixable.glb"),
+    }, content_type="multipart/form-data")
+    assert response.status_code == 201, response.get_json()
+    model_id = response.get_json()["model"]["id"]
+
+    with app.app_context():
+        model = Model3D.get_by_id(model_id)
+        fs = app.config["FILE_STORE"]
+        thumb_id = fs.put(b"old-thumb", filename="old.webp", content_type="image/webp")
+        preview_id = fs.put(b"old-preview", filename="old.webm", content_type="video/webm")
+        old_game_id = fs.put(b"glTF" + b"old-game", filename="old-game.glb", content_type="model/gltf-binary")
+        model.thumbnail_file_id = str(thumb_id)
+        model.preview_file_id = str(preview_id)
+        model.save()
+        ModelVariant.upsert(
+            model_id,
+            "game",
+            str(old_game_id),
+            file_format="glb",
+            size=12,
+            settings={"source_is_fixed_eyes": False},
+        )
+
+    fixed = client.post(f"/api/model/{model_id}/fixed-eyes", data={
+        "blink": "1",
+        "file": (io.BytesIO(b"glTF" + b"fixed-model"), "fixed.glb"),
+    }, content_type="multipart/form-data")
+    assert fixed.status_code == 200, fixed.get_json()
+    body = fixed.get_json()
+    assert body["success"] is True
+    assert body["replaced_game_variant"] is True
+    assert body["invalidated_media"] is True
+
+    with app.app_context():
+        refreshed = Model3D.get_by_id(model_id)
+        assert refreshed.thumbnail_file_id is None
+        assert refreshed.preview_file_id is None
+        assert ModelVariant.get(model_id, "game") is None
+        assert ModelVariant.get(model_id, "fixed_eyes") is not None
+
+    detail = client.get(f"/model/{model_id}")
+    assert detail.status_code == 200
+    html = detail.get_data(as_text=True)
+    assert "let HAS_FIXED_VARIANT = true;" in html
+    assert "let HAS_GAME_VARIANT = false;" in html
+    assert "const captureVariant = HAS_FIXED_VARIANT ? 'fixed_eyes' : 'original';" in html
 
 
 def test_api_me_reports_asset_admin_state(monkeypatch):

@@ -1293,6 +1293,19 @@ class ModelVariant:
         return [ModelVariant(row) for row in rows]
 
     @staticmethod
+    def map_by_kind(kind, model_ids=None):
+        engine = current_app.config["DB_ENGINE"]
+        where = and_(model_variants.c.kind == kind, model_variants.c.file_id.isnot(None))
+        ids = [str(i) for i in (model_ids or [])]
+        if model_ids is not None:
+            if not ids:
+                return {}
+            where = and_(where, model_variants.c.model_id.in_(ids))
+        with engine.begin() as conn:
+            rows = conn.execute(select(model_variants).where(where)).mappings().all()
+        return {str(row["model_id"]): ModelVariant(row) for row in rows}
+
+    @staticmethod
     def upsert(model_id, kind, file_id, *, level=None, file_format="glb",
                size=0, settings=None, status="ready"):
         """Create or replace the variant for (model_id, kind, level). Returns the

@@ -92,19 +92,19 @@
                 {% endif %}
             </div>
 
-            <!-- Original / Game-Optimized / Fixed-Eyes toggle (shown when a variant exists) -->
-            <div id="variant-toggle" class="{% if not game_variant and not fixed_eyes_variant %}hidden {% endif %}mt-3 inline-flex rounded-lg border border-gray-200 overflow-hidden text-sm">
+            <!-- Original / Game-Optimized / Fixed toggle (shown when a variant exists) -->
+            <div id="variant-toggle" class="{% if not game_variant_current and not fixed_eyes_variant %}hidden {% endif %}mt-3 inline-flex rounded-lg border border-gray-200 overflow-hidden text-sm">
                 <button type="button" id="variant-btn-original" onclick="switchVariant('original')"
                         class="px-4 py-2 font-medium bg-indigo-600 text-white">
                     Original
                 </button>
                 <button type="button" id="variant-btn-game" onclick="switchVariant('game')"
-                        class="px-4 py-2 font-medium bg-white text-gray-700 hover:bg-gray-50 {% if not game_variant %}hidden{% endif %}">
+                        class="px-4 py-2 font-medium bg-white text-gray-700 hover:bg-gray-50 {% if not game_variant_current %}hidden{% endif %}">
                     <i class="fas fa-gamepad mr-1"></i>Game-Optimized<span id="variant-game-size">{% if game_variant and game_variant.size %} ({{ "%.2f"|format(game_variant.size / 1024 / 1024) }} MB){% endif %}</span>
                 </button>
                 <button type="button" id="variant-btn-fixed_eyes" onclick="switchVariant('fixed_eyes')"
                         class="px-4 py-2 font-medium bg-white text-gray-700 hover:bg-gray-50 {% if not fixed_eyes_variant %}hidden{% endif %}">
-                    <i class="fas fa-eye mr-1"></i>Fixed Eyes<span id="variant-fixed-size">{% if fixed_eyes_variant and fixed_eyes_variant.size %} ({{ "%.2f"|format(fixed_eyes_variant.size / 1024 / 1024) }} MB){% endif %}</span>
+                    <i class="fas fa-eye mr-1"></i>Fixed<span id="variant-fixed-size">{% if fixed_eyes_variant and fixed_eyes_variant.size %} ({{ "%.2f"|format(fixed_eyes_variant.size / 1024 / 1024) }} MB){% endif %}</span>
                 </button>
             </div>
 
@@ -195,15 +195,15 @@
                             VRMA (animation)
                         </a>
                         {% endif %}
-                        <div id="export-game-divider" class="border-t border-gray-100 my-1 {% if not game_variant %}hidden{% endif %}"></div>
+                        <div id="export-game-divider" class="border-t border-gray-100 my-1 {% if not game_variant_current %}hidden{% endif %}"></div>
                         <a id="export-game-link" href="{{ url_for('api.get_game_optimized', model_id=model.id, download=1) }}"
-                           class="block px-4 py-2 text-sm text-teal-700 hover:bg-teal-50 {% if not game_variant %}hidden{% endif %}">
+                           class="block px-4 py-2 text-sm text-teal-700 hover:bg-teal-50 {% if not game_variant_current %}hidden{% endif %}">
                             <i class="fas fa-gamepad mr-1"></i>Game-optimized GLB
                         </a>
                         <div id="export-fixed-divider" class="border-t border-gray-100 my-1 {% if not fixed_eyes_variant %}hidden{% endif %}"></div>
                         <a id="export-fixed-link" href="{{ url_for('api.get_fixed_eyes', model_id=model.id, download=1) }}"
                            class="block px-4 py-2 text-sm text-purple-700 hover:bg-purple-50 {% if not fixed_eyes_variant %}hidden{% endif %}">
-                            <i class="fas fa-eye mr-1"></i>Fixed-eyes GLB
+                            <i class="fas fa-eye mr-1"></i>Fixed GLB
                         </a>
                         <div id="export-rigged-divider" class="border-t border-gray-100 my-1 {% if not rigged_variant %}hidden{% endif %}"></div>
                         <a id="export-rigged-link" href="{{ url_for('api.get_rigged', model_id=model.id, download=1) }}"
@@ -252,12 +252,12 @@
             </div>
             {% if current_user.is_authenticated %}
             <div id="game-opt-panel" class="hidden mt-3 border border-teal-100 bg-teal-50 rounded-lg p-4">
-                <!-- Shown only when a fixed-eyes variant exists: optimize will use
+                <!-- Shown only when a fixed variant exists: optimize will use
                      it as the source, so the game asset keeps the eyes + blink. -->
                 <p id="game-opt-fixed-note"
                    class="text-sm text-purple-700 mb-3 {% if not fixed_eyes_variant %}hidden{% endif %}">
-                    <i class="fas fa-eye mr-1"></i>Using your <b>fixed-eyes</b> version as the source,
-                    so the optimized game asset keeps the eyes &amp; blink.
+                    <i class="fas fa-eye mr-1"></i>Using your <b>fixed</b> version as the source,
+                    so the optimized game asset keeps the baked eyes/mouth fixes.
                 </p>
                 <div class="grid grid-cols-1 sm:grid-cols-4 gap-3">
                     <div>
@@ -830,16 +830,18 @@ const IS_OWNER = {{ can_manage_model | tojson }};
 // Whether a baked fixed-eyes/mouth variant already exists. The Fix Eyes/Mouth
 // editors load THIS as their base (not the original) so prior fixes carry into
 // the next bake (e.g. add a mouth without losing previously-baked eyes+blink).
-const HAS_FIXED_VARIANT = {{ (fixed_eyes_variant is not none) | tojson }};
+let HAS_FIXED_VARIANT = {{ (fixed_eyes_variant is not none) | tojson }};
 // Whether a game-optimized variant exists (it bakes in any eyes/mouth too).
-const HAS_GAME_VARIANT = {{ (game_variant is not none) | tojson }};
+let HAS_GAME_VARIANT = {{ game_variant_current | tojson }};
+let GAME_VARIANT_USES_FIXED = {{ game_variant_uses_fixed | tojson }};
 
 // The best variant to show in the main preview: game-optimized (smallest AND
 // includes any baked eyes/mouth) -> fixed-eyes -> original. Matches browse +
 // galleries so the detail page shows the fixed/animated version by default.
 function bestVariant() {
-    if (HAS_GAME_VARIANT) return 'game';
+    if (HAS_GAME_VARIANT && (!HAS_FIXED_VARIANT || GAME_VARIANT_USES_FIXED)) return 'game';
     if (HAS_FIXED_VARIANT) return 'fixed_eyes';
+    if (HAS_GAME_VARIANT) return 'game';
     return 'original';
 }
 
@@ -863,9 +865,11 @@ function loadDetailModel(modelId, variant) {
 
     try {
         const handleDetailLoad = () => {
-            // Only (re)capture media from the ORIGINAL — the optimized variant
-            // should never overwrite the model's thumbnail/preview.
-            if (CAPTURE_ENABLED && variant === 'original') {
+            // Capture from the canonical unoptimized source: fixed bake when it
+            // exists, otherwise the original. The game variant must not overwrite
+            // owner media while it may still be queued/rebuilt.
+            const captureVariant = HAS_FIXED_VARIANT ? 'fixed_eyes' : 'original';
+            if (CAPTURE_ENABLED && variant === captureVariant) {
                 const shouldCaptureThumbnail = FORCE_REGEN || (!HAS_THUMBNAIL && (FORCE_CAPTURE || AUTO_CAPTURE_THUMBNAIL));
                 const shouldCapturePreview = FORCE_REGEN || (!HAS_PREVIEW && (FORCE_CAPTURE || AUTO_CAPTURE_PREVIEW));
                 if (IS_OWNER && shouldCaptureThumbnail) {
@@ -930,7 +934,9 @@ function switchVariant(variant) {
 
 // Reveal the Original/Game-Optimized toggle + the download entry once a
 // game-optimized variant exists (called after a successful optimization).
-function revealGameOptimized(sizeBytes) {
+function revealGameOptimized(sizeBytes, sourceIsFixed) {
+    HAS_GAME_VARIANT = true;
+    GAME_VARIANT_USES_FIXED = Boolean(sourceIsFixed || !HAS_FIXED_VARIANT);
     const toggle = document.getElementById('variant-toggle');
     if (toggle) toggle.classList.remove('hidden');
     const sizeEl = document.getElementById('variant-game-size');
@@ -941,8 +947,28 @@ function revealGameOptimized(sizeBytes) {
     if (divider) divider.classList.remove('hidden');
 }
 
+function hideGameOptimized() {
+    HAS_GAME_VARIANT = false;
+    GAME_VARIANT_USES_FIXED = false;
+    const btn = document.getElementById('variant-btn-game');
+    if (btn) btn.classList.add('hidden');
+    const link = document.getElementById('export-game-link');
+    const divider = document.getElementById('export-game-divider');
+    if (link) link.classList.add('hidden');
+    if (divider) divider.classList.add('hidden');
+    if (CURRENT_VARIANT === 'game') {
+        switchVariant(HAS_FIXED_VARIANT ? 'fixed_eyes' : 'original');
+    }
+}
+
+function markMediaStale() {
+    HAS_THUMBNAIL = false;
+    HAS_PREVIEW = false;
+}
+
 // Reveal the Fixed-Eyes toggle button + download entry after a successful bake.
 function revealFixedEyes(sizeBytes) {
+    HAS_FIXED_VARIANT = true;
     const toggle = document.getElementById('variant-toggle');
     if (toggle) toggle.classList.remove('hidden');
     const btn = document.getElementById('variant-btn-fixed_eyes');
@@ -1347,7 +1373,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 `(${savings.toFixed(1)}% smaller)${eyesNote}. ` +
                 `<button type="button" class="font-semibold text-teal-700 hover:text-teal-900 underline" onclick="switchVariant('game')">View it</button>`;
             // Attached to this model -- reveal the toggle + download entry in place.
-            revealGameOptimized(optimizedSize);
+            revealGameOptimized(optimizedSize, usedFixed);
         }
 
         async function pollGameOptimizeJob(statusUrl) {
@@ -1840,6 +1866,8 @@ document.addEventListener('DOMContentLoaded', function() {
                 ? 'Done! Fixed-eyes saved. Optimizing the game version with your eyes now — it’ll update shortly.'
                 : 'Done! Fixed-eyes version saved.');
             revealFixedEyes(data.variant && data.variant.size);
+            hideGameOptimized();
+            markMediaStale();
             // Swap the viewer to the freshly baked variant so you see the result.
             e.remove();
             loadDetailModel(MODEL_ID, 'fixed_eyes');
@@ -2066,6 +2094,8 @@ document.addEventListener('DOMContentLoaded', function() {
                 ? 'Done! Fixed version saved (now includes the mouth). Optimizing the game version now — it’ll update shortly.'
                 : 'Done! Fixed version saved (now includes the mouth).');
             if (typeof revealFixedEyes === 'function') revealFixedEyes(data.variant && data.variant.size);
+            if (typeof hideGameOptimized === 'function') hideGameOptimized();
+            if (typeof markMediaStale === 'function') markMediaStale();
             m.remove();
             loadDetailModel(MODEL_ID, 'fixed_eyes');
             step2.classList.add('hidden');

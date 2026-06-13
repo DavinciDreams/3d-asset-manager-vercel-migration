@@ -52,17 +52,25 @@ def _glb_uses_compression(glb_bytes):
     return False
 
 
+def _variant_uses_fixed_source(variant):
+    return bool(variant and isinstance(variant.settings, dict) and variant.settings.get('source_is_fixed_eyes'))
+
+
+def _attach_preview_variant_flags(models):
+    game_by_id = ModelVariant.map_by_kind('game', [m.id for m in models])
+    fixed_by_id = ModelVariant.map_by_kind('fixed_eyes', [m.id for m in models])
+    for model in models:
+        fixed = fixed_by_id.get(model.id)
+        game = game_by_id.get(model.id)
+        model.has_game_optimized = bool(game and (not fixed or _variant_uses_fixed_source(game)))
+        model.has_fixed_eyes = bool(fixed)
+        model.game_uses_fixed = _variant_uses_fixed_source(game)
+
+
 def _enrich_dashboard_models(user_models):
-    """Attach has_game_optimized + has_fixed_eyes to each model (two batched
-    variant queries) so previews can pick the best source: the game-optimized
-    file (which now bakes in any fixed eyes and is smallest) is preferred, then
-    the fixed-eyes variant, then the original."""
-    ids = [m.id for m in user_models]
-    optimized_ids = ModelVariant.model_ids_with_kind('game', ids)
-    fixed_ids = ModelVariant.model_ids_with_kind('fixed_eyes', ids)
-    for model in user_models:
-        model.has_game_optimized = model.id in optimized_ids
-        model.has_fixed_eyes = model.id in fixed_ids
+    """Attach preview variant flags so stale optimized files do not hide a newer
+    fixed-eyes/mouth bake."""
+    _attach_preview_variant_flags(user_models)
 
 
 class Pagination:
@@ -99,17 +107,11 @@ def index():
         recent_models, total_public = Model3D.get_public_models(page=1, per_page=6)
 
 
-        # Add owner username + variant flags (landing cards prefer the
-        # game-optimized variant, then fixed-eyes, for the live preview).
-        # Batched variant queries.
-        _recent_ids = [m.id for m in recent_models]
-        optimized_ids = ModelVariant.model_ids_with_kind('game', _recent_ids)
-        fixed_ids = ModelVariant.model_ids_with_kind('fixed_eyes', _recent_ids)
+        # Add owner username + current variant flags.
+        _attach_preview_variant_flags(recent_models)
         for model in recent_models:
             user = User.get_by_id(model.user_id)
             model.owner_username = user.username if user else 'Unknown'
-            model.has_game_optimized = model.id in optimized_ids
-            model.has_fixed_eyes = model.id in fixed_ids
 
         # Get statistics
         stats = Model3D.get_stats()
@@ -250,16 +252,11 @@ def browse():
             category=category, style=styles if styles else None,
             asset_type=asset_types if asset_types else None)
 
-        # Add owner username + variant flags (browse prefers the game-optimized
-        # file, then fixed-eyes, for the live preview). Batched variant queries.
-        _ids = [m.id for m in models]
-        optimized_ids = ModelVariant.model_ids_with_kind('game', _ids)
-        fixed_ids = ModelVariant.model_ids_with_kind('fixed_eyes', _ids)
+        # Add owner username + current variant flags.
+        _attach_preview_variant_flags(models)
         for model in models:
             user = User.get_by_id(model.user_id)
             model.owner_username = user.username if user else 'Unknown'
-            model.has_game_optimized = model.id in optimized_ids
-            model.has_fixed_eyes = model.id in fixed_ids
 
         pagination = Pagination(models, total, page, per_page)
         all_tags = Model3D.get_public_tags()
@@ -328,6 +325,8 @@ def model_detail(model_id):
         # Fixed-eyes variant (if any): owner-baked GLB with blinker eyeballs
         # covering reconstruction holes; surfaces its own toggle + download.
         fixed_eyes_variant = ModelVariant.get(model.id, 'fixed_eyes')
+        game_variant_uses_fixed = _variant_uses_fixed_source(game_variant)
+        game_variant_current = bool(game_variant and (not fixed_eyes_variant or game_variant_uses_fixed))
         # VRM variant (if any): a rigged GLB converted to a VRM avatar via
         # glb2vrm; lets the owner play VRMA clips on it.
         vrm_variant = ModelVariant.get(model.id, 'vrm')
@@ -348,6 +347,8 @@ def model_detail(model_id):
 
         return render_template('model_detail.html', model=model, owner=owner,
                                all_tags=all_tags, game_variant=game_variant,
+                               game_variant_current=game_variant_current,
+                               game_variant_uses_fixed=game_variant_uses_fixed,
                                fixed_eyes_variant=fixed_eyes_variant,
                                vrm_variant=vrm_variant,
                                rigged_variant=rigged_variant,
