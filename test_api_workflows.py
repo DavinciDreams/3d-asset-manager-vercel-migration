@@ -20,7 +20,7 @@ os.environ.pop("ZAI_API_KEY", None)
 os.environ.pop("Z_AI_API_KEY", None)
 
 from app import create_app
-from app.models import User
+from app.models import Model3D, ModelVariant, User
 
 
 def _ensure_user(username):
@@ -229,6 +229,22 @@ def test_tellus_admin_token_defaults_owner_and_generation_search_metadata(monkey
     model = upload.get_json()["model"]
     assert model["tags"] == ["tellus", "generated", "in-world-generation"]
     assert "generated" in model["asset_types"]
+    assert model["has_thumbnail"] is False
+    assert model["thumbnail_url"] is None
+    assert model["has_game_optimized"] is False
+
+    with app.app_context():
+        stored = Model3D.get_by_id(model["id"])
+        file_id = app.config["FILE_STORE"].put(
+            b"glTF-optimized" + b"\x00" * 64,
+            filename="instant_mesh_castle-optimized.glb",
+            content_type="model/gltf-binary",
+            metadata={"kind": "game", "source_model_id": stored.id},
+        )
+        ModelVariant.upsert(
+            stored.id, "game", str(file_id),
+            file_format="glb", size=82, settings={"compression_mode": "meshopt"},
+        )
 
     search = client.get(
         "/api/models?include_private=true&search=in-world-generation",
@@ -238,6 +254,20 @@ def test_tellus_admin_token_defaults_owner_and_generation_search_metadata(monkey
     models = search.get_json()["models"]
     assert [m["id"] for m in models] == [model["id"]]
     assert models[0]["owner"]["id"] == admin.id
+    assert models[0]["has_thumbnail"] is False
+    assert models[0]["thumbnail_url"] is None
+    assert models[0]["has_game_optimized"] is True
+    assert models[0]["game_optimized"]["url"].endswith(f"/api/model/{model['id']}/game-optimized")
+
+    user_only = client.get(
+        "/api/user/models",
+        headers={"Authorization": "Bearer tellus-admin-token"},
+    )
+    assert user_only.status_code == 200, user_only.get_json()
+    listed = user_only.get_json()["models"]
+    assert [m["id"] for m in listed] == [model["id"]]
+    assert listed[0]["has_game_optimized"] is True
+    assert listed[0]["has_thumbnail"] is False
 
 
 def test_openapi_documents_workflow_and_bearer_auth():

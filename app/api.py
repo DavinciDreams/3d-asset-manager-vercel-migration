@@ -404,6 +404,7 @@ def list_models():
                 'ai_tags': model.ai_tags,
                 'approve_game_ready': model.approve_game_ready,
                 'approve_asset_store': model.approve_asset_store,
+                **_media_presence_fields(model),
                 'owner': {
                     'id': owner.id if owner else None,
                     'username': owner.username if owner else 'Unknown'
@@ -1834,6 +1835,7 @@ def get_user_models():
                 'ai_tags': model.ai_tags,
                 'approve_game_ready': model.approve_game_ready,
                 'approve_asset_store': model.approve_asset_store,
+                **_media_presence_fields(model),
             })
         
         total_pages = (total + per_page - 1) // per_page
@@ -1969,6 +1971,16 @@ def _serialize_model(model):
         'ai_tags': model.ai_tags,
         'approve_game_ready': model.approve_game_ready,
         'approve_asset_store': model.approve_asset_store,
+        **_media_presence_fields(model),
+    }
+
+
+def _media_presence_fields(model):
+    return {
+        'has_thumbnail': bool(model.thumbnail_file_id),
+        'thumbnail_url': url_for('api.get_thumbnail', model_id=model.id) if model.thumbnail_file_id else None,
+        'has_preview': bool(model.preview_file_id),
+        'preview_url': url_for('api.get_preview', model_id=model.id) if model.preview_file_id else None,
         **_game_optimized_fields(model),
     }
 
