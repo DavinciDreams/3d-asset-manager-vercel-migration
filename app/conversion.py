@@ -37,12 +37,27 @@ def _cfg(app, key, default):
     return app.config.get(key, default)
 
 
+def _default_tools_dir():
+    """Where the vendored node converters live. In the Docker image that's
+    /app/tools; in local dev it's the repo's tools/ dir next to app/. Fall back
+    to the repo path when /app/tools is absent so VRM/animation conversion works
+    locally without setting FBX2VRMA_DIR."""
+    configured = os.environ.get("FBX2VRMA_DIR")
+    if configured:
+        return configured
+    if os.path.isdir("/app/tools"):
+        return "/app/tools"
+    # app/conversion.py -> app/ -> repo root -> tools/
+    repo_tools = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools")
+    return repo_tools if os.path.isdir(repo_tools) else "/app/tools"
+
+
 def tool_paths(app):
     return {
         "fbx2gltf": _cfg(app, "FBX2GLTF_BIN", os.environ.get("FBX2GLTF_BIN", "/usr/local/bin/FBX2glTF")),
         "assimp": _cfg(app, "ASSIMP_BIN", os.environ.get("ASSIMP_BIN", "assimp")),
         "node": _cfg(app, "NODE_BIN", os.environ.get("NODE_BIN", "node")),
-        "fbx2vrma_dir": _cfg(app, "FBX2VRMA_DIR", os.environ.get("FBX2VRMA_DIR", "/app/tools")),
+        "fbx2vrma_dir": _cfg(app, "FBX2VRMA_DIR", _default_tools_dir()),
     }
 
 

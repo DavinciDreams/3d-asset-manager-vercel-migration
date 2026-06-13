@@ -29,7 +29,9 @@ def create_app():
     app.config["FBX2GLTF_BIN"] = os.environ.get("FBX2GLTF_BIN", "/usr/local/bin/FBX2glTF")
     app.config["ASSIMP_BIN"] = os.environ.get("ASSIMP_BIN", "assimp")
     app.config["NODE_BIN"] = os.environ.get("NODE_BIN", "node")
-    app.config["FBX2VRMA_DIR"] = os.environ.get("FBX2VRMA_DIR", "/app/tools")
+    # /app/tools in the Docker image; the repo's tools/ dir in local dev.
+    from app.conversion import _default_tools_dir
+    app.config["FBX2VRMA_DIR"] = _default_tools_dir()
 
     try:
         engine = create_database_engine()

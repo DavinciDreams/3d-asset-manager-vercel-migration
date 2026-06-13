@@ -92,8 +92,33 @@
                 {% endif %}
             </div>
 
-            <!-- Original / Game-Optimized / Fixed toggle (shown when a variant exists) -->
-            <div id="variant-toggle" class="{% if not game_variant_current and not fixed_eyes_variant %}hidden {% endif %}mt-3 inline-flex rounded-lg border border-gray-200 overflow-hidden text-sm">
+            <!-- VRM avatar viewer (hidden until the 'VRM avatar' toggle is picked).
+                 Reuses the dedicated three-vrm viewer + VRMA animation picker so a
+                 rigged model can be posed/animated right here. -->
+            <div id="vrm-avatar-wrap" class="hidden">
+                <div id="vrm-viewer-{{ model.id }}" class="model-viewer-large"
+                     style="position:relative;background:linear-gradient(135deg,#f3f4f6 0%,#e5e7eb 100%);">
+                    <div id="vrm-loading-{{ model.id }}" class="flex items-center justify-center h-full">
+                        <div class="text-center">
+                            <i class="fas fa-spinner fa-spin text-3xl text-indigo-400 mb-2"></i>
+                            <p class="text-gray-500 text-sm">Loading VRM avatar…</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="mt-4 flex flex-wrap items-center gap-3 bg-gray-50 rounded-lg p-3">
+                    <label for="vrma-select" class="text-sm text-gray-600"><i class="fas fa-person-running mr-1 text-indigo-500"></i>Apply animation:</label>
+                    <select id="vrma-select"
+                            class="border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                        <option value="" data-vrma-id="none">— None (T-pose) —</option>
+                    </select>
+                    <button type="button" onclick="stopVrmAnimation()" class="text-gray-500 hover:text-gray-700 text-sm">
+                        <i class="fas fa-stop mr-1"></i>Stop
+                    </button>
+                </div>
+            </div>
+
+            <!-- Original / Game-Optimized / Fixed / VRM toggle (shown when a variant exists) -->
+            <div id="variant-toggle" class="{% if not game_variant_current and not fixed_eyes_variant and not vrm_variant %}hidden {% endif %}mt-3 inline-flex rounded-lg border border-gray-200 overflow-hidden text-sm">
                 <button type="button" id="variant-btn-original" onclick="switchVariant('original')"
                         class="px-4 py-2 font-medium bg-indigo-600 text-white">
                     Original
@@ -105,6 +130,10 @@
                 <button type="button" id="variant-btn-fixed_eyes" onclick="switchVariant('fixed_eyes')"
                         class="px-4 py-2 font-medium bg-white text-gray-700 hover:bg-gray-50 {% if not fixed_eyes_variant %}hidden{% endif %}">
                     <i class="fas fa-eye mr-1"></i>Fixed<span id="variant-fixed-size">{% if fixed_eyes_variant and fixed_eyes_variant.size %} ({{ "%.2f"|format(fixed_eyes_variant.size / 1024 / 1024) }} MB){% endif %}</span>
+                </button>
+                <button type="button" id="variant-btn-vrm" onclick="switchVariant('vrm')"
+                        class="px-4 py-2 font-medium bg-white text-gray-700 hover:bg-gray-50 {% if not vrm_variant %}hidden{% endif %}">
+                    <i class="fas fa-child mr-1"></i>VRM avatar
                 </button>
             </div>
 
@@ -918,17 +947,38 @@ function switchVariant(variant) {
     // Style each variant button; preserve a button's existing `hidden` class so
     // toggling selection never reveals a variant that doesn't exist yet.
     [['original', 'variant-btn-original'], ['game', 'variant-btn-game'],
-     ['fixed_eyes', 'variant-btn-fixed_eyes']].forEach(([key, id]) => {
+     ['fixed_eyes', 'variant-btn-fixed_eyes'], ['vrm', 'variant-btn-vrm']].forEach(([key, id]) => {
         const btn = document.getElementById(id);
         if (!btn) return;
         const wasHidden = btn.classList.contains('hidden');
         btn.className = `px-4 py-2 font-medium ${variant === key ? active : inactive}`;
         if (wasHidden) btn.classList.add('hidden');
     });
-    // Load (or reload) the viewer with the chosen variant. loadDetailModel
-    // replaces the container contents, so this works whether or not the viewer
-    // was already showing.
+
+    const prev = CURRENT_VARIANT;
     CURRENT_VARIANT = variant;
+
+    const glbContainer = document.getElementById('viewer-detail-{{ model.id }}');
+    const vrmWrap = document.getElementById('vrm-avatar-wrap');
+
+    if (variant === 'vrm') {
+        // Swap to the dedicated VRM avatar viewer + animation picker. Dispose the
+        // GLB viewer to free the WebGL context, hide it, and mount the VRM viewer.
+        if (glbContainer && glbContainer.__threeViewer) {
+            try { glbContainer.__threeViewer.dispose(); } catch (e) {}
+        }
+        if (glbContainer) glbContainer.classList.add('hidden');
+        if (vrmWrap) vrmWrap.classList.remove('hidden');
+        startVrmAvatar();
+        return;
+    }
+
+    // Switching AWAY from VRM: tear down the VRM viewer, show the GLB one.
+    if (prev === 'vrm') {
+        if (window._vrmController) { try { window._vrmController.dispose(); } catch (e) {} window._vrmController = null; }
+        if (vrmWrap) vrmWrap.classList.add('hidden');
+        if (glbContainer) glbContainer.classList.remove('hidden');
+    }
     loadDetailModel('{{ model.id }}', variant);
 }
 
@@ -1528,17 +1578,35 @@ document.addEventListener('DOMContentLoaded', function() {
             const rd = document.getElementById('export-rigged-divider');
             if (rl) rl.classList.remove('hidden');
             if (rd) rd.classList.remove('hidden');
+            const vrmBtn = document.getElementById('variant-btn-vrm');
             if (data.vrm) {
                 const vl = document.getElementById('export-vrm-link');
                 const vd = document.getElementById('export-vrm-divider');
                 if (vl) vl.classList.remove('hidden');
                 if (vd) vd.classList.remove('hidden');
+                // The VRM viewer scaffolding is server-rendered (it only exists if
+                // a vrm variant was present at page load). If it's here, reveal the
+                // toggle + switch to it; otherwise prompt a reload to animate.
+                if (vrmBtn && document.getElementById('vrm-avatar-wrap')) {
+                    const tgl = document.getElementById('variant-toggle');
+                    if (tgl) tgl.classList.remove('hidden');
+                    vrmBtn.classList.remove('hidden');
+                }
             }
             setStatus('Done ✓');
             close();
-            alert('Rig created!' + (data.vrm ? ' A VRM avatar was also generated.' : '')
-                + '\nDownload from the "Export as" menu. Re-load the model to preview the rig,'
-                + ' or apply a VRMA animation to the VRM.');
+            const canAnimateNow = data.vrm && vrmBtn && document.getElementById('vrm-avatar-wrap');
+            if (data.vrm && canAnimateNow) {
+                alert('Rig + VRM avatar created! Use the "VRM avatar" toggle under the '
+                    + 'viewer to pose it and apply animations.');
+                if (confirm('Switch to the VRM avatar now?')) switchVariant('vrm');
+            } else if (data.vrm) {
+                alert('Rig + VRM avatar created! Reload the page to animate the avatar '
+                    + '(the "VRM avatar" toggle appears after reload). Download from "Export as".');
+            } else {
+                alert('Rig created! Download the rigged GLB from "Export as".'
+                    + (data.vrm_error ? '\n\nVRM step failed: ' + data.vrm_error : ''));
+            }
         } catch (err) {
             setStatus(err.message || 'Rigging failed.', true);
             buildBtn.disabled = false;
@@ -2115,18 +2183,27 @@ document.addEventListener('DOMContentLoaded', function() {
 {% include "_preview_capture.html" %}
 {% endif %}
 
-{% if model.file_format == 'vrm' %}
+{% if model.file_format == 'vrm' or vrm_variant %}
 {% include "_vrm_viewer.html" %}
-{% include "_preview_capture.html" %}
+{% if model.file_format not in ['vrm', 'vrma'] %}{% include "_preview_capture.html" %}{% endif %}
 <script>
-// Initialize the VRM avatar viewer and wire up the VRMA picker.
+// Initialize the VRM avatar viewer and wire up the VRMA picker. Serves two
+// cases: a NATIVE .vrm model (auto-starts), and a GLB model that has a derived
+// 'vrm' variant (starts when the user picks the "VRM avatar" toggle).
 (function () {
     const MODEL_ID = '{{ model.id }}';
-    const VRM_URL = '{{ url_for("api.view_model", model_id=model.id) }}';
+    // Native vrm -> the model's own view URL; otherwise the derived vrm variant.
+    const IS_NATIVE_VRM = {{ (model.file_format == 'vrm') | tojson }};
+    const VRM_URL = IS_NATIVE_VRM
+        ? '{{ url_for("api.view_model", model_id=model.id) }}'
+        : '{{ url_for("api.get_vrm_variant", model_id=model.id) }}';
     let controller = null;
+    let started = false;
 
     async function start() {
+        if (started) return true;
         if (!window.VRMViewer) { return false; }
+        started = true;
         controller = await window.VRMViewer.init('vrm-viewer-' + MODEL_ID, VRM_URL, {
             onLoad: () => {
                 const loading = document.getElementById('vrm-loading-' + MODEL_ID);
@@ -2136,26 +2213,35 @@ document.addEventListener('DOMContentLoaded', function() {
                 {% if can_manage_model %}
                 const shouldCaptureVrmThumbnail = FORCE_REGEN || (!HAS_THUMBNAIL && (FORCE_CAPTURE || AUTO_CAPTURE_THUMBNAIL));
                 const shouldCaptureVrmPreview = FORCE_REGEN || (!HAS_PREVIEW && (FORCE_CAPTURE || AUTO_CAPTURE_PREVIEW));
-                if (CAPTURE_ENABLED && shouldCaptureVrmThumbnail) {
+                // Only auto-capture media for NATIVE vrm models (a GLB model's
+                // thumbnail should stay the GLB, not the avatar).
+                if (IS_NATIVE_VRM && CAPTURE_ENABLED && shouldCaptureVrmThumbnail) {
                     setTimeout(captureVrmThumbnail, 1000);
                 }
-                if (CAPTURE_ENABLED && shouldCaptureVrmPreview) {
+                if (IS_NATIVE_VRM && CAPTURE_ENABLED && shouldCaptureVrmPreview) {
                     setTimeout(captureVrmPreview, 1500);
                 }
                 {% endif %}
             },
             onError: () => {
                 const loading = document.getElementById('vrm-loading-' + MODEL_ID);
-                if (loading) loading.remove();
+                if (loading) loading.innerHTML = '<div class="text-center text-red-600 p-4"><i class="fas fa-exclamation-triangle text-2xl mb-2"></i><p class="text-sm">Could not load the VRM avatar.</p></div>';
             }
         });
         window._vrmController = controller;
         return true;
     }
 
-    // VRMViewer may still be loading its module when DOMContentLoaded fires.
-    if (window.VRMViewer) start();
-    else window.addEventListener('vrmviewer-ready', start, { once: true });
+    // Native vrm auto-starts; a GLB-variant VRM starts on demand via the toggle.
+    if (IS_NATIVE_VRM) {
+        if (window.VRMViewer) start();
+        else window.addEventListener('vrmviewer-ready', start, { once: true });
+    }
+    // Exposed so switchVariant('vrm') can mount the avatar when picked.
+    window.startVrmAvatar = function () {
+        if (window.VRMViewer) start();
+        else window.addEventListener('vrmviewer-ready', start, { once: true });
+    };
 
     const SAVED_DEFAULT_VRMA = {{ model.default_vrma_id | tojson }};
 

@@ -78,6 +78,39 @@ A Flask web app for uploading, viewing, browsing, and optimizing 3D assets
 
 ## Recent Changes
 
+### 2026-06-13 — Rigging: VRM conversion fix + "VRM avatar" toggle to animate
+**Two bugs from hands-on testing:**
+1. **VRM export wasn't an option after Build Rig** — `FBX2VRMA_DIR` defaulted to
+   `/app/tools` (Docker path), so glb2vrm couldn't be found in LOCAL dev →
+   `to_vrm` silently failed (rig succeeded, no vrm variant). Fix:
+   `conversion._default_tools_dir()` falls back to the repo's `tools/` dir when
+   `/app/tools` is absent; `__init__.py` uses it. (No change needed on Coolify.)
+2. **No way to apply animations** — the rigged GLB is `file_format=glb` → loads
+   the Three.js/model-viewer path, but the VRMA picker lives in the VRM viewer
+   (`_vrm_viewer.html`), only rendered for `file_format=='vrm'`.
+
+**Fix (user chose "swap the main viewer to VRM"):**
+- `model_detail.html`: new **"VRM avatar"** button in the variant toggle (shown
+  when a `vrm_variant` exists). `switchVariant('vrm')` disposes the GLB viewer,
+  hides it, shows a `#vrm-avatar-wrap` (VRM viewer + "Apply animation" picker),
+  and mounts `VRMViewer` on `/api/model/<id>/vrm`. Switching back tears it down.
+- The bottom VRM block now renders for `file_format=='vrm' OR vrm_variant`;
+  native vrm auto-starts, the GLB-variant case starts on demand via
+  `window.startVrmAvatar()`. Rig-Build success reveals the toggle (or prompts a
+  reload if the VRM scaffolding wasn't server-rendered at page load).
+- **Importmap consolidation:** moved `@pixiv/three-vrm[-animation]` into
+  base_3d's single importmap and REMOVED the duplicate importmap from
+  `_vrm_viewer.html` (a doc may only have one; the dupe caused the "multiple
+  Three.js instances" warning). Native-vrm pages still work.
+
+**Verified in-browser (Playwright, real emmy model with a vrm variant):**
+VRM toggle present+visible; click → avatar mounts (`_vrmController` set, spinner
+gone) + picker populated; ZERO console errors; "multiple three" warning gone.
+Native-vrm page (temp test model) still auto-loads — no regression. VRM itself
+loads with 22 humanoid bones. ⚠️ Couldn't exercise an actual animation locally —
+the only VRMA in the dev DB has no blob (corrupt test data), but the
+load+picker chain is the existing, proven `_vrm_viewer` path.
+
 ### 2026-06-13 — Rigging: fix backward/back-facing placement + flip
 **Bug (user-reported):** the rig front view showed the model's BACK. Most
 image-to-3D characters face -Z (same note as Fix-Eyes), but the ortho cam sat at
