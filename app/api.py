@@ -2153,7 +2153,8 @@ def list_public_models():
             page=page, per_page=per_page,
             search=search or None, sort=sort,
             tag=tags or None, category=category, style=styles or None,
-            asset_type=asset_types or None)
+            asset_type=asset_types or None,
+            exclude_formats=['vrma', 'bvh'])
 
         for model in models_list:
             user = User.get_by_id(model.user_id)

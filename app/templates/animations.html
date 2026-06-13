@@ -1,0 +1,150 @@
+{% extends "base_3d.html" %}
+
+{% block title %}Animations - 3D Asset Manager{% endblock %}
+
+{% block content %}
+{% include "_live_previews.html" %}
+<style>
+    #animation-grid { align-items: start; }
+    #animation-grid .animation-media {
+        aspect-ratio: 16 / 9;
+        width: 100%;
+        overflow: hidden;
+    }
+    .robot-motion-placeholder {
+        background:
+            radial-gradient(circle at 74% 22%, rgba(99, 102, 241, 0.18), transparent 26%),
+            linear-gradient(135deg, rgba(15, 23, 42, 0.06), rgba(79, 70, 229, 0.12)),
+            #f8fafc;
+    }
+</style>
+
+<div class="container mx-auto px-4 py-8">
+    <div class="flex flex-wrap justify-between items-center gap-4 mb-6">
+        <div>
+            <h1 class="text-3xl font-bold text-gray-800">Animations</h1>
+            <div class="mt-1 flex flex-wrap items-center gap-3 text-sm text-gray-500">
+                <span>{{ animations|length }} clips</span>
+                <span>{{ avatar_count }} avatars</span>
+            </div>
+        </div>
+
+        <form method="GET" class="flex flex-wrap items-center gap-2">
+            <input type="text" name="search" placeholder="Search animations..."
+                   value="{{ search or '' }}"
+                   class="px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500">
+            <select name="sort" onchange="this.form.submit()"
+                    class="px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                <option value="newest" {% if sort == 'newest' %}selected{% endif %}>Newest</option>
+                <option value="oldest" {% if sort == 'oldest' %}selected{% endif %}>Oldest</option>
+                <option value="downloads" {% if sort == 'downloads' %}selected{% endif %}>Most downloaded</option>
+                <option value="name" {% if sort == 'name' %}selected{% endif %}>Name A-Z</option>
+            </select>
+            <button type="submit" class="bg-indigo-600 text-white px-5 py-2 rounded-lg hover:bg-indigo-700 transition">
+                Search
+            </button>
+        </form>
+    </div>
+
+    <div class="mb-6 flex flex-wrap items-center gap-2">
+        <a href="{{ url_for('main.browse') }}"
+           class="inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-white text-sm text-gray-700 border border-gray-200 hover:border-indigo-300 hover:text-indigo-700">
+            <i class="fas fa-cube"></i> Models
+        </a>
+        <a href="{{ url_for('main.animations') }}"
+           class="inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-indigo-600 text-sm text-white">
+            <i class="fas fa-person-running"></i> Animations
+        </a>
+    </div>
+
+    {% if error %}
+    <div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-6">
+        <strong>Error:</strong> {{ error }}
+    </div>
+    {% endif %}
+
+    {% if animations %}
+    <div id="animation-grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-5">
+        {% for clip in animations %}
+        <div class="bg-white rounded-lg card-shadow overflow-hidden flex flex-col">
+            <a href="{{ clip.detail_url }}"
+               class="relative block animation-media bg-gray-100"
+               {% if clip.thumbnail_url %}data-thumb-src="{{ clip.thumbnail_url }}"{% endif %}>
+                {% if clip.preview_url %}
+                <video class="w-full h-full object-cover lazy-media" loop muted playsinline preload="none"
+                       data-preview-src="{{ clip.preview_url }}"
+                       poster="{{ clip.thumbnail_url or '' }}"></video>
+                {% elif clip.thumbnail_url %}
+                <img alt="{{ clip.name }}" class="w-full h-full object-cover lazy-media"
+                     loading="lazy" data-img-src="{{ clip.thumbnail_url }}">
+                {% else %}
+                <div class="robot-motion-placeholder absolute inset-0 flex items-center justify-center text-indigo-700">
+                    <div class="relative w-24 h-24">
+                        <div class="absolute left-9 top-2 h-7 w-7 rounded bg-indigo-600 shadow-sm"></div>
+                        <div class="absolute left-8 top-10 h-9 w-9 rounded-md bg-indigo-500 shadow-sm"></div>
+                        <div class="absolute h-2 w-10 rounded bg-emerald-500 -rotate-12" style="left: 0.25rem; top: 3.25rem;"></div>
+                        <div class="absolute h-2 w-10 rounded bg-emerald-500 rotate-12" style="left: 3.75rem; top: 3.25rem;"></div>
+                        <div class="absolute h-10 w-2 rounded bg-slate-700 rotate-12" style="left: 2rem; top: 4.5rem;"></div>
+                        <div class="absolute h-10 w-2 rounded bg-slate-700 -rotate-12" style="left: 4rem; top: 4.5rem;"></div>
+                        <div class="absolute left-5 top-6 h-2 w-2 rounded-full bg-white"></div>
+                        <div class="absolute h-2 w-2 rounded-full bg-white" style="left: 3.75rem; top: 1.5rem;"></div>
+                    </div>
+                </div>
+                {% endif %}
+                <span class="absolute top-2 right-2 bg-black/65 text-white text-[10px] px-2 py-1 rounded uppercase">{{ clip.source }}</span>
+            </a>
+
+            <div class="p-4 flex flex-col flex-1">
+                <a href="{{ clip.detail_url }}"
+                   class="font-semibold text-gray-900 hover:text-indigo-700 truncate"
+                   title="{{ clip.name }}">{{ clip.name }}</a>
+                <div class="mt-1 flex justify-between items-center text-xs text-gray-400">
+                    <span class="truncate">{{ clip.owner_username }}</span>
+                    <span><i class="fas fa-download mr-0.5"></i>{{ clip.download_count }}</span>
+                </div>
+                {% if clip.tags %}
+                <div class="flex flex-wrap gap-1 mt-3">
+                    {% for tag in clip.tags[:4] %}
+                    <span class="text-[10px] px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700">{{ tag }}</span>
+                    {% endfor %}
+                </div>
+                {% endif %}
+                <div class="mt-4 flex items-center gap-2">
+                    <a href="{{ clip.detail_url }}"
+                       class="inline-flex items-center gap-1 rounded bg-gray-100 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-200">
+                        <i class="fas fa-eye"></i> Detail
+                    </a>
+                    <a href="{{ clip.download_url }}"
+                       class="inline-flex items-center gap-1 rounded bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-700">
+                        <i class="fas fa-download"></i> VRMA
+                    </a>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    <script>
+        window.LivePreviews.observeMediaIn(document.getElementById('animation-grid'));
+    </script>
+    {% else %}
+    <div class="text-center py-16">
+        <div class="text-6xl text-gray-300 mb-4"><i class="fas fa-person-running"></i></div>
+        <h2 class="text-2xl font-bold text-gray-600 mb-2">No Animations Found</h2>
+        {% if search %}
+        <p class="text-gray-500 mb-4">No clips match "{{ search }}"</p>
+        <a href="{{ url_for('main.animations') }}" class="text-indigo-600 hover:text-indigo-800 underline">
+            Clear search
+        </a>
+        {% else %}
+        <p class="text-gray-500 mb-4">Upload VRMA, BVH, or animated FBX clips to populate this library.</p>
+        {% if current_user.is_authenticated %}
+        <a href="{{ url_for('main.upload') }}"
+           class="bg-indigo-600 text-white px-6 py-3 rounded-lg hover:bg-indigo-700 transition inline-block">
+            Upload Animation
+        </a>
+        {% endif %}
+        {% endif %}
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

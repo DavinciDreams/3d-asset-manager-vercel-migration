@@ -730,13 +730,17 @@ class Model3D:
     @staticmethod
     def list_models(page=1, per_page=20, search=None, sort="newest", tag=None,
                     category=None, style=None, asset_type=None, public_only=True,
-                    owner_id=None):
+                    owner_id=None, exclude_formats=None):
         engine = current_app.config["DB_ENGINE"]
         predicates = []
         if public_only:
             predicates.append(models.c.is_public.is_(True))
         if owner_id:
             predicates.append(models.c.user_id == str(owner_id))
+        if exclude_formats:
+            formats = [str(fmt).strip().lower() for fmt in exclude_formats if str(fmt).strip()]
+            if formats:
+                predicates.append(models.c.file_format.not_in(formats))
         search_predicate = Model3D._search_predicate(search)
         if search_predicate is not None:
             predicates.append(search_predicate)
@@ -758,11 +762,11 @@ class Model3D:
 
     @staticmethod
     def get_public_models(page=1, per_page=20, search=None, sort="newest", tag=None,
-                          category=None, style=None, asset_type=None):
+                          category=None, style=None, asset_type=None, exclude_formats=None):
         return Model3D.list_models(
             page=page, per_page=per_page, search=search, sort=sort, tag=tag,
             category=category, style=style, asset_type=asset_type,
-            public_only=True,
+            public_only=True, exclude_formats=exclude_formats,
         )
 
     @staticmethod
