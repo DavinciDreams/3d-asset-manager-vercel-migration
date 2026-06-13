@@ -378,6 +378,40 @@ def test_tellus_admin_token_defaults_owner_and_generation_search_metadata(monkey
     assert enriched_model["asset_types"] == ["prop"]
 
 
+def test_tellus_admin_upload_can_target_player_and_world_by_headers(monkeypatch):
+    monkeypatch.setenv("TELLUS_ADMIN_API_TOKEN", "tellus-admin-token")
+    monkeypatch.setenv("TELLUS_ADMIN_USERNAME", "tellusadmin")
+    app = create_app()
+    client = app.test_client()
+
+    with app.app_context():
+        player = _ensure_user("rsafier")
+        admin = _ensure_user("tellusadmin")
+
+    upload = client.post("/api/upload", headers={
+        "Authorization": "Bearer tellus-admin-token",
+        "X-Asset-Username": "rsafier",
+        "X-Tellus-World-Id": "Crystal Arena",
+    }, data={
+        "name": "Crystal Arena Prop",
+        "is_public": "false",
+        "file": (io.BytesIO(b"glTF-crystal-arena" + b"\x00" * 64), "crystal_arena_prop.glb"),
+    }, content_type="multipart/form-data")
+    assert upload.status_code == 201, upload.get_json()
+    model = upload.get_json()["model"]
+    assert model["tags"] == ["tellus", "tellus-world-crystal-arena"]
+
+    listed = client.get(
+        "/api/models?include_private=true&search=tellus-world-crystal-arena",
+        headers={"Authorization": "Bearer tellus-admin-token"},
+    )
+    assert listed.status_code == 200, listed.get_json()
+    found = listed.get_json()["models"][0]
+    assert found["id"] == model["id"]
+    assert found["owner"]["id"] == player.id
+    assert found["owner"]["id"] != admin.id
+
+
 def test_openapi_documents_workflow_and_bearer_auth():
     app = create_app()
     spec = app.test_client().get("/api/openapi.json").get_json()
