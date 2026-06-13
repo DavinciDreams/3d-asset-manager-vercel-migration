@@ -582,6 +582,23 @@ def _parse_enrichment_json(output_text, provider=None, transport=None):
     return parsed
 
 
+def _parse_json_object(output_text, provider=None, transport=None, label="AI provider"):
+    candidate = _extract_json_object_text(output_text)
+    try:
+        parsed = json.loads(candidate)
+    except json.JSONDecodeError as error:
+        detail = _compact_response_detail(output_text)
+        if transport:
+            label = f"{label}/{transport}"
+        raise RuntimeError(
+            f"{label} returned non-JSON output: {error.msg}. "
+            f"Output: {detail or 'empty response'}"
+        ) from error
+    if not isinstance(parsed, dict):
+        raise RuntimeError(f"{label} returned JSON {type(parsed).__name__}, expected object.")
+    return parsed
+
+
 def _extract_chat_output(payload):
     choices = payload.get("choices") or []
     if not choices:
@@ -718,7 +735,15 @@ def _image_part(model):
     max_bytes = int(os.environ.get("AI_AUTOTAG_MAX_IMAGE_BYTES", str(2 * 1024 * 1024)))
     if len(stored) > max_bytes:
         return None
-    content_type = "image/webp"
+    return _image_part_from_bytes(stored, "image/webp")
+
+
+def _image_part_from_bytes(stored, content_type="image/webp"):
+    if not stored:
+        return None
+    max_bytes = int(os.environ.get("AI_AUTOTAG_MAX_IMAGE_BYTES", str(2 * 1024 * 1024)))
+    if len(stored) > max_bytes:
+        return None
     data_url = f"data:{content_type};base64,{base64.b64encode(stored).decode('ascii')}"
     return {
         "type": "image_url",
@@ -742,12 +767,21 @@ def _a2a_image_part(model):
     max_bytes = int(os.environ.get("AI_AUTOTAG_MAX_IMAGE_BYTES", str(2 * 1024 * 1024)))
     if len(stored) > max_bytes:
         return None
+    return _a2a_image_part_from_bytes(stored, "thumbnail.webp", "image/webp")
+
+
+def _a2a_image_part_from_bytes(stored, name="thumbnail.webp", content_type="image/webp"):
+    if not stored:
+        return None
+    max_bytes = int(os.environ.get("AI_AUTOTAG_MAX_IMAGE_BYTES", str(2 * 1024 * 1024)))
+    if len(stored) > max_bytes:
+        return None
     return {
         "kind": "file",
         "file": {
             "bytes": base64.b64encode(stored).decode("ascii"),
-            "name": "thumbnail.webp",
-            "mimeType": "image/webp",
+            "name": name,
+            "mimeType": content_type,
         },
     }
 
@@ -1189,6 +1223,220 @@ def _a2a_metadata(model, provider, api_key, schema, user_text):
     enriched["response_id"] = payload.get("id")
     enriched["vision_fallback"] = vision_fallback
     return enriched
+
+
+AUTORIG_MARKER_KEYS = [
+    "groin", "chest", "neck", "chin",
+    "shoulderL", "shoulderR", "elbowL", "elbowR", "wristL", "wristR",
+    "hipL", "hipR", "kneeL", "kneeR", "ankleL", "ankleR", "toeL", "toeR",
+]
+
+
+def _autorig_marker_schema():
+    point_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "x": {"type": "number", "minimum": 0, "maximum": 1},
+            "y": {"type": "number", "minimum": 0, "maximum": 1},
+            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            "visible": {"type": "boolean"},
+        },
+        "required": ["x", "y", "confidence", "visible"],
+    }
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "markers": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {key: point_schema for key in AUTORIG_MARKER_KEYS},
+            },
+            "facing": {"type": "string", "enum": ["front", "back", "side", "uncertain"]},
+            "pose": {"type": "string", "enum": ["t-pose", "a-pose", "wide-stance", "posed", "unknown"]},
+            "asymmetry": {"type": "string", "enum": ["low", "medium", "high", "unknown"]},
+            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            "warnings": {"type": "array", "items": {"type": "string"}, "maxItems": 4},
+            "notes": {"type": "array", "items": {"type": "string"}, "maxItems": 4},
+        },
+        "required": ["markers", "facing", "pose", "asymmetry", "confidence", "warnings", "notes"],
+    }
+
+
+def _autorig_marker_prompt(model, view="front"):
+    view = view if view in {"front", "profile"} else "front"
+    view_instruction = (
+        "This is a FRONT view. Return x/y for all body landmarks visible or inferable from the front silhouette. "
+        "Focus on anatomical left/right and joint centers."
+        if view == "front"
+        else
+        "This is a PROFILE/SIDE view. Return x/y for depth-critical landmarks only when visible or inferable: "
+        "chest, neck, chin, elbowL/R, wristL/R, kneeL/R, ankleL/R, toeL/R. The client will preserve front-view x "
+        "and use this profile image to correct y/depth. You may still include other markers at low confidence."
+    )
+    return (
+        "You are placing 2D rigging landmarks for a humanoid 3D character from a rendered model view. "
+        "Return concise JSON only. Coordinates are normalized image coordinates: x=0 left edge, x=1 right edge, "
+        "y=0 top edge, y=1 bottom edge. Use the avatar's anatomical left/right, not the viewer's left/right. "
+        "Place only visible or strongly inferable humanoid landmarks. For uncertain hidden landmarks, estimate from "
+        "symmetry and set confidence below 0.55. Do not include prose outside JSON.\n\n"
+        "Also classify whether the visible pose is close to a T-pose or A-pose. If arms or legs are strongly posed, "
+        "crossed, hidden, very wide, bent, or visibly asymmetric, set pose to posed or wide-stance, set asymmetry to "
+        "medium/high as appropriate, and add a warning that auto-rigging will need manual correction or a cleaner "
+        "front/profile pass. Wide-legged fairies, dancing poses, crossed legs, one-arm poses, and non-mirrored "
+        "silhouettes should not be treated as clean T/A-pose sources.\n\n"
+        + view_instruction + "\n\n"
+        "Required marker meanings:\n"
+        "- groin: pelvis center between hip sockets.\n"
+        "- chest: upper torso center around sternum.\n"
+        "- neck: neck base, below jaw/head.\n"
+        "- chin: lower face/head anchor, not top of hair.\n"
+        "- shoulderL/R: avatar left/right shoulder sockets.\n"
+        "- elbowL/R, wristL/R: avatar left/right arm joints.\n"
+        "- hipL/R, kneeL/R, ankleL/R, toeL/R: avatar left/right leg joints and toe/foot direction points.\n\n"
+        "Asset context: "
+        + json.dumps({
+            "name": model.name,
+            "filename": model.original_filename,
+            "format": model.file_format,
+            "description": model.description,
+            "view": view,
+        }, sort_keys=True)
+    )
+
+
+def _normalize_marker_suggestions(parsed):
+    raw = parsed.get("markers") if isinstance(parsed, dict) else {}
+    markers = {}
+    if isinstance(raw, dict):
+        for key in AUTORIG_MARKER_KEYS:
+            point = raw.get(key)
+            if not isinstance(point, dict):
+                continue
+            try:
+                x = max(0.0, min(1.0, float(point.get("x"))))
+                y = max(0.0, min(1.0, float(point.get("y"))))
+                confidence = max(0.0, min(1.0, float(point.get("confidence", 0.5))))
+            except (TypeError, ValueError):
+                continue
+            markers[key] = {
+                "x": x,
+                "y": y,
+                "confidence": confidence,
+                "visible": bool(point.get("visible", True)),
+            }
+    notes = parsed.get("notes") if isinstance(parsed.get("notes"), list) else []
+    warnings = parsed.get("warnings") if isinstance(parsed.get("warnings"), list) else []
+    pose = parsed.get("pose") if parsed.get("pose") in {"t-pose", "a-pose", "wide-stance", "posed", "unknown"} else "unknown"
+    asymmetry = parsed.get("asymmetry") if parsed.get("asymmetry") in {"low", "medium", "high", "unknown"} else "unknown"
+    if pose not in {"t-pose", "a-pose"} and not warnings:
+        warnings = ["Pose is not close to a clean T-pose or A-pose; review AI markers before building the rig."]
+    if asymmetry in {"medium", "high"} and not any("asym" in str(warning).lower() for warning in warnings):
+        warnings.append("Visible silhouette is asymmetric; mirrored marker placement may need manual correction.")
+    return {
+        "markers": markers,
+        "facing": parsed.get("facing") if parsed.get("facing") in {"front", "back", "side", "uncertain"} else "uncertain",
+        "pose": pose,
+        "asymmetry": asymmetry,
+        "confidence": max(0.0, min(1.0, float(parsed.get("confidence", 0.5) or 0.5))),
+        "warnings": [str(warning)[:180] for warning in warnings[:4]],
+        "notes": [str(note)[:160] for note in notes[:4]],
+    }
+
+
+def suggest_autorig_markers(model, image_bytes=None, image_mime="image/webp", view="front"):
+    provider = _provider()
+    api_key = _api_key()
+    if not api_key:
+        return None
+    image_bytes = image_bytes or _thumbnail_bytes(model)
+    image_mime = image_mime or "image/webp"
+    view = view if view in {"front", "profile"} else "front"
+    if not image_bytes:
+        raise RuntimeError("Auto-rig marker suggestion requires a saved thumbnail.")
+
+    schema = _autorig_marker_schema()
+    user_text = _autorig_marker_prompt(model, view=view)
+
+    if _transport(provider) == "a2a":
+        image_part = _a2a_image_part_from_bytes(image_bytes, f"autorig-{view}.webp", image_mime)
+        if not image_part:
+            raise RuntimeError("Auto-rig marker suggestion requires an image-capable thumbnail.")
+        text_part = {"kind": "text", "text": user_text + "\n\nReturn JSON matching this schema:\n" + json.dumps(schema, sort_keys=True)}
+        payload = _post_json(
+            _base_url(provider),
+            {
+                "jsonrpc": "2.0",
+                "id": f"autorig-markers-{uuid.uuid4()}",
+                "method": os.environ.get("HYADES_A2A_METHOD", "message/send"),
+                "params": {
+                    "message": {
+                        "role": os.environ.get("HYADES_A2A_ROLE", "user"),
+                        "parts": [text_part, image_part],
+                        "messageId": f"autorig-markers-{uuid.uuid4()}",
+                    },
+                    "metadata": {"model": _model_name(provider)},
+                    "configuration": {"acceptedOutputModes": ["application/json", "text/plain"]},
+                },
+            },
+            {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            provider=provider,
+            transport="a2a",
+        )
+        output_text = _strip_json_fence(_extract_a2a_output(payload))
+        task_id = _a2a_task_id(payload)
+        if not output_text and task_id:
+            payload = _poll_a2a_task(provider, api_key, task_id)
+            output_text = _strip_json_fence(_extract_a2a_output(payload or {}))
+        parsed = _parse_json_object(output_text, provider=provider, transport="a2a", label="auto-rig marker provider")
+        result = _normalize_marker_suggestions(parsed)
+        result.update({
+            "provider": provider,
+            "transport": "a2a",
+            "model": _model_name(provider),
+            "view": view,
+            "response_id": payload.get("id") if isinstance(payload, dict) else None,
+        })
+        return result
+
+    image = _image_part_from_bytes(image_bytes, image_mime) if _openai_transport_supports_image_parts(provider) else None
+    if not image:
+        raise RuntimeError("Auto-rig marker suggestion requires image input support.")
+    payload = _post_json(
+        _request_url(_base_url(provider)),
+        {
+            "model": _model_name(provider),
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are a precise humanoid rigging assistant. Return JSON only.",
+                },
+                {"role": "user", "content": [{"type": "text", "text": user_text}, image]},
+            ],
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "autorig_marker_suggestions",
+                    "strict": True,
+                    "schema": schema,
+                },
+            },
+        },
+        {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        provider=provider,
+        transport="openai",
+    )
+    parsed = _parse_json_object(_extract_chat_output(payload), provider=provider, transport="openai", label="auto-rig marker provider")
+    result = _normalize_marker_suggestions(parsed)
+    result.update({
+        "provider": provider,
+        "transport": "openai",
+        "model": _model_name(provider),
+        "view": view,
+        "response_id": payload.get("id") if isinstance(payload, dict) else None,
+    })
+    return result
 
 
 def _ai_metadata(model, extra_context=None):

@@ -7,6 +7,7 @@ from app.db import asset_files, models as model_rows, optimization_jobs
 from app.models import ApiKey, AssetBundle, Model3D, ModelVariant, User, WorldState
 from app.openapi import get_openapi_spec
 from app.permissions import asset_admin_configured, can_manage_model, is_asset_admin_user
+import base64
 import hashlib
 import hmac
 import io
@@ -1232,6 +1233,71 @@ def post_rig(model_id):
     except Exception as e:
         print(f"API rig error: {e}")
         return jsonify({'error': 'Could not save rigged model.'}), 500
+
+
+def _decode_data_url_image(value):
+    value = str(value or '').strip()
+    if not value:
+        return None, None
+    if not value.startswith('data:') or ';base64,' not in value:
+        raise ValueError('Expected a base64 data URL image.')
+    header, encoded = value.split(';base64,', 1)
+    content_type = header[5:].strip().lower() or 'image/png'
+    if content_type not in {'image/png', 'image/jpeg', 'image/jpg', 'image/webp'}:
+        raise ValueError('Unsupported marker suggestion image type.')
+    data = base64.b64decode(encoded, validate=True)
+    if len(data) > int(os.environ.get('AI_AUTORIG_MAX_IMAGE_BYTES', str(2 * 1024 * 1024))):
+        raise ValueError('Marker suggestion image is too large.')
+    return data, ('image/jpeg' if content_type == 'image/jpg' else content_type)
+
+
+@api_bp.route('/model/<model_id>/rig/suggest-markers', methods=['POST'])
+@login_required
+def suggest_rig_markers(model_id):
+    """Use the configured vision provider to draft autorig marker positions.
+
+    The client may pass image_data_url from the current front/profile rig view.
+    If omitted, the saved thumbnail is used as a front-view fallback.
+    """
+    try:
+        model = Model3D.get_by_id(model_id)
+        if not model:
+            return jsonify({'error': 'Model not found'}), 404
+        if not _can_write_model(model):
+            return jsonify({'error': 'Access denied'}), 403
+
+        data = _payload()
+        view = (data.get('view') or 'front').strip().lower()
+        if view not in {'front', 'profile'}:
+            view = 'front'
+        image_bytes = image_mime = None
+        if data.get('image_data_url'):
+            try:
+                image_bytes, image_mime = _decode_data_url_image(data.get('image_data_url'))
+            except ValueError as e:
+                return jsonify({'error': 'Invalid image', 'detail': str(e)}), 400
+        elif not model.thumbnail_file_id:
+            missing_thumbnail = _thumbnail_required_error(model)
+            return jsonify({'error': 'Thumbnail required', 'detail': missing_thumbnail}), 409
+
+        try:
+            from app.ai_enrichment import suggest_autorig_markers
+            suggestions = suggest_autorig_markers(
+                model,
+                image_bytes=image_bytes,
+                image_mime=image_mime or 'image/webp',
+                view=view,
+            )
+        except Exception as e:
+            detail = str(e)[:500]
+            print(f"API rig marker suggestion error for model {model.id}: {detail}", flush=True)
+            return jsonify({'error': 'AI marker suggestion failed', 'detail': detail}), 502
+        if not suggestions:
+            return jsonify({'error': 'AI marker suggestion unavailable'}), 503
+        return jsonify({'success': True, 'suggestions': suggestions})
+    except Exception as e:
+        print(f"API rig marker suggestion route error: {e}")
+        return jsonify({'error': 'AI marker suggestion failed'}), 500
 
 
 @api_bp.route('/model/<model_id>/rigged', methods=['GET'])

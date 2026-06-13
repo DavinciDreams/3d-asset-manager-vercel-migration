@@ -1641,6 +1641,12 @@
                             return row.center ? name : name + ' L/R';
                         }
 
+                        function colorForMarker(key) {
+                            const base = key.replace(/[LR]$/, '');
+                            const row = PLAN.find((item) => item.key === base) || PROFILE_PLAN.find((item) => item.key === base);
+                            return row ? row.color : 0x38bdf8;
+                        }
+
                         // 2D click -> world position on the mesh medial axis:
                         // intersect the ortho ray with all meshes; use the
                         // midpoint of the nearest & farthest hit (the centerline
@@ -1751,6 +1757,43 @@
                             next.y = world.y;
                             next.z = world.z;
                             setMarker(key, next, color);
+                        }
+
+                        function worldFromNormalizedImage(point) {
+                            if (!point || typeof point.x !== 'number' || typeof point.y !== 'number') return null;
+                            const ndcX = point.x * 2 - 1;
+                            const ndcY = -(point.y * 2 - 1);
+                            return pickWorld(ndcX, ndcY);
+                        }
+
+                        function applyMarkerSuggestions(suggestions, options = {}) {
+                            if (!active) return { placed: 0, skipped: 0 };
+                            const markerData = suggestions && suggestions.markers ? suggestions.markers : suggestions;
+                            if (!markerData || typeof markerData !== 'object') return { placed: 0, skipped: 0 };
+                            const minConfidence = Number.isFinite(options.minConfidence) ? options.minConfidence : 0.35;
+                            const mode = options.view === 'profile' ? 'profile' : viewMode;
+                            let placed = 0;
+                            let skipped = 0;
+                            for (const [key, point] of Object.entries(markerData)) {
+                                if (!point || point.visible === false || Number(point.confidence || 0) < minConfidence) {
+                                    skipped++;
+                                    continue;
+                                }
+                                const world = worldFromNormalizedImage(point);
+                                if (!world) {
+                                    skipped++;
+                                    continue;
+                                }
+                                const color = colorForMarker(key);
+                                if (mode === 'profile' && markers[key]) updateMarkerFromProfile(key, world, color);
+                                else setMarker(key, world, color);
+                                placed++;
+                            }
+                            stepIndex = PLAN.length;
+                            if (mode === 'profile') profileStepIndex = PROFILE_PLAN.length;
+                            clearPreview();
+                            if (onChange) onChange(progress());
+                            return { placed, skipped };
                         }
 
                         function posePreviewBones(bones) {
@@ -1902,6 +1945,11 @@
                             },
                             nudgeElbows(amount) {
                                 nudgeMarkerDepth(['elbowL', 'elbowR'], amount);
+                            },
+                            applyMarkerSuggestions,
+                            captureRigView() {
+                                renderer.render(scene, camera);
+                                return renderer.domElement.toDataURL('image/png');
                             },
                             progress,
 

@@ -407,7 +407,18 @@
                     </div>
                     <p id="rig-directions" class="mt-2 text-xs text-slate-500">Knees forward, elbows backward.</p>
                 </div>
+                <div id="rig-ai-warning"
+                     class="hidden mb-3 rounded border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800"></div>
                 <div class="flex flex-wrap gap-2 mb-3">
+                    <button type="button" id="rig-ai-front"
+                            class="bg-indigo-50 border border-indigo-200 text-indigo-700 px-3 py-2 rounded text-sm hover:bg-indigo-100 transition">
+                        <i class="fas fa-wand-magic-sparkles mr-1"></i>AI Front
+                    </button>
+                    <button type="button" id="rig-ai-profile"
+                            class="bg-indigo-50 border border-indigo-200 text-indigo-700 px-3 py-2 rounded text-sm hover:bg-indigo-100 transition disabled:opacity-50"
+                            disabled>
+                        AI Profile
+                    </button>
                     <button type="button" id="rig-preview"
                             class="bg-white border border-slate-300 text-slate-700 px-3 py-2 rounded text-sm hover:bg-slate-50 transition disabled:opacity-50"
                             disabled>
@@ -1593,6 +1604,9 @@ document.addEventListener('DOMContentLoaded', function() {
     const toVrmEl = document.getElementById('rig-to-vrm');
     const normalizeForwardEl = document.getElementById('rig-normalize-forward');
     const normalizeSidesEl = document.getElementById('rig-normalize-sides');
+    const aiFrontBtn = document.getElementById('rig-ai-front');
+    const aiProfileBtn = document.getElementById('rig-ai-profile');
+    const aiWarningEl = document.getElementById('rig-ai-warning');
     const statusEl = document.getElementById('rig-status');
     let rigDirections = { knees: 1, elbows: -1 };
 
@@ -1620,6 +1634,7 @@ document.addEventListener('DOMContentLoaded', function() {
         buildBtn.disabled = !p.complete;
         if (previewBtn) previewBtn.disabled = !p.complete;
         if (profileViewBtn) profileViewBtn.disabled = !p.complete;
+        if (aiProfileBtn) aiProfileBtn.disabled = !p.complete;
         if (frontViewBtn && profileViewBtn) {
             const inProfile = p.viewMode === 'profile';
             frontViewBtn.className = inProfile
@@ -1653,6 +1668,24 @@ document.addEventListener('DOMContentLoaded', function() {
         const r = rig();
         if (r && r.setDirections) r.setDirections(rigDirections);
         renderDirections();
+    }
+
+    function showAiRigWarning(suggestions) {
+        if (!aiWarningEl) return;
+        const warnings = suggestions && Array.isArray(suggestions.warnings) ? suggestions.warnings : [];
+        const pose = suggestions && suggestions.pose ? suggestions.pose : '';
+        const asymmetry = suggestions && suggestions.asymmetry ? suggestions.asymmetry : '';
+        if (!warnings.length && (!pose || ['t-pose', 'a-pose', 'unknown'].includes(pose)) && !['medium', 'high'].includes(asymmetry)) {
+            aiWarningEl.classList.add('hidden');
+            aiWarningEl.textContent = '';
+            return;
+        }
+        const parts = [];
+        if (pose && pose !== 'unknown') parts.push('Pose: ' + pose + '.');
+        if (asymmetry && asymmetry !== 'unknown') parts.push('Asymmetry: ' + asymmetry + '.');
+        parts.push(...warnings);
+        aiWarningEl.textContent = parts.join(' ');
+        aiWarningEl.classList.remove('hidden');
     }
 
     function open() {
@@ -1776,6 +1809,46 @@ document.addEventListener('DOMContentLoaded', function() {
         if (r && r.clearPreview) r.clearPreview();
         setStatus('Test pose cleared.');
     });
+
+    async function applyAiRigMarkers(view) {
+        const r = rig();
+        if (!r) return;
+        const btn = view === 'profile' ? aiProfileBtn : aiFrontBtn;
+        if (btn) btn.disabled = true;
+        try {
+            if (view === 'profile') {
+                if (r.setViewMode) r.setViewMode('profile');
+            } else if (r.setViewMode) {
+                r.setViewMode('front');
+            }
+            await new Promise((resolve) => requestAnimationFrame(resolve));
+            const image = r.captureRigView ? r.captureRigView() : null;
+            setStatus(view === 'profile'
+                ? 'Asking AI to suggest profile depth markers...'
+                : 'Asking AI to suggest front landmarks...');
+            const resp = await fetch('/api/model/' + MODEL_ID + '/rig/suggest-markers', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ view, image_data_url: image })
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok || !data.success) throw new Error(data.detail || data.error || 'AI marker suggestion failed.');
+            const result = r.applyMarkerSuggestions
+                ? r.applyMarkerSuggestions(data.suggestions, { view, minConfidence: view === 'profile' ? 0.3 : 0.35 })
+                : { placed: 0, skipped: 0 };
+            showAiRigWarning(data.suggestions);
+            const notes = (data.suggestions && data.suggestions.notes || []).join(' ');
+            setStatus('AI placed ' + result.placed + ' marker(s), skipped ' + result.skipped
+                + '. Review and correct before Build Rig.' + (notes ? ' ' + notes : ''));
+        } catch (err) {
+            setStatus(err.message || 'AI marker suggestion failed.', true);
+        } finally {
+            if (btn) btn.disabled = false;
+            renderProgress(r.progress && r.progress());
+        }
+    }
+    if (aiFrontBtn) aiFrontBtn.addEventListener('click', () => applyAiRigMarkers('front'));
+    if (aiProfileBtn) aiProfileBtn.addEventListener('click', () => applyAiRigMarkers('profile'));
 
     buildBtn.addEventListener('click', async () => {
         const r = rig();
