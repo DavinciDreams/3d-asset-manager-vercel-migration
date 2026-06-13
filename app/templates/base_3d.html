@@ -25,6 +25,9 @@
         import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
         import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
         import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+        // Client-side auto-rigging (skeleton derivation + skinning). Served from
+        // Flask's static folder; resolves `three` through the importmap above.
+        import { rigModel } from '{{ url_for("static", filename="js/autorig-skinning.js") }}';
 
         const DRACO_PATH = 'https://www.gstatic.com/draco/versioned/decoders/1.5.7/';
         const BASIS_PATH = 'https://cdn.jsdelivr.net/npm/three@0.184.0/examples/jsm/libs/basis/';
@@ -468,7 +471,9 @@
                 const height = container.clientHeight || 420;
                 const scene = new THREE.Scene();
                 scene.background = new THREE.Color(0xffffff);
-                const camera = new THREE.PerspectiveCamera(45, width / height, 0.01, 1000);
+                // `let` (not const): the auto-rig editor temporarily swaps in an
+                // orthographic front camera for 2D joint picking, then restores this.
+                let camera = new THREE.PerspectiveCamera(45, width / height, 0.01, 1000);
                 const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, preserveDrawingBuffer: true });
                 renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
                 renderer.setSize(width, height, false);
@@ -1469,6 +1474,200 @@
                             extras.forEach((g, i) => { if (parents[i]) parents[i].add(g); });
                         }
                     },
+                    // --- Auto-rig editor -------------------------------------
+                    // A Mixamo-style 2D "pick the joints" flow: switch to a flat
+                    // orthographic front view, click to place a few markers
+                    // (chin, wrists, elbows, knees, groin), then build a
+                    // mixamorig:* skeleton + skin the mesh (client-side) and
+                    // export a rigged GLB. Bone names match tools/vrm-bone-map.js
+                    // so the result converts to a VRM + plays VRMA clips.
+                    autorig: (() => {
+                        // Ordered marker plan. center=true => single centerline
+                        // marker; otherwise a mirrored L/R pair (place L, R auto-mirrors).
+                        const PLAN = [
+                            { key: 'groin', label: 'Groin / hips', center: true,  color: 0xff4081 },
+                            { key: 'chin',  label: 'Chin',         center: true,  color: 0x00bcd4 },
+                            { key: 'knee',  label: 'Knees',        center: false, color: 0xff9800 },
+                            { key: 'elbow', label: 'Elbows',       center: false, color: 0xffeb3b },
+                            { key: 'wrist', label: 'Wrists',       center: false, color: 0x8bc34a },
+                        ];
+                        let active = false;
+                        let prevCamera = null;       // perspective cam to restore
+                        let orthoCam = null;
+                        let raycaster = null;
+                        let markers = {};            // key -> { world:Vector3, sprite }
+                        let mirror = true;
+                        let stepIndex = 0;           // which PLAN row we're placing
+                        let pendingSide = 'L';       // for paired markers
+                        let bbox = null, centerX = 0;
+                        let meshes = [];
+                        let onChange = null;         // UI callback(progress)
+
+                        function meshList() {
+                            const out = [];
+                            model.traverse((o) => { if (o.isMesh) out.push(o); });
+                            return out;
+                        }
+
+                        function makeSprite(color) {
+                            const cv = document.createElement('canvas');
+                            cv.width = cv.height = 64;
+                            const ctx = cv.getContext('2d');
+                            ctx.beginPath(); ctx.arc(32, 32, 26, 0, Math.PI * 2);
+                            ctx.fillStyle = '#' + color.toString(16).padStart(6, '0');
+                            ctx.fill(); ctx.lineWidth = 6; ctx.strokeStyle = '#fff'; ctx.stroke();
+                            const tex = new THREE.CanvasTexture(cv);
+                            const mat = new THREE.SpriteMaterial({ map: tex, depthTest: false, depthWrite: false });
+                            const sp = new THREE.Sprite(mat);
+                            const s = bbox.getSize(new THREE.Vector3()).length() * 0.04;
+                            sp.scale.set(s, s, s);
+                            sp.renderOrder = 999;
+                            return sp;
+                        }
+
+                        // Place/replace a marker at a world position.
+                        function setMarker(key, world, color) {
+                            if (markers[key]) scene.remove(markers[key].sprite);
+                            const sp = makeSprite(color);
+                            sp.position.copy(world);
+                            scene.add(sp);
+                            markers[key] = { world: world.clone(), sprite: sp };
+                        }
+
+                        // 2D click -> world position on the mesh medial axis:
+                        // intersect the ortho ray with all meshes; use the
+                        // midpoint of the nearest & farthest hit (the centerline
+                        // depth). Returns null if the click missed the silhouette.
+                        function pickWorld(ndcX, ndcY) {
+                            raycaster.setFromCamera(new THREE.Vector2(ndcX, ndcY), orthoCam);
+                            const hits = raycaster.intersectObjects(meshes, true);
+                            if (!hits.length) return null;
+                            const front = hits[0].point;
+                            const back = hits[hits.length - 1].point;
+                            return front.clone().lerp(back, 0.5);
+                        }
+
+                        function progress() {
+                            const placed = Object.keys(markers);
+                            const need = ['groin', 'chin', 'kneeL', 'kneeR', 'elbowL', 'elbowR', 'wristL', 'wristR'];
+                            return {
+                                placed,
+                                complete: need.every((k) => markers[k]),
+                                step: PLAN[stepIndex] ? PLAN[stepIndex].label : 'Done',
+                                side: pendingSide,
+                                done: need.filter((k) => markers[k]).length,
+                                total: need.length,
+                            };
+                        }
+
+                        function advance() {
+                            const row = PLAN[stepIndex];
+                            if (!row) return;
+                            if (row.center) { stepIndex++; pendingSide = 'L'; }
+                            else if (pendingSide === 'L' && !mirror) { pendingSide = 'R'; }
+                            else if (pendingSide === 'L' && mirror) { stepIndex++; pendingSide = 'L'; }
+                            else { pendingSide = 'L'; stepIndex++; }
+                            if (onChange) onChange(progress());
+                        }
+
+                        function onPointerDown(e) {
+                            if (!active) return;
+                            const row = PLAN[stepIndex];
+                            if (!row) return;
+                            const rect = renderer.domElement.getBoundingClientRect();
+                            const ndcX = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+                            const ndcY = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+                            const world = pickWorld(ndcX, ndcY);
+                            if (!world) return; // missed silhouette
+                            if (row.center) {
+                                setMarker(row.key, world, row.color);
+                            } else {
+                                const side = pendingSide;
+                                setMarker(row.key + side, world, row.color);
+                                if (mirror) {
+                                    const mirrored = world.clone();
+                                    mirrored.x = 2 * centerX - world.x;
+                                    setMarker(row.key + (side === 'L' ? 'R' : 'L'), mirrored, row.color);
+                                }
+                            }
+                            advance();
+                        }
+
+                        return {
+                            get active() { return active; },
+                            set onChange(fn) { onChange = fn; },
+                            get mirror() { return mirror; },
+                            setMirror(v) { mirror = Boolean(v); },
+                            progress,
+
+                            // Enter rig mode: freeze auto-rotate, swap to an
+                            // orthographic front view (camera down -Z) framed to
+                            // the model, and arm the click handler.
+                            enter() {
+                                if (active || !model) return;
+                                active = true;
+                                controls.autoRotate = false;
+                                bbox = new THREE.Box3().setFromObject(model);
+                                const c = bbox.getCenter(new THREE.Vector3());
+                                const size = bbox.getSize(new THREE.Vector3());
+                                centerX = c.x;
+                                const pad = 1.12;
+                                const halfW = (size.x / 2) * pad, halfH = (size.y / 2) * pad;
+                                const depth = size.z + size.length();
+                                orthoCam = new THREE.OrthographicCamera(-halfW, halfW, halfH, -halfH, 0.001, depth * 4);
+                                orthoCam.position.set(c.x, c.y, c.z + depth);
+                                orthoCam.up.set(0, 1, 0);
+                                orthoCam.lookAt(c);
+                                orthoCam.updateProjectionMatrix();
+                                prevCamera = camera;
+                                camera = orthoCam;           // animate() renders `camera`
+                                controls.enabled = false;    // lock orbit during picking
+                                raycaster = new THREE.Raycaster();
+                                meshes = meshList();
+                                renderer.domElement.addEventListener('pointerdown', onPointerDown);
+                                if (onChange) onChange(progress());
+                            },
+
+                            // Remove a placed marker (re-place flow).
+                            clearMarker(key) {
+                                if (markers[key]) { scene.remove(markers[key].sprite); delete markers[key]; }
+                            },
+
+                            reset() {
+                                Object.values(markers).forEach((m) => scene.remove(m.sprite));
+                                markers = {}; stepIndex = 0; pendingSide = 'L';
+                                if (onChange) onChange(progress());
+                            },
+
+                            exit() {
+                                if (!active) return;
+                                this.reset();
+                                renderer.domElement.removeEventListener('pointerdown', onPointerDown);
+                                if (prevCamera) { camera = prevCamera; prevCamera = null; }
+                                controls.enabled = true;
+                                orthoCam = null; raycaster = null; meshes = [];
+                                active = false;
+                            },
+
+                            // Build the skeleton + skin the mesh from the placed
+                            // markers and export a rigged GLB Blob. Throws if the
+                            // marker set is incomplete.
+                            async exportGLB() {
+                                const p = progress();
+                                if (!p.complete) throw new Error('Place all joint markers first.');
+                                const m = {};
+                                for (const k of Object.keys(markers)) m[k] = markers[k].world.clone();
+                                const { root } = rigModel(model, m, bbox);
+
+                                const exportRoot = new THREE.Scene();
+                                exportRoot.add(root);
+                                const glb = await new Promise((resolve, reject) => {
+                                    new GLTFExporter().parse(exportRoot, resolve, reject, { binary: true, onlyVisible: true });
+                                });
+                                return new Blob([glb], { type: 'model/gltf-binary' });
+                            },
+                        };
+                    })(),
                     canvas: renderer.domElement,
                     dispose() {
                         disposed = true;
@@ -1483,6 +1682,7 @@
                         if (mouthMixer) { mouthMixer.stopAllAction(); mouthMixer = null; }
                         if (api && api.eyes && api.eyes.active) api.eyes.remove();
                         if (api && api.mouth && api.mouth.active) api.mouth.remove();
+                        if (api && api.autorig && api.autorig.active) api.autorig.exit();
                         if (model) disposeObject(model);
                         scene.environment = null;
                         envTexture.dispose();

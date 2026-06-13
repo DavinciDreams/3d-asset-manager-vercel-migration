@@ -78,6 +78,49 @@ A Flask web app for uploading, viewing, browsing, and optimizing 3D assets
 
 ## Recent Changes
 
+### 2026-06-12 — In-app Mixamo-style rigging (Phase 1, manual MVP)
+**Why:** User finds 3D skeleton alignment (Blender/mesh2motion) too hard; wants
+Mixamo's easy 2D "pick the joints" flow IN the app. Also: FBX export 502s (assimp
+can't read meshopt GLBs) and the user only needed FBX to load into Mixamo — so
+rigging in-app removes that need. Vision auto-place deferred to Phase 2.
+
+**New: `app/static/js/autorig-skinning.js`** (first file in `app/static/`). Pure
+Three.js, ported (simplified) from mesh2motion's skinning:
+- `buildSkeletonFromMarkers(markers, bbox)` — 8 markers (chin, groin, L/R
+  wrist/elbow/knee) → full `mixamorig:*` bone hierarchy; hip/shoulder widths
+  derived from L/R marker X-spread (adapts to non-human proportions).
+- nearest-bone(midpoint-to-child) weights + boundary smooth + normalize;
+  **hip rule** (verts below crotchY never bind to Hips) applied in BOTH the
+  initial pass AND the smoother (the smoother re-grabbing them was a real bug,
+  fixed + tested). `skinMesh`/`rigModel` → bound SkinnedMesh(es).
+- Node-tested: 27 bones, all 15 VRM-required bones satisfied, weight rows sum to
+  1.0, 0 verts below crotchY on Hips.
+
+**Viewer (`base_3d.html`):** `camera` made `let` (was const); new `api.autorig`
+sub-IIFE — swaps to an ORTHOGRAPHIC front cam for unambiguous 2D→3D mapping;
+click places markers (Sprites in `scene`, not exported); depth = midpoint of
+front/back mesh hits (medial axis); mirror L→R; `exportGLB()` via re-parent +
+GLTFExporter. Imported from the static module via `url_for('static',...)`.
+
+**`model_detail.html`:** "Rig Avatar" button + floating panel (step list, mirror
+toggle, Build/Restart/Cancel, "also make VRM"); Build → `autorig.exportGLB()` →
+`POST /api/model/<id>/rig`. Export menu: rigged-GLB link + **assimp formats
+(obj/stl/ply/fbx/dae/3ds) hidden when `model_is_meshopt`** (retires the 502 FBX
+path for compressed models; GLB/GLTF always shown).
+
+**`api.py`:** `POST /model/<id>/rig` (store 'rigged' variant, optional `to_vrm=1`)
++ `GET /model/<id>/rigged`; refactored `post_to_vrm` → extracted
+`_convert_glb_bytes_to_vrm` (+ `VrmConversionError` with status); to-vrm now
+prefers the 'rigged' variant as source.
+**`main.py`:** passes `rigged_variant` + `model_is_meshopt` (new
+`_glb_uses_compression` detects EXT_meshopt_compression / KHR_mesh_quantization).
+
+**Verified:** py_compile (api/main/conversion/models); JS syntax (module +
+base_3d + model_detail); routes register; model_detail renders (owner) with rig
+UI; FBX hidden for meshopt / shown otherwise; static module served 200. ⚠️ NOT
+yet tested in a real browser (marker placement, skinning deformation, VRM
+round-trip on a live model) — that's the next step.
+
 ### 2026-06-12 — VRM/VRMA API endpoints + rig-safe VRM optimization
 **Three asks:** surface animations + avatars via API, and optimize VRM avatars.
 

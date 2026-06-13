@@ -4,11 +4,43 @@ from app.models import ApiKey, Model3D, ModelVariant, User
 from werkzeug.utils import secure_filename
 import hashlib
 import io
+import json
 
 main_bp = Blueprint('main', __name__)
 
 # Rows per page for the dashboard table's infinite scroll.
 DASHBOARD_PER_PAGE = 30
+
+_GLB_MAGIC = b'glTF'
+_GLB_JSON_CHUNK = 0x4E4F534A
+
+
+def _glb_uses_compression(glb_bytes):
+    """True if a GLB declares EXT_meshopt_compression or KHR_mesh_quantization.
+    assimp can't read either, so the export menu hides assimp-only formats for
+    such models. Parses just the JSON chunk; never raises."""
+    import struct
+    if not glb_bytes or glb_bytes[:4] != _GLB_MAGIC or len(glb_bytes) < 20:
+        return False
+    try:
+        magic, version, declared = struct.unpack_from('<4sII', glb_bytes, 0)
+        if magic != _GLB_MAGIC or version != 2 or declared > len(glb_bytes):
+            return False
+        offset = 12
+        while offset + 8 <= declared:
+            chunk_len, chunk_type = struct.unpack_from('<II', glb_bytes, offset)
+            start = offset + 8
+            end = start + chunk_len
+            if end > declared:
+                return False
+            if chunk_type == _GLB_JSON_CHUNK:
+                gltf = json.loads(glb_bytes[start:end].decode('utf-8').rstrip(' \t\r\n\0'))
+                used = set(gltf.get('extensionsUsed') or [])
+                return bool(used & {'EXT_meshopt_compression', 'KHR_mesh_quantization'})
+            offset = end
+    except Exception:
+        pass
+    return False
 
 
 def _enrich_dashboard_models(user_models):
@@ -287,11 +319,27 @@ def model_detail(model_id):
         # VRM variant (if any): a rigged GLB converted to a VRM avatar via
         # glb2vrm; lets the owner play VRMA clips on it.
         vrm_variant = ModelVariant.get(model.id, 'vrm')
+        # Rigged variant (if any): owner-rigged GLB from the Rig Avatar editor.
+        rigged_variant = ModelVariant.get(model.id, 'rigged')
+
+        # Is the viewable GLB meshopt-compressed / quantized? assimp can't read
+        # those, so the export menu hides the assimp-only formats (obj/fbx/...)
+        # for them (avoids the 502 they'd otherwise produce). Only worth checking
+        # for GLB/GLTF models; a missing/odd file just leaves the flag False.
+        model_is_meshopt = False
+        if (model.file_format or '').lower() in ('glb', 'gltf'):
+            try:
+                data, _ = model.get_viewable_data()
+                model_is_meshopt = _glb_uses_compression(data)
+            except Exception:
+                model_is_meshopt = False
 
         return render_template('model_detail.html', model=model, owner=owner,
                                all_tags=all_tags, game_variant=game_variant,
                                fixed_eyes_variant=fixed_eyes_variant,
-                               vrm_variant=vrm_variant)
+                               vrm_variant=vrm_variant,
+                               rigged_variant=rigged_variant,
+                               model_is_meshopt=model_is_meshopt)
         
     except Exception as e:
         print(f"Model detail error: {e}")

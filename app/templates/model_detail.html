@@ -172,12 +172,23 @@
                     </button>
                     <div id="export-menu"
                          class="hidden absolute right-0 z-20 mt-1 w-44 bg-white border border-gray-200 rounded-lg shadow-lg py-1">
-                        {% for fmt in ['glb', 'gltf', 'obj', 'stl', 'ply', 'fbx', 'dae', '3ds'] %}
+                        {# GLB/GLTF are always safe (Three.js/GLTFExporter native). #}
+                        {% for fmt in ['glb', 'gltf'] %}
                         <a href="{{ url_for('api.export_model', model_id=model.id) }}?format={{ fmt }}"
                            class="block px-4 py-2 text-sm text-gray-700 hover:bg-indigo-50">
                             {{ fmt.upper() }}
                         </a>
                         {% endfor %}
+                        {# OBJ/STL/PLY/FBX/DAE/3DS go through assimp, which cannot read
+                           meshopt-compressed GLBs and 502s. Hide them for such models. #}
+                        {% if not model_is_meshopt %}
+                        {% for fmt in ['obj', 'stl', 'ply', 'fbx', 'dae', '3ds'] %}
+                        <a href="{{ url_for('api.export_model', model_id=model.id) }}?format={{ fmt }}"
+                           class="block px-4 py-2 text-sm text-gray-700 hover:bg-indigo-50">
+                            {{ fmt.upper() }}
+                        </a>
+                        {% endfor %}
+                        {% endif %}
                         {% if model.vrma_file_id %}
                         <div class="border-t border-gray-100 my-1"></div>
                         <a href="{{ url_for('api.export_model', model_id=model.id) }}?format=vrma"
@@ -194,6 +205,11 @@
                         <a id="export-fixed-link" href="{{ url_for('api.get_fixed_eyes', model_id=model.id, download=1) }}"
                            class="block px-4 py-2 text-sm text-purple-700 hover:bg-purple-50 {% if not fixed_eyes_variant %}hidden{% endif %}">
                             <i class="fas fa-eye mr-1"></i>Fixed-eyes GLB
+                        </a>
+                        <div id="export-rigged-divider" class="border-t border-gray-100 my-1 {% if not rigged_variant %}hidden{% endif %}"></div>
+                        <a id="export-rigged-link" href="{{ url_for('api.get_rigged', model_id=model.id, download=1) }}"
+                           class="block px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 {% if not rigged_variant %}hidden{% endif %}">
+                            <i class="fas fa-bone mr-1"></i>Rigged GLB
                         </a>
                         <div id="export-vrm-divider" class="border-t border-gray-100 my-1 {% if not vrm_variant %}hidden{% endif %}"></div>
                         <a id="export-vrm-link" href="{{ url_for('api.get_vrm_variant', model_id=model.id, download=1) }}"
@@ -217,12 +233,17 @@
                         class="w-full sm:w-auto bg-pink-600 text-white py-3 px-6 rounded-lg hover:bg-pink-700 transition flex items-center justify-center">
                     <i class="fas fa-comment mr-2"></i>Fix Mouth
                 </button>
-                <!-- Rig round-trip: send the mesh to mesh2motion (browser auto-rigger),
-                     then turn the rigged GLB back into a VRM avatar in one click. -->
+                <!-- In-app Mixamo-style rigger: place a few joint markers on a flat
+                     front view, auto-skin, export a rigged GLB -> VRM. -->
+                <button type="button" id="rig-toggle"
+                        class="w-full sm:w-auto bg-slate-700 text-white py-3 px-6 rounded-lg hover:bg-slate-800 transition flex items-center justify-center">
+                    <i class="fas fa-bone mr-2"></i>Rig Avatar
+                </button>
+                <!-- Alternative external auto-rigger (round-trip: rig there, re-upload). -->
                 <a href="https://app.mesh2motion.org/" target="_blank" rel="noopener"
                    id="rig-mesh2motion-link"
-                   class="w-full sm:w-auto bg-slate-700 text-white py-3 px-6 rounded-lg hover:bg-slate-800 transition flex items-center justify-center">
-                    <i class="fas fa-bone mr-2"></i>Rig in mesh2motion
+                   class="w-full sm:w-auto bg-slate-500 text-white py-3 px-6 rounded-lg hover:bg-slate-600 transition flex items-center justify-center text-sm">
+                    <i class="fas fa-external-link-alt mr-2"></i>mesh2motion
                 </a>
                 <button type="button" id="make-vrm-btn"
                         class="w-full sm:w-auto bg-emerald-600 text-white py-3 px-6 rounded-lg hover:bg-emerald-700 transition flex items-center justify-center">
@@ -276,6 +297,53 @@
             {% endif %}
 
             {% if current_user.is_authenticated and current_user.id == model.user_id and model.file_format in ['glb', 'gltf'] %}
+            <!-- Rig Avatar panel: Mixamo-style 2D joint placement. Switches the
+                 viewer to a flat front view; click to drop markers, then Build
+                 Rig (skeleton + skin client-side) -> upload as a rigged GLB. -->
+            <div id="rig-panel"
+                 class="hidden fixed top-24 right-4 z-40 w-80 max-h-[80vh] overflow-y-auto border border-slate-300 bg-slate-50 rounded-lg p-4 shadow-2xl">
+                <div class="flex items-center justify-between mb-2">
+                    <h3 class="font-semibold text-slate-800"><i class="fas fa-bone mr-1"></i>Rig Avatar</h3>
+                    <button type="button" id="rig-close" class="text-gray-400 hover:text-gray-700" title="Close">
+                        <i class="fas fa-times"></i>
+                    </button>
+                </div>
+                <p class="text-sm text-gray-700 mb-3">
+                    <i class="fas fa-info-circle text-slate-500 mr-1"></i>
+                    The viewer switched to a flat <b>front view</b>. Click on the
+                    character to place each joint. Use a clean front-facing pose.
+                </p>
+                <div class="text-sm mb-2">
+                    <div class="font-medium text-slate-800">Place: <span id="rig-step">Groin / hips</span>
+                        <span id="rig-side" class="text-slate-500"></span></div>
+                    <div class="text-xs text-gray-500" id="rig-progress">0 / 8 placed</div>
+                </div>
+                <label class="flex items-center gap-2 text-sm text-gray-700 mb-3">
+                    <input type="checkbox" id="rig-mirror" checked>
+                    Mirror left → right automatically
+                </label>
+                <div class="flex flex-wrap gap-2 mb-3">
+                    <button type="button" id="rig-build"
+                            class="bg-slate-700 text-white px-3 py-2 rounded text-sm hover:bg-slate-800 transition disabled:opacity-50"
+                            disabled>
+                        <i class="fas fa-cogs mr-1"></i>Build Rig
+                    </button>
+                    <button type="button" id="rig-restart"
+                            class="bg-gray-200 text-gray-700 px-3 py-2 rounded text-sm hover:bg-gray-300 transition">
+                        <i class="fas fa-undo mr-1"></i>Restart
+                    </button>
+                    <button type="button" id="rig-cancel"
+                            class="bg-gray-200 text-gray-700 px-3 py-2 rounded text-sm hover:bg-gray-300 transition">
+                        Cancel
+                    </button>
+                </div>
+                <label class="flex items-center gap-2 text-sm text-gray-700 mb-2">
+                    <input type="checkbox" id="rig-to-vrm" checked>
+                    Also make a VRM avatar
+                </label>
+                <p id="rig-status" class="text-xs text-slate-600"></p>
+            </div>
+
             <!-- Fix Eyes panel: add blinker eyeballs to cover reconstruction
                  holes in the eye sockets, then bake them into a new GLB.
                  Floats as a fixed overlay on the right so it stays beside the
@@ -1333,6 +1401,111 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 });
+
+// --- Rig Avatar: place joint markers on a front view, skin client-side, store
+//     a 'rigged' GLB variant (and optionally a VRM). -------------------------
+(function () {
+    const toggle = document.getElementById('rig-toggle');
+    const panel = document.getElementById('rig-panel');
+    if (!toggle || !panel) return;  // not owner / not a GLB
+
+    const MODEL_ID = '{{ model.id }}';
+    const stepEl = document.getElementById('rig-step');
+    const sideEl = document.getElementById('rig-side');
+    const progEl = document.getElementById('rig-progress');
+    const mirrorEl = document.getElementById('rig-mirror');
+    const buildBtn = document.getElementById('rig-build');
+    const restartBtn = document.getElementById('rig-restart');
+    const cancelBtn = document.getElementById('rig-close');
+    const cancelBtn2 = document.getElementById('rig-cancel');
+    const toVrmEl = document.getElementById('rig-to-vrm');
+    const statusEl = document.getElementById('rig-status');
+
+    function viewer() {
+        const c = document.getElementById('viewer-detail-' + MODEL_ID);
+        return c && c.__threeViewer ? c.__threeViewer : null;
+    }
+    function rig() {
+        const v = viewer();
+        return v && v.autorig ? v.autorig : null;
+    }
+    function setStatus(msg, isError) {
+        statusEl.textContent = msg || '';
+        statusEl.className = 'text-xs ' + (isError ? 'text-red-600' : 'text-slate-600');
+    }
+
+    function renderProgress(p) {
+        if (!p) return;
+        stepEl.textContent = p.complete ? 'All joints placed ✓' : p.step;
+        sideEl.textContent = (!p.complete && p.side && p.step && /knee|elbow|wrist/i.test(p.step) && !mirrorEl.checked)
+            ? '(' + (p.side === 'L' ? 'left' : 'right') + ')' : '';
+        progEl.textContent = p.done + ' / ' + p.total + ' placed';
+        buildBtn.disabled = !p.complete;
+    }
+
+    function open() {
+        const r = rig();
+        if (!r) { alert('3D viewer not ready yet. Wait for the model to load.'); return; }
+        // Close other editors if open.
+        const v = viewer();
+        if (v && v.eyes && v.eyes.active) v.eyes.remove && v.eyes.remove();
+        r.onChange = renderProgress;
+        r.setMirror(mirrorEl.checked);
+        r.enter();
+        panel.classList.remove('hidden');
+        setStatus('Click on the character to place each joint.');
+    }
+    function close() {
+        const r = rig();
+        if (r && r.active) r.exit();
+        panel.classList.add('hidden');
+    }
+
+    toggle.addEventListener('click', () => {
+        if (panel.classList.contains('hidden')) open(); else close();
+    });
+    cancelBtn.addEventListener('click', close);
+    cancelBtn2.addEventListener('click', close);
+    restartBtn.addEventListener('click', () => { const r = rig(); if (r) r.reset(); });
+    mirrorEl.addEventListener('change', () => { const r = rig(); if (r) r.setMirror(mirrorEl.checked); });
+
+    buildBtn.addEventListener('click', async () => {
+        const r = rig();
+        if (!r) return;
+        buildBtn.disabled = true;
+        setStatus('Building skeleton & skinning…');
+        try {
+            const blob = await r.exportGLB();
+            const fd = new FormData();
+            fd.append('file', blob, 'rigged.glb');
+            if (toVrmEl.checked) fd.append('to_vrm', '1');
+            setStatus('Uploading rigged model…');
+            const resp = await fetch('/api/model/' + MODEL_ID + '/rig', { method: 'POST', body: fd });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok || !data.success) throw new Error(data.error || 'Rig upload failed.');
+
+            // Reveal Export-menu items.
+            const rl = document.getElementById('export-rigged-link');
+            const rd = document.getElementById('export-rigged-divider');
+            if (rl) rl.classList.remove('hidden');
+            if (rd) rd.classList.remove('hidden');
+            if (data.vrm) {
+                const vl = document.getElementById('export-vrm-link');
+                const vd = document.getElementById('export-vrm-divider');
+                if (vl) vl.classList.remove('hidden');
+                if (vd) vd.classList.remove('hidden');
+            }
+            setStatus('Done ✓');
+            close();
+            alert('Rig created!' + (data.vrm ? ' A VRM avatar was also generated.' : '')
+                + '\nDownload from the "Export as" menu. Re-load the model to preview the rig,'
+                + ' or apply a VRMA animation to the VRM.');
+        } catch (err) {
+            setStatus(err.message || 'Rigging failed.', true);
+            buildBtn.disabled = false;
+        }
+    });
+})();
 
 // --- Make VRM avatar: convert a rigged GLB into a VRM (glb2vrm) --------------
 // The mesh must already be rigged (e.g. round-tripped through "Rig in
