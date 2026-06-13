@@ -21,6 +21,17 @@ def _model_summary_schema():
             'description': {'type': 'string', 'example': 'A low-poly spaceship.'},
             'file_format': {'type': 'string', 'enum': ALLOWED_EXTENSIONS, 'example': 'glb'},
             'file_size': {'type': 'integer', 'description': 'Size in bytes', 'example': 248320},
+            'effective_file_size': {
+                'type': 'integer',
+                'nullable': True,
+                'description': 'Rendered/deployed size in bytes; prefers the game-optimized variant when present.',
+            },
+            'mesh_stats': {'$ref': '#/components/schemas/MeshStats'},
+            'effective_mesh_stats': {
+                'allOf': [{'$ref': '#/components/schemas/MeshStats'}],
+                'nullable': True,
+                'description': 'Rendered/deployed mesh stats; prefers the game-optimized variant when present.',
+            },
             'content_hash': {
                 'type': 'string',
                 'nullable': True,
@@ -149,6 +160,15 @@ def get_openapi_spec(base_url=''):
                     },
                 },
                 'ModelSummary': _model_summary_schema(),
+                'MeshStats': {
+                    'type': 'object',
+                    'nullable': True,
+                    'properties': {
+                        'vertices': {'type': 'integer', 'example': 12000},
+                        'triangles': {'type': 'integer', 'example': 24000},
+                        'primitives': {'type': 'integer', 'example': 3},
+                    },
+                },
                 'RuntimeMetadata': {
                     'type': 'object',
                     'description': (
@@ -199,6 +219,7 @@ def get_openapi_spec(base_url=''):
                                 },
                             },
                         },
+                        'mesh_stats': {'$ref': '#/components/schemas/MeshStats'},
                     },
                 },
                 'Pagination': _pagination_schema(),
@@ -240,6 +261,7 @@ def get_openapi_spec(base_url=''):
                     'description': 'The game-optimized GLB variant attached to the model, or null.',
                     'properties': {
                         'size': {'type': 'integer', 'description': 'Optimized GLB size in bytes', 'example': 248320},
+                        'mesh_stats': {'$ref': '#/components/schemas/MeshStats'},
                         'status': {'type': 'string', 'example': 'ready'},
                         'settings': {'type': 'object', 'description': 'gltfpack settings + size/savings used to produce it'},
                         'updated_at': {'type': 'string', 'format': 'date-time', 'nullable': True},

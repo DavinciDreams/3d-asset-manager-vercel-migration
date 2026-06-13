@@ -540,6 +540,27 @@ class Model3D:
                 animations.append(clip)
         if animations:
             normalized["animations"] = animations
+        mesh_stats = metadata.get("mesh_stats")
+        if isinstance(mesh_stats, dict):
+            cleaned_stats = {}
+            for source_key, target_key in [
+                ("vertices", "vertices"),
+                ("vertex_count", "vertices"),
+                ("triangles", "triangles"),
+                ("triangle_count", "triangles"),
+                ("primitives", "primitives"),
+                ("primitive_count", "primitives"),
+            ]:
+                if source_key not in mesh_stats:
+                    continue
+                try:
+                    value = int(mesh_stats.get(source_key) or 0)
+                except (TypeError, ValueError):
+                    continue
+                if value > 0:
+                    cleaned_stats[target_key] = value
+            if cleaned_stats:
+                normalized["mesh_stats"] = cleaned_stats
         if isinstance(light, dict):
             enabled = bool(light.get("enabled"))
             light_type = str(light.get("type") or ("point" if enabled else "none")).strip().lower()

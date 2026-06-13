@@ -165,8 +165,9 @@ def test_upload_derives_rig_and_animation_metadata_from_glb():
             {"name": "Hips"},
             {"name": "Spine"},
         ],
+        "meshes": [{"primitives": [{"attributes": {"POSITION": 1}, "indices": 2}]}],
         "skins": [{"joints": [1, 2]}],
-        "accessors": [{"max": [1.75]}],
+        "accessors": [{"max": [1.75]}, {"count": 90}, {"count": 120}],
         "animations": [{"name": "Idle", "samplers": [{"input": 0}]}],
     })
 
@@ -178,6 +179,29 @@ def test_upload_derives_rig_and_animation_metadata_from_glb():
     model = upload.get_json()["model"]
     assert model["asset_types"] == ["rigged", "animated"]
     assert model["runtime_metadata"]["animations"] == [{"name": "Idle", "duration": 1.75}]
+    assert model["mesh_stats"] == {"vertices": 90, "triangles": 40, "primitives": 1}
+    assert model["effective_file_size"] == model["file_size"]
+    assert model["effective_mesh_stats"] == model["mesh_stats"]
+
+    with app.app_context():
+        file_id = app.config["FILE_STORE"].put(
+            glb,
+            filename="animated_avatar-game.glb",
+            content_type="model/gltf-binary",
+            metadata={"kind": "game", "source_model_id": model["id"]},
+        )
+        ModelVariant.upsert(
+            model["id"], "game", str(file_id),
+            file_format="glb", size=321,
+            settings={"mesh_stats": {"vertices": 24, "triangles": 12, "primitives": 1}},
+        )
+
+    fetched = client.get(f"/api/model/{model['id']}", headers=headers)
+    assert fetched.status_code == 200, fetched.get_json()
+    fetched_model = fetched.get_json()["model"]
+    assert fetched_model["effective_file_size"] == 321
+    assert fetched_model["game_optimized"]["mesh_stats"] == {"vertices": 24, "triangles": 12, "primitives": 1}
+    assert fetched_model["effective_mesh_stats"] == {"vertices": 24, "triangles": 12, "primitives": 1}
 
 
 def test_upload_does_not_tag_static_unrigged_glb():
@@ -371,7 +395,11 @@ def test_openapi_documents_workflow_and_bearer_auth():
     assert "asset_types" in model_props
     assert "ai_error" in model_props
     assert "content_hash" in model_props
+    assert "effective_file_size" in model_props
+    assert "mesh_stats" in model_props
+    assert "effective_mesh_stats" in model_props
     assert "runtime_metadata" in model_props
+    assert "MeshStats" in spec["components"]["schemas"]
     assert "RuntimeMetadata" in spec["components"]["schemas"]
 
 

@@ -176,6 +176,9 @@ def _file_derived_metadata(file_content, file_extension):
 
     asset_types = []
     runtime = {}
+    mesh_stats = _gltf_mesh_stats(gltf)
+    if mesh_stats:
+        runtime['mesh_stats'] = mesh_stats
     skins = gltf.get('skins') if isinstance(gltf.get('skins'), list) else []
     nodes = gltf.get('nodes') if isinstance(gltf.get('nodes'), list) else []
     has_skinned_mesh = any(isinstance(node, dict) and node.get('skin') is not None for node in nodes)
@@ -201,6 +204,52 @@ def _file_derived_metadata(file_content, file_extension):
         runtime['animations'] = animation_items
 
     return asset_types, runtime
+
+
+def _gltf_mesh_stats(gltf):
+    accessors = gltf.get('accessors') if isinstance(gltf.get('accessors'), list) else []
+    meshes = gltf.get('meshes') if isinstance(gltf.get('meshes'), list) else []
+    vertex_count = 0
+    triangle_count = 0
+    primitive_count = 0
+
+    for mesh in meshes:
+        if not isinstance(mesh, dict):
+            continue
+        for primitive in mesh.get('primitives') or []:
+            if not isinstance(primitive, dict):
+                continue
+            primitive_count += 1
+            attributes = primitive.get('attributes') if isinstance(primitive.get('attributes'), dict) else {}
+            position_index = attributes.get('POSITION')
+            position_count = _gltf_accessor_count(accessors, position_index)
+            vertex_count += position_count
+
+            mode = primitive.get('mode', 4)
+            if mode == 4:
+                index_count = _gltf_accessor_count(accessors, primitive.get('indices'))
+                triangle_count += (index_count or position_count) // 3
+
+    stats = {}
+    if vertex_count:
+        stats['vertices'] = vertex_count
+    if triangle_count:
+        stats['triangles'] = triangle_count
+    if primitive_count:
+        stats['primitives'] = primitive_count
+    return stats
+
+
+def _gltf_accessor_count(accessors, index):
+    if not isinstance(index, int) or index < 0 or index >= len(accessors):
+        return 0
+    accessor = accessors[index]
+    if not isinstance(accessor, dict):
+        return 0
+    try:
+        return max(0, int(accessor.get('count') or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _gltf_animation_duration(gltf, animation):
@@ -2118,12 +2167,16 @@ def _serialize_model(model):
 
 
 def _media_presence_fields(model):
+    game = _game_optimized_fields(model)
     return {
         'has_thumbnail': bool(model.thumbnail_file_id),
         'thumbnail_url': url_for('api.get_thumbnail', model_id=model.id) if model.thumbnail_file_id else None,
         'has_preview': bool(model.preview_file_id),
         'preview_url': url_for('api.get_preview', model_id=model.id) if model.preview_file_id else None,
-        **_game_optimized_fields(model),
+        'mesh_stats': _model_mesh_stats(model),
+        'effective_file_size': _effective_file_size(model, game),
+        'effective_mesh_stats': _effective_mesh_stats(model, game),
+        **game,
     }
 
 
@@ -2137,12 +2190,49 @@ def _game_optimized_fields(model):
         'game_optimized': {
             'size': variant.size,
             'settings': variant.settings,
+            'mesh_stats': _variant_mesh_stats(variant),
             'status': variant.status,
             'updated_at': variant.updated_at.isoformat() if variant.updated_at else None,
             'url': url_for('api.get_game_optimized', model_id=model.id),
             'download_url': url_for('api.get_game_optimized', model_id=model.id, download=1),
         },
     }
+
+
+def _model_mesh_stats(model):
+    metadata = model.runtime_metadata or {}
+    stats = metadata.get('mesh_stats') if isinstance(metadata, dict) else None
+    return stats if isinstance(stats, dict) and stats else None
+
+
+def _variant_mesh_stats(variant):
+    settings = variant.settings or {}
+    stats = settings.get('mesh_stats') if isinstance(settings, dict) else None
+    if isinstance(stats, dict) and stats:
+        return stats
+    data = variant.read_data()
+    if not data:
+        return None
+    _asset_types, runtime = _file_derived_metadata(data, variant.file_format or 'glb')
+    stats = runtime.get('mesh_stats') if isinstance(runtime, dict) else None
+    return stats if isinstance(stats, dict) and stats else None
+
+
+def _effective_file_size(model, game_fields=None):
+    game_fields = game_fields or _game_optimized_fields(model)
+    game = game_fields.get('game_optimized') if isinstance(game_fields, dict) else None
+    if isinstance(game, dict) and game.get('size'):
+        return game.get('size')
+    return model.file_size
+
+
+def _effective_mesh_stats(model, game_fields=None):
+    game_fields = game_fields or _game_optimized_fields(model)
+    game = game_fields.get('game_optimized') if isinstance(game_fields, dict) else None
+    stats = game.get('mesh_stats') if isinstance(game, dict) else None
+    if isinstance(stats, dict) and stats:
+        return stats
+    return _model_mesh_stats(model)
 
 
 def _payload():
@@ -2218,6 +2308,17 @@ def _preserved_structural_asset_types(existing):
     ]
 
 
+def _preserved_structural_runtime_metadata(existing):
+    existing = existing or {}
+    if not isinstance(existing, dict):
+        return {}
+    return {
+        key: existing[key]
+        for key in ('animations', 'mesh_stats')
+        if existing.get(key)
+    }
+
+
 def _run_ai_enrichment(model, data=None):
     data = data or {}
     overwrite = _as_bool(data.get('overwrite', True))
@@ -2260,7 +2361,10 @@ def _run_ai_enrichment(model, data=None):
             if value not in {'static', 'static-mesh', *_STRUCTURAL_ASSET_TYPES}
         ]
         model.asset_types = _merge_tags(_preserved_structural_asset_types(model.asset_types), ai_asset_types)
-        model.runtime_metadata = Model3D.normalize_runtime_metadata(enriched.get('runtime_metadata'))
+        model.runtime_metadata = _merge_runtime_metadata(
+            enriched.get('runtime_metadata'),
+            _preserved_structural_runtime_metadata(model.runtime_metadata),
+        )
         if include_title and enriched.get('title'):
             model.name = enriched['title']
         if include_description and model.ai_description:
@@ -2780,6 +2884,8 @@ def _run_game_optimizer(model, owner_id, settings):
         optimized_size = len(out_bytes)
         savings_ratio = 0 if original_size <= 0 else 1 - (optimized_size / original_size)
         texture_note = 'KTX2/Basis' if texture_limit_applied else 'unchanged'
+        source_mesh_stats = _file_derived_metadata(src_bytes, src_fmt)[1].get('mesh_stats')
+        optimized_mesh_stats = _file_derived_metadata(out_bytes, 'glb')[1].get('mesh_stats')
 
         # Attach the optimized GLB to the SOURCE model as a 'game' variant
         # (no separate Model3D). Re-optimizing replaces the existing variant;
@@ -2792,6 +2898,8 @@ def _run_game_optimizer(model, owner_id, settings):
             'original_size': original_size,
             'optimized_size': optimized_size,
             'savings_ratio': savings_ratio,
+            'source_mesh_stats': source_mesh_stats,
+            'mesh_stats': optimized_mesh_stats,
             'source_is_fixed_eyes': used_fixed_eyes,
             'report': report,
         }
@@ -2813,6 +2921,8 @@ def _run_game_optimizer(model, owner_id, settings):
             'original_size': original_size,
             'optimized_size': optimized_size,
             'savings_ratio': savings_ratio,
+            'source_mesh_stats': source_mesh_stats,
+            'optimized_mesh_stats': optimized_mesh_stats,
             'source_is_fixed_eyes': used_fixed_eyes,
             'settings': {
                 'texture_limit': texture_limit,

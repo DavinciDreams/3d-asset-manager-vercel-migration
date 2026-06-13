@@ -172,7 +172,11 @@ hints. Tellus can use this when it places models from the OpenAPI/tool surface.
 GLB/GLTF uploads are inspected directly: skinned files receive the `rigged`
 asset type, files with animation clips receive `animated`, and clip names are
 listed in `runtime_metadata.animations`. Assets without a rig are treated as
-static by default and are not tagged `static`.
+static by default and are not tagged `static`. File size and mesh counts are
+also manager-derived: `mesh_stats` describes the uploaded model, while
+`effective_file_size` and `effective_mesh_stats` prefer the game-optimized
+variant when it exists, so Tellus does not need generator-estimated size or
+vertex counts from before optimization.
 For example, lantern-like assets may be enriched or edited to include:
 
 ```json
