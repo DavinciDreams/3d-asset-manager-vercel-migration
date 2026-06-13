@@ -6,6 +6,7 @@ from werkzeug.utils import secure_filename
 import hashlib
 import io
 import json
+import os
 
 main_bp = Blueprint('main', __name__)
 
@@ -14,6 +15,13 @@ DASHBOARD_PER_PAGE = 30
 
 _GLB_MAGIC = b'glTF'
 _GLB_JSON_CHUNK = 0x4E4F534A
+
+
+def _env_bool(name, default=True):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in ('0', 'false', 'no', 'off')
 
 
 def _glb_uses_compression(glb_bytes):
@@ -344,7 +352,10 @@ def model_detail(model_id):
                                vrm_variant=vrm_variant,
                                rigged_variant=rigged_variant,
                                model_is_meshopt=model_is_meshopt,
-                               can_manage_model=user_can_manage_model)
+                               can_manage_model=user_can_manage_model,
+                               client_capture_enabled=_env_bool('CLIENT_MEDIA_CAPTURE_ENABLED', True),
+                               auto_capture_thumbnail=_env_bool('AUTO_CAPTURE_THUMBNAILS', True),
+                               auto_capture_preview=_env_bool('AUTO_CAPTURE_PREVIEW_VIDEOS', True))
         
     except Exception as e:
         print(f"Model detail error: {e}")

@@ -126,6 +126,59 @@ def test_asset_admin_sees_delete_on_public_cards(monkeypatch):
     assert "data-admin-delete" in home_html
 
 
+def test_browse_prefers_cached_preview_video_over_live_viewer():
+    app = create_app()
+    client = app.test_client()
+
+    with app.app_context():
+        owner = User(username="previewowner", email="preview-owner@example.com")
+        owner.set_password("pw123456")
+        owner.save()
+        model = Model3D(
+            name="Preview Video Target",
+            description="Uses cached video on browse",
+            original_filename="preview.glb",
+            file_format="glb",
+            file_size=72,
+            gridfs_file_id="preview-file-id",
+            thumbnail_file_id="preview-thumb-id",
+            preview_file_id="preview-video-id",
+            user_id=owner.id,
+            is_public=True,
+        ).save()
+        model_id = model.id
+
+    browse = client.get("/browse")
+    assert browse.status_code == 200
+    html = browse.get_data(as_text=True)
+    assert f'data-model-id="{model_id}"' in html
+    assert f'data-preview-src="/api/model/{model_id}/preview"' in html
+    assert f'data-view-src="/api/model/{model_id}' not in html
+
+
+def test_detail_defaults_auto_capture_missing_media():
+    app = create_app()
+    client = app.test_client()
+    _login(app, client)
+
+    glb = b"glTF" + b"\x00" * 64
+    response = client.post("/api/upload", data={
+        "name": "Auto Capture Target",
+        "is_public": "true",
+        "file": (io.BytesIO(glb), "auto-capture.glb"),
+    }, content_type="multipart/form-data")
+    assert response.status_code == 201, response.get_json()
+    model_id = response.get_json()["model"]["id"]
+
+    detail = client.get(f"/model/{model_id}")
+    assert detail.status_code == 200
+    html = detail.get_data(as_text=True)
+    assert "const AUTO_CAPTURE_THUMBNAIL = true;" in html
+    assert "const AUTO_CAPTURE_PREVIEW = true;" in html
+    assert "AUTO_CAPTURE_THUMBNAIL && !HAS_THUMBNAIL" in html
+    assert "AUTO_CAPTURE_PREVIEW && !HAS_PREVIEW" in html
+
+
 def test_api_me_reports_asset_admin_state(monkeypatch):
     monkeypatch.setenv("ASSET_MANAGER_ADMIN_EMAILS", "admin@example.com")
     app = create_app()

@@ -805,20 +805,20 @@
 <script>
 let detailViewer = null;
 
-// ?regen=1 forces (re)capture of media. Normal page loads stay passive because
-// automatic canvas capture can overwhelm some browser/GPU combinations.
+// ?regen=1 forces (re)capture of media. Normal page loads capture only missing
+// media, so an upload gets a thumbnail/preview without overwriting existing
+// owner-selected media.
 const FORCE_REGEN = new URLSearchParams(window.location.search).get('regen') === '1';
-// KILL SWITCH: client-side MediaRecorder canvas capture (preview video +
-// thumbnail) can crash the GPU/compositor and black out the WHOLE page with no
-// JS error on some browser/GPU combos. Disabled everywhere until a safe
-// capture path exists. Flip to true (and redeploy) to re-enable.
-const CAPTURE_ENABLED = false;
+const CLIENT_CAPTURE_ENABLED = {{ client_capture_enabled | tojson }};
+const AUTO_CAPTURE_THUMBNAIL = {{ auto_capture_thumbnail | tojson }};
+const AUTO_CAPTURE_PREVIEW = {{ auto_capture_preview | tojson }};
+const CAPTURE_ENABLED = CLIENT_CAPTURE_ENABLED && (FORCE_REGEN || AUTO_CAPTURE_THUMBNAIL || AUTO_CAPTURE_PREVIEW);
 // Saved default view angle for this model (empty string if none set yet).
 const SAVED_CAMERA_ORBIT = {{ model.camera_orbit | tojson }};
 // Whether this model already has a stored thumbnail.
 let HAS_THUMBNAIL = {{ (model.thumbnail_file_id is not none) | tojson }};
 // Whether this model already has a stored preview video.
-const HAS_PREVIEW = {{ (model.preview_file_id is not none) | tojson }};
+let HAS_PREVIEW = {{ (model.preview_file_id is not none) | tojson }};
 // Can the current user manage this model? Used for owner/admin-only tools.
 const IS_OWNER = {{ can_manage_model | tojson }};
 // Whether a baked fixed-eyes/mouth variant already exists. The Fix Eyes/Mouth
@@ -860,10 +860,10 @@ function loadDetailModel(modelId, variant) {
             // Only (re)capture media from the ORIGINAL — the optimized variant
             // should never overwrite the model's thumbnail/preview.
             if (CAPTURE_ENABLED && variant === 'original') {
-                if (IS_OWNER && FORCE_REGEN) {
+                if (IS_OWNER && (FORCE_REGEN || (AUTO_CAPTURE_THUMBNAIL && !HAS_THUMBNAIL))) {
                     setTimeout(() => captureThumbnail(false), 800);
                 }
-                if (IS_OWNER && FORCE_REGEN && !SAVED_CAMERA_ORBIT) {
+                if (IS_OWNER && !SAVED_CAMERA_ORBIT && (FORCE_REGEN || (AUTO_CAPTURE_PREVIEW && !HAS_PREVIEW))) {
                     setTimeout(() => captureModelViewerPreview(), 1200);
                 }
             }
@@ -1180,6 +1180,7 @@ async function captureModelViewerPreview() {
     viewer.setAutoRotate(true);
     const ok = await window.capturePreview(canvas, '{{ model.id }}', { durationMs: 4000 });
     if (!wasRotating) viewer.setAutoRotate(false);
+    if (ok) HAS_PREVIEW = true;
     console.log('Preview auto-captured:', ok);
 }
 
@@ -2090,11 +2091,10 @@ document.addEventListener('DOMContentLoaded', function() {
                 // Apply the owner's saved default animation, if the picker is ready.
                 maybeApplyDefault();
                 {% if can_manage_model %}
-                if (CAPTURE_ENABLED && FORCE_REGEN) {
-                    // Capture media only when explicitly requested.
+                if (CAPTURE_ENABLED && (FORCE_REGEN || (AUTO_CAPTURE_THUMBNAIL && !HAS_THUMBNAIL))) {
                     setTimeout(captureVrmThumbnail, 1000);
                 }
-                if (CAPTURE_ENABLED && FORCE_REGEN) {
+                if (CAPTURE_ENABLED && (FORCE_REGEN || (AUTO_CAPTURE_PREVIEW && !HAS_PREVIEW))) {
                     setTimeout(captureVrmPreview, 1500);
                 }
                 {% endif %}
@@ -2171,7 +2171,10 @@ document.addEventListener('DOMContentLoaded', function() {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ image: dataUrl })
-        }).then(r => r.json()).then(d => console.log('VRM thumbnail saved:', d.success === true)).catch(() => {});
+        }).then(r => r.json()).then(d => {
+            if (d.success) HAS_THUMBNAIL = true;
+            console.log('VRM thumbnail saved:', d.success === true);
+        }).catch(() => {});
     };
 
     // Record a ~4s rotating preview of the avatar and upload it.
@@ -2183,6 +2186,7 @@ document.addEventListener('DOMContentLoaded', function() {
         controller.setAutoRotate(true, 6);  // spin during capture
         const ok = await window.capturePreview(controller.canvas, MODEL_ID, { durationMs: 4000 });
         controller.setAutoRotate(false);
+        if (ok) HAS_PREVIEW = true;
         console.log('VRM preview saved:', ok);
     };
 
