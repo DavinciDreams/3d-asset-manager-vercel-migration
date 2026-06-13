@@ -41,13 +41,16 @@ FAB_LISTING_GUIDANCE = (
 )
 TAGGER_SYSTEM_PROMPT = (
     "You are a specialist in 3D assets, 3D modeling, game design, and rigging. "
-    "You are writing marketing copy to enrich 3D asset store records. Return concise JSON only. "
+    "You are writing marketing copy to enrich 3D asset store records. Return concise JSON only, "
+    "with one discrete value per requested field. Do not return visual-analysis essays, markdown "
+    "headings, chain-of-thought, main/detailed response sections, or runtime capability debates. "
     "Tags should be lowercase marketplace/search tags, not sentences, and should represent actual "
     "groups useful for game designers and 3D artists. Use tags that describe what the asset is, "
     "and the style or category it belongs to. Do not use generic names, file formats, source "
     "pipeline labels, or generic tags like pixal3d, generated, image-to-3d, ai-generated, glb, "
     "or 3d-model. Do not invent formats, file sizes, vertex counts, texture resolution, rigging, "
-    "animation, or optimization details; those are filled from file metadata."
+    "animation, emissive/light behavior, static/dynamic state, or optimization details; those are "
+    "filled from file metadata or explicit runtime metadata."
 )
 
 
@@ -917,8 +920,9 @@ def _zai_mcp_visual_context_result(model, provider, api_key):
     timeout = int(os.environ.get("AI_AUTOTAG_MCP_TIMEOUT", os.environ.get("AI_AUTOTAG_TIMEOUT", "120")))
     prompt = os.environ.get(
         "AI_AUTOTAG_MCP_PROMPT",
-        "Describe this 3D asset preview for catalog metadata. Mention visible subject, style, materials, "
-        "whether it appears rigged or animated if inferable, and whether it looks like a light emitter.",
+        "Identify only the visible catalog facts for this 3D asset preview: subject, style, materials, "
+        "colors, and likely buyer search terms. Do not discuss whether it is static, rigged, animated, "
+        "emissive, or a light emitter.",
     )
     image_bytes, suffix = _mcp_image_file_bytes(stored)
 
@@ -1222,44 +1226,11 @@ def _ai_metadata(model, extra_context=None):
                 "type": "array",
                 "items": {"type": "string"},
                 "maxItems": 8,
-                "description": "Technical/use traits such as game-ready, modular, decorative-prop, pbr, tileable, vrm, optimized, light-emitter, high-poly, low-poly. Do not include static, rigged, or animated; those are derived from the uploaded file.",
-            },
-            "runtime_metadata": {
-                "type": "object",
-                "additionalProperties": False,
-                "description": "Runtime hints for Tellus/Three.js. Be conservative: only enable light when the asset is clearly a lantern, lamp, torch, fire, candle, glowing crystal, or similar emitter.",
-                "properties": {
-                    "behaviors": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "maxItems": 8,
-                    },
-                    "light": {
-                        "type": "object",
-                        "additionalProperties": False,
-                        "properties": {
-                            "enabled": {"type": "boolean"},
-                            "type": {"type": "string", "enum": ["none", "point", "spot", "directional", "ambient"]},
-                            "color": {"type": "string", "description": "Hex color such as #ffb35a."},
-                            "intensity": {"type": "number"},
-                            "range": {"type": "number"},
-                            "cast_shadow": {"type": "boolean"},
-                            "attach_to": {"type": "string", "description": "Optional GLB node name to attach the light to, empty when unknown."},
-                            "offset": {
-                                "type": "array",
-                                "items": {"type": "number"},
-                                "minItems": 3,
-                                "maxItems": 3,
-                            },
-                        },
-                        "required": ["enabled", "type", "color", "intensity", "range", "cast_shadow", "attach_to", "offset"],
-                    },
-                },
-                "required": ["behaviors", "light"],
+                "description": "Non-runtime marketplace/use traits such as game-ready, modular, decorative-prop, pbr, tileable, high-poly, low-poly, kitbash, environment-piece. Do not include static, rigged, animated, light-emitter, emissive, glowing, vrm, or optimized; those are derived from file/runtime metadata.",
             },
             "description": {
                 "type": "string",
-                "description": "Buyer-facing Fab product description for a 3D listing. Start with what the asset is, then describe style/materials and practical scene/use cases. Avoid AI pipeline provenance and unsupported technical specs.",
+                "description": "Buyer-facing Fab product description for a 3D listing. Start with what the asset is, then describe style/materials and practical scene/use cases. Avoid AI pipeline provenance, unsupported technical specs, analysis headings, and static/rigged/animated/emissive commentary.",
             },
             "summary": {"type": "string", "description": "One concise storefront summary of the product value and subject."},
             "categories": {"type": "array", "items": {"type": "string"}, "maxItems": 6},
@@ -1270,7 +1241,6 @@ def _ai_metadata(model, extra_context=None):
             "asset_category",
             "asset_styles",
             "asset_types",
-            "runtime_metadata",
             "tags",
             "description",
             "summary",
@@ -1295,6 +1265,14 @@ def _ai_metadata(model, extra_context=None):
             "conversion_status": model.conversion_status,
         },
         "extra_context": extra_context or {},
+        "field_contract": {
+            "title": "Short product title only.",
+            "description": "Polished buyer-facing copy only. No analysis sections or runtime debates.",
+            "tags": "Up to 10 lowercase search tags.",
+            "asset_category": "One broad subject bucket.",
+            "asset_styles": "Aesthetic/genre/medium labels.",
+            "asset_types": "Marketplace/use traits only, never static, rigged, animated, emissive, light-emitter, optimized, or file format.",
+        },
     }
     vision_mcp = _zai_mcp_visual_context_result(model, provider, api_key)
     vision_mcp_analysis = vision_mcp.get("analysis")
@@ -1302,13 +1280,14 @@ def _ai_metadata(model, extra_context=None):
         prompt["vision_mcp_analysis"] = vision_mcp_analysis
         prompt["metadata_instruction"] = (
             "Use vision_mcp_analysis as the primary source for visible subject, materials, style, colors, "
-            "and light-emitter hints. Avoid generic generation-pipeline wording such as baseline mesh, "
+            "and buyer search terms. Avoid generic generation-pipeline wording such as baseline mesh, "
             "background prop, sculpting base, or retopology unless those details are visibly supported. "
             "Always fill asset_category and asset_styles from the visual analysis, and fill asset_types only for "
             "non-structural traits. For example, "
             "flowers/plants/leaves should use asset_category flora even when the object is also decorative; "
             "watercolor or hand-painted looks belong in asset_styles; do not report static, rigged, or animated "
-            "from vision because those are derived from the uploaded file. The title should name the visible asset, for example Watercolor "
+            "or emissive/light behavior from vision because those are derived outside auto-tagging. "
+            "The title should name the visible asset, for example Watercolor "
             "Floral Arrangement, not Pixal3D AI-Generated 3D Model. The description should read like a Fab "
             "store listing, not a visual-analysis report."
         )
@@ -1327,6 +1306,8 @@ def _ai_metadata(model, extra_context=None):
             "and asset_types for non-structural technical/use traits. Use buyer search terminology, "
             "but avoid keyword stuffing. Do not mention thumbnail availability, AI generation, provider names, "
             "or pipeline details. Do not invent technical details that are not directly supplied. "
+            "Do not discuss or classify static state, rigging, animation, emissive materials, or light emitting behavior. "
+            "Return each field directly; do not put the visual-analysis transcript into description or summary. "
             "If visual analysis is unavailable, say only what can be inferred from the filename and asset fields.\n\n"
         + json.dumps(prompt, sort_keys=True)
     )
@@ -1425,10 +1406,11 @@ def enrich_model(model, extra_context=None):
         " ".join(str(tag) for tag in enriched.get("tags") or []),
     ]).lower()
     enriched["asset_styles"] = _resolve_style_conflicts(enriched.get("asset_styles", []), cleanup_text)
-    enriched["asset_types"] = _resolve_type_conflicts(enriched.get("asset_types", []), enriched["asset_category"], cleanup_text)
-    enriched["runtime_metadata"] = Model3D.normalize_runtime_metadata(
-        enriched.get("runtime_metadata", _default_runtime_metadata(False))
-    )
+    enriched["asset_types"] = [
+        value for value in _resolve_type_conflicts(enriched.get("asset_types", []), enriched["asset_category"], cleanup_text)
+        if value not in {"static", "static-mesh", "rigged", "animated", "light-emitter", "emissive", "glowing", "vrm", "optimized"}
+    ]
+    enriched["runtime_metadata"] = {}
     enriched["tags"] = _clean_enrichment_tags(enriched.get("tags", []))
     enriched["description"] = (enriched.get("description") or "").strip()
     enriched["summary"] = (enriched.get("summary") or "").strip()

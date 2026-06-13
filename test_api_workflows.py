@@ -630,6 +630,8 @@ def test_autotag_requires_saved_thumbnail():
     glb = b"glTF-thumbnail-required" + b"\x00" * 64
 
     upload = client.post("/api/upload", headers=headers, data={
+        "name": "Original No Thumb Title",
+        "description": "Original no-thumbnail description.",
         "file": (io.BytesIO(glb), "needs_thumb.glb"),
     }, content_type="multipart/form-data")
     assert upload.status_code == 201, upload.get_json()
@@ -650,6 +652,57 @@ def test_autotag_requires_saved_thumbnail():
     )
     assert queued.status_code == 409, queued.get_json()
     assert queued.get_json()["error"] == "Thumbnail required"
+    with app.app_context():
+        guarded_model = Model3D.get_by_id(model_id)
+    assert guarded_model.name == "Original No Thumb Title"
+    assert guarded_model.description == "Original no-thumbnail description."
+    assert guarded_model.ai_status is None
+
+
+def test_autotag_replaces_generic_no_thumbnail_copy(monkeypatch):
+    app = create_app()
+    client = app.test_client()
+    headers = {"Authorization": "Bearer test-token"}
+    glb = b"glTF-generic-copy" + b"\x00" * 64
+
+    upload = client.post("/api/upload", headers=headers, data={
+        "name": "Hyades",
+        "description": (
+            "As no preview thumbnail is available for visual analysis, specific details "
+            "regarding its exact appearance, materials, and optimal use cases cannot be confirmed."
+        ),
+        "file": (io.BytesIO(glb), "generic_copy.glb"),
+    }, content_type="multipart/form-data")
+    assert upload.status_code == 201, upload.get_json()
+    model_id = upload.get_json()["model"]["id"]
+    _attach_thumbnail(app, model_id)
+
+    def fake_enrich(stored_model, extra_context=None):
+        return {
+            "title": "Wooden Signpost",
+            "description": "A stylized wooden signpost prop with a grassy base for fantasy scenes.",
+            "summary": "Stylized wooden signpost prop.",
+            "tags": ["signpost", "wooden", "fantasy"],
+            "asset_category": "prop",
+            "asset_styles": ["stylized", "fantasy"],
+            "asset_types": ["decorative-prop"],
+            "runtime_metadata": {},
+            "categories": [],
+            "quality_notes": [],
+            "provider": "fake",
+        }
+
+    monkeypatch.setattr("app.ai_enrichment.enrich_model", fake_enrich)
+
+    enrich = client.post(
+        f"/api/model/{model_id}/ai/autotag",
+        headers=headers,
+        json={"overwrite": False, "include_title": True, "include_description": True},
+    )
+    assert enrich.status_code == 200, enrich.get_json()
+    model = enrich.get_json()["model"]
+    assert model["name"] == "Wooden Signpost"
+    assert model["description"] == "A stylized wooden signpost prop with a grassy base for fantasy scenes."
 
 
 def test_async_enrichment_kicks_queue_when_enabled(monkeypatch):
@@ -740,7 +793,8 @@ def test_ai_enrichment_worker_drains_pending_job(monkeypatch):
         model = Model3D.get_by_id(model_id)
     assert model.ai_status == "done"
     assert model.name == "Worker Lantern"
-    assert model.runtime_metadata["light"]["enabled"] is True
+    assert "light" not in model.runtime_metadata
+    assert "light-emitter" not in model.asset_types
 
 
 def test_detail_page_shows_ai_vision_failure_message():
@@ -1360,7 +1414,7 @@ def test_hyades_a2a_enrichment_uses_holo_vision(monkeypatch):
     assert enriched["provider"] == "hyades"
     assert enriched["transport"] == "a2a"
     assert enriched["asset_category"] == "building"
-    assert enriched["runtime_metadata"]["light"]["enabled"] is True
+    assert enriched["runtime_metadata"] == {}
 
 
 def test_hyades_a2a_timeout_retries_text_only(monkeypatch):
@@ -1809,7 +1863,7 @@ def test_ai_enrichment_recovers_fountain_metadata_from_vision(monkeypatch):
     assert {"fountain", "water-feature", "classical", "stone", "weathered"}.issubset(set(enriched["tags"]))
     assert not {"pixal3d", "generated", "image-to-3d", "ai-generated", "glb", "3d-model"}.intersection(enriched["tags"])
     assert "light-emitter" not in enriched["asset_types"]
-    assert enriched["runtime_metadata"]["light"]["enabled"] is False
+    assert enriched["runtime_metadata"] == {}
 
 
 def test_ai_enrichment_removes_contradictory_facets(monkeypatch):

@@ -2765,7 +2765,7 @@ def _run_ai_enrichment(model, data=None):
     include_title = _as_bool(data.get('include_title', True))
     include_description = _as_bool(data.get('include_description', True))
 
-    from app.ai_enrichment import enrich_model
+    from app.ai_enrichment import enrich_model, _generic_description, _generic_title
     enriched = enrich_model(model, extra_context=data.get('context') or {})
 
     model.ai_status = 'done'
@@ -2777,7 +2777,7 @@ def _run_ai_enrichment(model, data=None):
         'asset_category': enriched.get('asset_category'),
         'asset_styles': enriched.get('asset_styles', []),
         'asset_types': enriched.get('asset_types', []),
-        'runtime_metadata': enriched.get('runtime_metadata', {}),
+        'runtime_metadata': {},
         'summary': enriched.get('summary'),
         'categories': enriched.get('categories', []),
         'quality_notes': enriched.get('quality_notes', []),
@@ -2798,13 +2798,10 @@ def _run_ai_enrichment(model, data=None):
         model.asset_styles = Model3D.normalize_tags(enriched.get('asset_styles', []))
         ai_asset_types = [
             value for value in Model3D.normalize_tags(enriched.get('asset_types', []))
-            if value not in {'static', 'static-mesh', *_STRUCTURAL_ASSET_TYPES}
+            if value not in {'static', 'static-mesh', *_STRUCTURAL_ASSET_TYPES, 'light-emitter', 'emissive', 'glowing', 'vrm', 'optimized'}
         ]
         model.asset_types = _merge_tags(_preserved_structural_asset_types(model.asset_types), ai_asset_types)
-        model.runtime_metadata = _merge_runtime_metadata(
-            enriched.get('runtime_metadata'),
-            _preserved_structural_runtime_metadata(model.runtime_metadata),
-        )
+        model.runtime_metadata = Model3D.normalize_runtime_metadata(model.runtime_metadata)
         if include_title and enriched.get('title'):
             model.name = enriched['title']
         if include_description and model.ai_description:
@@ -2814,12 +2811,14 @@ def _run_ai_enrichment(model, data=None):
         if enriched.get('asset_category') and not model.asset_category:
             model.asset_category = enriched.get('asset_category')
         model.asset_styles = _merge_tags(model.asset_styles, enriched.get('asset_styles', []))
-        model.asset_types = _merge_tags(model.asset_types, enriched.get('asset_types', []))
-        if enriched.get('runtime_metadata') and not model.runtime_metadata:
-            model.runtime_metadata = Model3D.normalize_runtime_metadata(enriched.get('runtime_metadata'))
-        if include_title and not model.name and enriched.get('title'):
+        ai_asset_types = [
+            value for value in Model3D.normalize_tags(enriched.get('asset_types', []))
+            if value not in {'static', 'static-mesh', *_STRUCTURAL_ASSET_TYPES, 'light-emitter', 'emissive', 'glowing', 'vrm', 'optimized'}
+        ]
+        model.asset_types = _merge_tags(model.asset_types, ai_asset_types)
+        if include_title and (not model.name or _generic_title(model.name)) and enriched.get('title'):
             model.name = enriched['title']
-        if include_description and not model.description and model.ai_description:
+        if include_description and (not model.description or _generic_description(model.description)) and model.ai_description:
             model.description = model.ai_description
     model.save()
     return enriched
