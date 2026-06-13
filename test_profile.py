@@ -175,8 +175,9 @@ def test_detail_defaults_auto_capture_missing_media():
     html = detail.get_data(as_text=True)
     assert "const AUTO_CAPTURE_THUMBNAIL = true;" in html
     assert "const AUTO_CAPTURE_PREVIEW = true;" in html
-    assert "AUTO_CAPTURE_THUMBNAIL && !HAS_THUMBNAIL" in html
-    assert "AUTO_CAPTURE_PREVIEW && !HAS_PREVIEW" in html
+    assert "const FORCE_CAPTURE = DETAIL_PARAMS.get('capture') === '1';" in html
+    assert "const shouldCaptureThumbnail = FORCE_REGEN || (!HAS_THUMBNAIL && (FORCE_CAPTURE || AUTO_CAPTURE_THUMBNAIL));" in html
+    assert "const shouldCapturePreview = FORCE_REGEN || (!HAS_PREVIEW && (FORCE_CAPTURE || AUTO_CAPTURE_PREVIEW));" in html
 
 
 def test_api_me_reports_asset_admin_state(monkeypatch):

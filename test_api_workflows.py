@@ -181,7 +181,11 @@ def test_upload_derives_rig_and_animation_metadata_from_glb():
         ],
         "meshes": [{"primitives": [{"attributes": {"POSITION": 1}, "indices": 2}]}],
         "skins": [{"joints": [1, 2]}],
-        "accessors": [{"max": [1.75]}, {"count": 90}, {"count": 120}],
+        "accessors": [
+            {"max": [1.75]},
+            {"count": 90, "min": [-1, 0, -0.5], "max": [1, 2, 0.5]},
+            {"count": 120},
+        ],
         "animations": [{"name": "Idle", "samplers": [{"input": 0}]}],
     })
 
@@ -194,8 +198,17 @@ def test_upload_derives_rig_and_animation_metadata_from_glb():
     assert model["asset_types"] == ["rigged", "animated"]
     assert model["runtime_metadata"]["animations"] == [{"name": "Idle", "duration": 1.75}]
     assert model["mesh_stats"] == {"vertices": 90, "triangles": 40, "primitives": 1}
+    assert model["physical_metadata"]["height"] == 2
+    assert model["physical_metadata"]["width"] == 2
+    assert model["physical_metadata"]["depth"] == 1
+    assert model["physical_metadata"]["center"] == [0, 1, 0]
+    assert model["physical_metadata"]["suggested_scale"] == 0.5
     assert model["effective_file_size"] == model["file_size"]
     assert model["effective_mesh_stats"] == model["mesh_stats"]
+    assert model["effective_physical_metadata"] == model["physical_metadata"]
+    assert model["media_capture"]["needs_thumbnail"] is True
+    assert model["media_capture"]["needs_preview"] is True
+    assert model["detail_url"].endswith(f"/model/{model['id']}?capture=1")
 
     with app.app_context():
         file_id = app.config["FILE_STORE"].put(
@@ -207,7 +220,10 @@ def test_upload_derives_rig_and_animation_metadata_from_glb():
         ModelVariant.upsert(
             model["id"], "game", str(file_id),
             file_format="glb", size=321,
-            settings={"mesh_stats": {"vertices": 24, "triangles": 12, "primitives": 1}},
+            settings={
+                "mesh_stats": {"vertices": 24, "triangles": 12, "primitives": 1},
+                "physical": {"height": 1, "width": 1, "depth": 1, "radius": 0.866025, "suggested_scale": 1},
+            },
         )
 
     fetched = client.get(f"/api/model/{model['id']}", headers=headers)
@@ -216,6 +232,8 @@ def test_upload_derives_rig_and_animation_metadata_from_glb():
     assert fetched_model["effective_file_size"] == 321
     assert fetched_model["game_optimized"]["mesh_stats"] == {"vertices": 24, "triangles": 12, "primitives": 1}
     assert fetched_model["effective_mesh_stats"] == {"vertices": 24, "triangles": 12, "primitives": 1}
+    assert fetched_model["game_optimized"]["physical"]["height"] == 1
+    assert fetched_model["effective_physical_metadata"]["suggested_scale"] == 1
 
 
 def test_upload_does_not_tag_static_unrigged_glb():

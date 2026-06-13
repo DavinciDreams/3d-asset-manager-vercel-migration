@@ -421,6 +421,11 @@ def upload():
                     return redirect(url_for('main.model_detail', model_id=duplicate.id))
                 flash('Duplicate model already exists in the asset library.', 'error')
                 return render_template('upload.html', all_tags=Model3D.get_user_tags(current_user.id), max_upload_mb=max_upload_mb)
+
+            from app.api import _file_derived_metadata, _merge_runtime_metadata, _merge_tags
+            derived_asset_types, derived_runtime_metadata = _file_derived_metadata(file_content, file_extension)
+            asset_types = _merge_tags(asset_types, derived_asset_types)
+            runtime_metadata = _merge_runtime_metadata(runtime_metadata, derived_runtime_metadata)
             
             # Store file in the configured database-backed file store.
             fs = current_app.config['FILE_STORE']
@@ -463,7 +468,7 @@ def upload():
             _maybe_autotag_on_upload(model, context={'source': 'web_upload'})
 
             flash(f'Model "{model.name}" uploaded successfully!', 'success')
-            return redirect(url_for('main.model_detail', model_id=model.id))
+            return redirect(url_for('main.model_detail', model_id=model.id, capture=1))
             
         except Exception as e:
             print(f"Upload error: {e}")

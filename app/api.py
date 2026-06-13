@@ -180,6 +180,9 @@ def _file_derived_metadata(file_content, file_extension):
     mesh_stats = _gltf_mesh_stats(gltf)
     if mesh_stats:
         runtime['mesh_stats'] = mesh_stats
+    physical = _gltf_physical_metadata(gltf)
+    if physical:
+        runtime['physical'] = physical
     skins = gltf.get('skins') if isinstance(gltf.get('skins'), list) else []
     nodes = gltf.get('nodes') if isinstance(gltf.get('nodes'), list) else []
     has_skinned_mesh = any(isinstance(node, dict) and node.get('skin') is not None for node in nodes)
@@ -251,6 +254,63 @@ def _gltf_accessor_count(accessors, index):
         return max(0, int(accessor.get('count') or 0))
     except (TypeError, ValueError):
         return 0
+
+
+def _gltf_physical_metadata(gltf):
+    accessors = gltf.get('accessors') if isinstance(gltf.get('accessors'), list) else []
+    meshes = gltf.get('meshes') if isinstance(gltf.get('meshes'), list) else []
+    mins = [None, None, None]
+    maxs = [None, None, None]
+
+    for mesh in meshes:
+        if not isinstance(mesh, dict):
+            continue
+        for primitive in mesh.get('primitives') or []:
+            if not isinstance(primitive, dict):
+                continue
+            attributes = primitive.get('attributes') if isinstance(primitive.get('attributes'), dict) else {}
+            position_index = attributes.get('POSITION')
+            if not isinstance(position_index, int) or position_index < 0 or position_index >= len(accessors):
+                continue
+            accessor = accessors[position_index]
+            if not isinstance(accessor, dict):
+                continue
+            raw_min = accessor.get('min')
+            raw_max = accessor.get('max')
+            if not (isinstance(raw_min, list) and isinstance(raw_max, list) and len(raw_min) >= 3 and len(raw_max) >= 3):
+                continue
+            try:
+                acc_min = [float(raw_min[i]) for i in range(3)]
+                acc_max = [float(raw_max[i]) for i in range(3)]
+            except (TypeError, ValueError):
+                continue
+            for i in range(3):
+                mins[i] = acc_min[i] if mins[i] is None else min(mins[i], acc_min[i])
+                maxs[i] = acc_max[i] if maxs[i] is None else max(maxs[i], acc_max[i])
+
+    if any(value is None for value in mins) or any(value is None for value in maxs):
+        return {}
+    min_v = [float(v) for v in mins]
+    max_v = [float(v) for v in maxs]
+    size = [max(0.0, max_v[i] - min_v[i]) for i in range(3)]
+    center = [(min_v[i] + max_v[i]) / 2 for i in range(3)]
+    radius = (sum((axis / 2) ** 2 for axis in size)) ** 0.5
+    height = size[1]
+    physical = {
+        'min': min_v,
+        'max': max_v,
+        'size': size,
+        'center': center,
+        'width': size[0],
+        'height': height,
+        'depth': size[2],
+        'radius': radius,
+    }
+    if height > 0:
+        # Scale factor to normalize the asset to 1 world unit tall. Tellus can
+        # multiply this by category/avatar targets without trusting generator units.
+        physical['suggested_scale'] = 1.0 / height
+    return physical
 
 
 def _gltf_animation_duration(gltf, animation):
@@ -2429,8 +2489,16 @@ def _media_presence_fields(model):
         'has_preview': bool(model.preview_file_id),
         'preview_url': url_for('api.get_preview', model_id=model.id) if model.preview_file_id else None,
         'mesh_stats': _model_mesh_stats(model),
+        'physical_metadata': _model_physical_metadata(model),
         'effective_file_size': _effective_file_size(model, game),
         'effective_mesh_stats': _effective_mesh_stats(model, game),
+        'effective_physical_metadata': _effective_physical_metadata(model, game),
+        'detail_url': url_for('main.model_detail', model_id=model.id, capture=1),
+        'media_capture': {
+            'needs_thumbnail': not bool(model.thumbnail_file_id),
+            'needs_preview': not bool(model.preview_file_id),
+            'capture_url': url_for('main.model_detail', model_id=model.id, capture=1),
+        },
         **game,
     }
 
@@ -2446,6 +2514,7 @@ def _game_optimized_fields(model):
             'size': variant.size,
             'settings': variant.settings,
             'mesh_stats': _variant_mesh_stats(variant),
+            'physical': _variant_physical_metadata(variant),
             'status': variant.status,
             'updated_at': variant.updated_at.isoformat() if variant.updated_at else None,
             'url': url_for('api.get_game_optimized', model_id=model.id),
@@ -2460,6 +2529,12 @@ def _model_mesh_stats(model):
     return stats if isinstance(stats, dict) and stats else None
 
 
+def _model_physical_metadata(model):
+    metadata = model.runtime_metadata or {}
+    physical = metadata.get('physical') if isinstance(metadata, dict) else None
+    return physical if isinstance(physical, dict) and physical else None
+
+
 def _variant_mesh_stats(variant):
     settings = variant.settings or {}
     stats = settings.get('mesh_stats') if isinstance(settings, dict) else None
@@ -2471,6 +2546,19 @@ def _variant_mesh_stats(variant):
     _asset_types, runtime = _file_derived_metadata(data, variant.file_format or 'glb')
     stats = runtime.get('mesh_stats') if isinstance(runtime, dict) else None
     return stats if isinstance(stats, dict) and stats else None
+
+
+def _variant_physical_metadata(variant):
+    settings = variant.settings or {}
+    physical = settings.get('physical') if isinstance(settings, dict) else None
+    if isinstance(physical, dict) and physical:
+        return physical
+    data = variant.read_data()
+    if not data:
+        return None
+    _asset_types, runtime = _file_derived_metadata(data, variant.file_format or 'glb')
+    physical = runtime.get('physical') if isinstance(runtime, dict) else None
+    return physical if isinstance(physical, dict) and physical else None
 
 
 def _effective_file_size(model, game_fields=None):
@@ -2488,6 +2576,15 @@ def _effective_mesh_stats(model, game_fields=None):
     if isinstance(stats, dict) and stats:
         return stats
     return _model_mesh_stats(model)
+
+
+def _effective_physical_metadata(model, game_fields=None):
+    game_fields = game_fields or _game_optimized_fields(model)
+    game = game_fields.get('game_optimized') if isinstance(game_fields, dict) else None
+    physical = game.get('physical') if isinstance(game, dict) else None
+    if isinstance(physical, dict) and physical:
+        return physical
+    return _model_physical_metadata(model)
 
 
 def _payload():
@@ -2754,7 +2851,7 @@ def _preserved_structural_runtime_metadata(existing):
         return {}
     return {
         key: existing[key]
-        for key in ('animations', 'mesh_stats')
+        for key in ('animations', 'mesh_stats', 'physical')
         if existing.get(key)
     }
 
@@ -3335,8 +3432,12 @@ def _run_game_optimizer(model, owner_id, settings):
         optimized_size = len(out_bytes)
         savings_ratio = 0 if original_size <= 0 else 1 - (optimized_size / original_size)
         texture_note = 'KTX2/Basis' if texture_limit_applied else 'unchanged'
-        source_mesh_stats = _file_derived_metadata(src_bytes, src_fmt)[1].get('mesh_stats')
-        optimized_mesh_stats = _file_derived_metadata(out_bytes, 'glb')[1].get('mesh_stats')
+        source_runtime = _file_derived_metadata(src_bytes, src_fmt)[1]
+        optimized_runtime = _file_derived_metadata(out_bytes, 'glb')[1]
+        source_mesh_stats = source_runtime.get('mesh_stats')
+        optimized_mesh_stats = optimized_runtime.get('mesh_stats')
+        source_physical = source_runtime.get('physical')
+        optimized_physical = optimized_runtime.get('physical')
 
         # Attach the optimized GLB to the SOURCE model as a 'game' variant
         # (no separate Model3D). Re-optimizing replaces the existing variant;
@@ -3351,6 +3452,8 @@ def _run_game_optimizer(model, owner_id, settings):
             'savings_ratio': savings_ratio,
             'source_mesh_stats': source_mesh_stats,
             'mesh_stats': optimized_mesh_stats,
+            'source_physical': source_physical,
+            'physical': optimized_physical,
             'source_is_fixed_eyes': used_fixed_eyes,
             'report': report,
         }

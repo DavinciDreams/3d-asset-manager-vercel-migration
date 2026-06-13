@@ -561,6 +561,29 @@ class Model3D:
                     cleaned_stats[target_key] = value
             if cleaned_stats:
                 normalized["mesh_stats"] = cleaned_stats
+        physical = metadata.get("physical")
+        if isinstance(physical, dict):
+            cleaned_physical = {}
+            for key in ("width", "height", "depth", "radius", "suggested_scale"):
+                try:
+                    value = float(physical.get(key))
+                except (TypeError, ValueError):
+                    continue
+                if value > 0:
+                    cleaned_physical[key] = round(value, 6)
+            for key in ("center", "size", "min", "max"):
+                raw = physical.get(key)
+                if not isinstance(raw, list):
+                    continue
+                values = []
+                for item in (raw + [0, 0, 0])[:3]:
+                    try:
+                        values.append(round(float(item), 6))
+                    except (TypeError, ValueError):
+                        values.append(0.0)
+                cleaned_physical[key] = values
+            if cleaned_physical:
+                normalized["physical"] = cleaned_physical
         if isinstance(light, dict):
             enabled = bool(light.get("enabled"))
             light_type = str(light.get("type") or ("point" if enabled else "none")).strip().lower()
