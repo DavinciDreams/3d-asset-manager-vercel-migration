@@ -533,6 +533,30 @@ def test_api():
         'timestamp': str(Model3D().upload_date)
     })
 
+
+@api_bp.route('/me')
+def current_api_user():
+    """Return the logged-in browser user's API/admin state for diagnostics."""
+    if not current_user.is_authenticated:
+        return jsonify({
+            'authenticated': False,
+            'is_asset_admin': False,
+        })
+    return jsonify({
+        'authenticated': True,
+        'id': current_user.id,
+        'username': current_user.username,
+        'email': current_user.email,
+        'is_asset_admin': is_asset_admin_user(current_user),
+        'asset_admin_configured': bool(
+            os.environ.get('ASSET_MANAGER_ADMIN_USER_IDS')
+            or os.environ.get('ASSET_MANAGER_ADMIN_USERNAMES')
+            or os.environ.get('ASSET_MANAGER_ADMIN_USERS')
+            or os.environ.get('ASSET_MANAGER_ADMIN_EMAILS')
+        ),
+    })
+
+
 @api_bp.route('/models')
 def list_models():
     """List models with pagination and search"""

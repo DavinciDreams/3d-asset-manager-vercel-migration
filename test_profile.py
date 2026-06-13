@@ -86,3 +86,25 @@ def test_asset_admin_can_manage_other_users_models(monkeypatch):
     assert delete.status_code == 200, delete.get_json()
     with app.app_context():
         assert Model3D.get_by_id(model_id) is None
+
+
+def test_api_me_reports_asset_admin_state(monkeypatch):
+    monkeypatch.setenv("ASSET_MANAGER_ADMIN_EMAILS", "admin@example.com")
+    app = create_app()
+    client = app.test_client()
+
+    anonymous = client.get("/api/me")
+    assert anonymous.status_code == 200
+    assert anonymous.get_json()["authenticated"] is False
+    assert anonymous.get_json()["is_asset_admin"] is False
+
+    _login(app, client, username="storeadmin2", email="admin@example.com")
+
+    response = client.get("/api/me")
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["authenticated"] is True
+    assert body["username"] == "storeadmin2"
+    assert body["email"] == "admin@example.com"
+    assert body["is_asset_admin"] is True
+    assert body["asset_admin_configured"] is True
