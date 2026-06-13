@@ -18,20 +18,48 @@ def is_asset_admin_user(user):
     username = str(getattr(user, "username", "") or "").strip().lower()
     email = str(getattr(user, "email", "") or "").strip().lower()
 
-    admin_ids = {value for value in _env_values("ASSET_MANAGER_ADMIN_USER_IDS")}
+    admin_ids = {
+        value
+        for value in _env_values(
+            "ASSET_MANAGER_ADMIN_USER_IDS",
+            "TELLUS_ADMIN_USER_ID",
+        )
+    }
     admin_names = {
         value.lower()
-        for value in _env_values("ASSET_MANAGER_ADMIN_USERNAMES", "ASSET_MANAGER_ADMIN_USERS")
+        for value in _env_values(
+            "ASSET_MANAGER_ADMIN_USERNAMES",
+            "ASSET_MANAGER_ADMIN_USERS",
+            "TELLUS_ADMIN_USERNAME",
+        )
     }
     admin_emails = {
         value.lower()
-        for value in _env_values("ASSET_MANAGER_ADMIN_EMAILS", "ASSET_MANAGER_ADMIN_USERS")
+        for value in _env_values(
+            "ASSET_MANAGER_ADMIN_EMAILS",
+            "ASSET_MANAGER_ADMIN_USERS",
+            "TELLUS_ADMIN_EMAIL",
+        )
     }
 
     return (
         bool(user_id and user_id in admin_ids)
         or bool(username and username in admin_names)
         or bool(email and email in admin_emails)
+    )
+
+
+def asset_admin_configured():
+    return bool(
+        _env_values(
+            "ASSET_MANAGER_ADMIN_USER_IDS",
+            "ASSET_MANAGER_ADMIN_USERNAMES",
+            "ASSET_MANAGER_ADMIN_USERS",
+            "ASSET_MANAGER_ADMIN_EMAILS",
+            "TELLUS_ADMIN_USER_ID",
+            "TELLUS_ADMIN_USERNAME",
+            "TELLUS_ADMIN_EMAIL",
+        )
     )
 
 

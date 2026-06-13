@@ -6,7 +6,7 @@ from sqlalchemy import select, update
 from app.db import asset_files, models as model_rows, optimization_jobs
 from app.models import ApiKey, AssetBundle, Model3D, ModelVariant, User, WorldState
 from app.openapi import get_openapi_spec
-from app.permissions import can_manage_model, is_asset_admin_user
+from app.permissions import asset_admin_configured, can_manage_model, is_asset_admin_user
 import hashlib
 import hmac
 import io
@@ -548,12 +548,7 @@ def current_api_user():
         'username': current_user.username,
         'email': current_user.email,
         'is_asset_admin': is_asset_admin_user(current_user),
-        'asset_admin_configured': bool(
-            os.environ.get('ASSET_MANAGER_ADMIN_USER_IDS')
-            or os.environ.get('ASSET_MANAGER_ADMIN_USERNAMES')
-            or os.environ.get('ASSET_MANAGER_ADMIN_USERS')
-            or os.environ.get('ASSET_MANAGER_ADMIN_EMAILS')
-        ),
+        'asset_admin_configured': asset_admin_configured(),
     })
 
 

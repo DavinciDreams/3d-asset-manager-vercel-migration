@@ -144,3 +144,17 @@ def test_api_me_reports_asset_admin_state(monkeypatch):
     assert body["email"] == "admin@example.com"
     assert body["is_asset_admin"] is True
     assert body["asset_admin_configured"] is True
+
+
+def test_tellus_admin_username_grants_asset_admin(monkeypatch):
+    monkeypatch.setenv("TELLUS_ADMIN_USERNAME", "lisa")
+    app = create_app()
+    client = app.test_client()
+
+    _login(app, client, username="lisa", email="lisa@example.com")
+
+    response = client.get("/api/me")
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["is_asset_admin"] is True
+    assert body["asset_admin_configured"] is True
