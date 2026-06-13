@@ -40,6 +40,19 @@ def _minimal_glb(gltf):
     return b"glTF" + struct.pack("<II", 2, length) + struct.pack("<II", len(json_chunk), 0x4E4F534A) + json_chunk
 
 
+def _attach_thumbnail(app, model_id):
+    with app.app_context():
+        model = Model3D.get_by_id(model_id)
+        file_id = app.config["FILE_STORE"].put(
+            b"fake-thumbnail",
+            filename=f"{model_id}.webp",
+            content_type="image/webp",
+            metadata={"model_id": model_id, "kind": "thumbnail"},
+        )
+        model.thumbnail_file_id = str(file_id)
+        model.save()
+
+
 def test_bearer_upload_enrich_approve_and_bundle():
     app = create_app()
     client = app.test_client()
@@ -64,6 +77,7 @@ def test_bearer_upload_enrich_approve_and_bundle():
     }, content_type="multipart/form-data")
     assert upload.status_code == 201, upload.get_json()
     model_id = upload.get_json()["model"]["id"]
+    _attach_thumbnail(app, model_id)
     assert upload.get_json()["model"]["asset_category"] == "prop"
     assert upload.get_json()["model"]["asset_styles"] == ["fantasy", "stylized"]
     assert upload.get_json()["model"]["asset_types"] == ["rigged", "animated"]
@@ -364,6 +378,7 @@ def test_tellus_admin_token_defaults_owner_and_generation_search_metadata(monkey
             "provider": "test",
         }
 
+    _attach_thumbnail(app, model["id"])
     monkeypatch.setattr("app.ai_enrichment.enrich_model", fake_enrich)
     enrich = client.post(
         f"/api/model/{model['id']}/ai/autotag",
@@ -447,6 +462,7 @@ def test_async_enrichment_queues_and_model_status_endpoint(monkeypatch):
     }, content_type="multipart/form-data")
     assert upload.status_code == 201, upload.get_json()
     model_id = upload.get_json()["model"]["id"]
+    _attach_thumbnail(app, model_id)
 
     queued = client.post(
         f"/api/model/{model_id}/ai/autotag",
@@ -466,6 +482,35 @@ def test_async_enrichment_queues_and_model_status_endpoint(monkeypatch):
     assert queued_model.ai_metadata["_job"]["data"]["context"]["source"] == "test"
 
 
+def test_autotag_requires_saved_thumbnail():
+    app = create_app()
+    client = app.test_client()
+    headers = {"Authorization": "Bearer test-token"}
+    glb = b"glTF-thumbnail-required" + b"\x00" * 64
+
+    upload = client.post("/api/upload", headers=headers, data={
+        "file": (io.BytesIO(glb), "needs_thumb.glb"),
+    }, content_type="multipart/form-data")
+    assert upload.status_code == 201, upload.get_json()
+    model_id = upload.get_json()["model"]["id"]
+
+    sync = client.post(
+        f"/api/model/{model_id}/ai/autotag",
+        headers=headers,
+        json={"overwrite": True},
+    )
+    assert sync.status_code == 409, sync.get_json()
+    assert sync.get_json()["error"] == "Thumbnail required"
+
+    queued = client.post(
+        f"/api/model/{model_id}/ai/autotag",
+        headers=headers,
+        json={"async": True},
+    )
+    assert queued.status_code == 409, queued.get_json()
+    assert queued.get_json()["error"] == "Thumbnail required"
+
+
 def test_async_enrichment_kicks_queue_when_enabled(monkeypatch):
     from app import api as api_module
 
@@ -478,6 +523,7 @@ def test_async_enrichment_kicks_queue_when_enabled(monkeypatch):
     }, content_type="multipart/form-data")
     assert upload.status_code == 201, upload.get_json()
     model_id = upload.get_json()["model"]["id"]
+    _attach_thumbnail(app, model_id)
 
     kicked = {}
 
@@ -510,6 +556,7 @@ def test_ai_enrichment_worker_drains_pending_job(monkeypatch):
     }, content_type="multipart/form-data")
     assert upload.status_code == 201, upload.get_json()
     model_id = upload.get_json()["model"]["id"]
+    _attach_thumbnail(app, model_id)
 
     def fake_enrich_model(model, extra_context=None):
         assert extra_context == {"source": "test_worker"}

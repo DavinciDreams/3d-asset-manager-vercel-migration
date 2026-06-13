@@ -2385,6 +2385,12 @@ def _run_ai_enrichment(model, data=None):
     return enriched
 
 
+def _thumbnail_required_error(model):
+    if model and model.thumbnail_file_id:
+        return None
+    return 'AI enrichment requires a saved thumbnail. Capture/upload a thumbnail before enriching metadata.'
+
+
 def _run_ai_enrichment_worker(app, model_id, data):
     with app.app_context():
         model = Model3D.get_by_id(model_id)
@@ -2557,6 +2563,12 @@ def start_ai_enrichment_worker(app):
 
 def _maybe_autotag_on_upload(model, context=None):
     if not _as_bool(os.environ.get('AI_AUTOTAG_ON_UPLOAD', '0')):
+        return
+    missing_thumbnail = _thumbnail_required_error(model)
+    if missing_thumbnail:
+        model.ai_status = None
+        model.ai_error = missing_thumbnail
+        model.save()
         return
     try:
         _run_ai_enrichment(model, {
@@ -3344,6 +3356,9 @@ def autotag_model(model_id):
             return jsonify({'error': 'Access denied'}), 403
 
         data = _payload()
+        missing_thumbnail = _thumbnail_required_error(model)
+        if missing_thumbnail:
+            return jsonify({'error': 'Thumbnail required', 'detail': missing_thumbnail}), 409
 
         if _as_bool(data.get('async', False)):
             durable_job = (model.ai_metadata or {}).get('_job') if isinstance(model.ai_metadata, dict) else None
