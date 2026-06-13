@@ -65,9 +65,15 @@
         </form>
     </div>
 
-    {% if category or styles or asset_types %}
+    {% if category or styles or asset_types or tags %}
     <div class="flex flex-wrap items-center gap-2 mb-4">
         <span class="text-sm text-gray-500 mr-1">Filters:</span>
+        {% for t in tags %}
+        <a href="{{ url_for('main.browse', search=search, sort=sort, category=category, style=styles, type=asset_types, tag=tags|reject('equalto', t)|list) }}"
+           class="px-3 py-1 rounded-full text-sm bg-indigo-600 text-white inline-flex items-center gap-1">
+            {{ t }} <i class="fas fa-times text-xs"></i>
+        </a>
+        {% endfor %}
         {% if category %}
         <a href="{{ url_for('main.browse', search=search, sort=sort, tag=tags, style=styles, type=asset_types) }}"
            class="px-3 py-1 rounded-full text-sm bg-blue-600 text-white inline-flex items-center gap-1">
@@ -90,36 +96,10 @@
            class="px-3 py-1 rounded-full text-sm text-red-600 hover:text-red-800">
             <i class="fas fa-times-circle mr-1"></i>Clear facets
         </a>
-    </div>
-    {% endif %}
-
-    <!-- Tag filter bar (click to toggle; multiple tags match ALL) -->
-    {% if all_tags %}
-    <div class="flex flex-wrap items-center gap-2 mb-8">
-        <span class="text-sm text-gray-500 mr-1">Tags:</span>
-        <a href="{{ url_for('main.browse', search=search, sort=sort, category=category, style=styles, type=asset_types) }}"
-           class="px-3 py-1 rounded-full text-sm {{ 'bg-blue-600 text-white' if not tags else 'bg-gray-200 text-gray-700 hover:bg-gray-300' }}">
-            All
-        </a>
-        {% for t in all_tags %}
-            {% if t in tags %}
-                {# active -> link removes this tag from the set #}
-                <a href="{{ url_for('main.browse', search=search, sort=sort, category=category, style=styles, type=asset_types, tag=tags|reject('equalto', t)|list) }}"
-                   class="px-3 py-1 rounded-full text-sm bg-blue-600 text-white inline-flex items-center gap-1">
-                    {{ t }} <i class="fas fa-times text-xs"></i>
-                </a>
-            {% else %}
-                {# inactive -> link adds this tag to the set #}
-                <a href="{{ url_for('main.browse', search=search, sort=sort, category=category, style=styles, type=asset_types, tag=tags + [t]) }}"
-                   class="px-3 py-1 rounded-full text-sm bg-gray-200 text-gray-700 hover:bg-gray-300">
-                    {{ t }}
-                </a>
-            {% endif %}
-        {% endfor %}
         {% if tags %}
         <a href="{{ url_for('main.browse', search=search, sort=sort, category=category, style=styles, type=asset_types) }}"
            class="px-3 py-1 rounded-full text-sm text-red-600 hover:text-red-800">
-            <i class="fas fa-times-circle mr-1"></i>Clear
+            <i class="fas fa-times-circle mr-1"></i>Clear tags
         </a>
         {% endif %}
     </div>

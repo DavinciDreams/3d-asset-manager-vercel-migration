@@ -15,15 +15,17 @@ const MAX_INFLUENCES = 4;
 // Skeleton construction
 // ---------------------------------------------------------------------------
 
-// `markers` is a map of world-space THREE.Vector3 keyed by:
-//   chin, groin, wristL, wristR, elbowL, elbowR, kneeL, kneeR
+// `markers` is a map of world-space THREE.Vector3 keyed by the 2D rigger:
+//   groin, chest, neck, chin,
+//   shoulderL/R, elbowL/R, wristL/R, hipL/R, kneeL/R, ankleL/R, toeL/R.
+// Older sparse marker sets are still accepted and missing joints are inferred.
 // `bbox` is a THREE.Box3 of the whole model. Returns { bones, skeleton,
 // hipsBone, boneWorld } where boneWorld is a Map<name, Vector3> of rest world
 // positions and crotchY (= groin.y) is attached to the result.
 // `facing` is +1 if the character faces +Z, -1 if it faces -Z (the side the rig
 // camera sat on). It only affects which way the toes point; left/right is taken
 // from each marker's own side, so the rig is correct regardless of facing.
-export function buildSkeletonFromMarkers(markers, bbox, facing = -1) {
+export function buildSkeletonFromMarkers(markers, bbox, facing = -1, directions = {}) {
   const need = ['chin', 'groin', 'wristL', 'wristR', 'elbowL', 'elbowR', 'kneeL', 'kneeR'];
   for (const k of need) {
     if (!markers[k]) throw new Error(`autorig: missing marker "${k}"`);
@@ -37,12 +39,19 @@ export function buildSkeletonFromMarkers(markers, bbox, facing = -1) {
   const wristL = markers.wristL.clone(), wristR = markers.wristR.clone();
   const elbowL = markers.elbowL.clone(), elbowR = markers.elbowR.clone();
   const kneeL = markers.kneeL.clone(), kneeR = markers.kneeR.clone();
+  const marker = (key, fallback) => markers[key] ? markers[key].clone() : fallback.clone();
 
   const crotchY = groin.y;
   const topY = bbox.max.y;
   const floorY = bbox.min.y;
+  const height = topY - floorY;
   const centerX = (chin.x + groin.x) / 2;
   const midZ = (chin.z + groin.z) / 2;
+  const kneePoleSign = directions.knees === -1 ? -1 : 1;
+  const elbowPoleSign = directions.elbows === 1 ? 1 : -1;
+  const forward = new THREE.Vector3(0, 0, facing || -1);
+  const kneePole = forward.clone().multiplyScalar(kneePoleSign);
+  const elbowPole = forward.clone().multiplyScalar(elbowPoleSign);
 
   // Derived world positions for the full hierarchy.
   const world = {};
@@ -52,12 +61,26 @@ export function buildSkeletonFromMarkers(markers, bbox, facing = -1) {
   const neckBaseY = chin.y - (topY - chin.y) * 0.15; // a touch below the chin
   const spineBottom = V(centerX, groin.y, midZ);
   const spineTop = V(centerX, neckBaseY, midZ);
+  const chest = marker('chest', lerp(spineBottom, spineTop, 0.70));
+  const neck = marker('neck', V(centerX, neckBaseY, midZ));
+  const head = chin.clone();
+  const headFromNeck = head.clone().sub(neck);
+  const minHeadRise = height * 0.045;
+  const maxBackset = height * 0.025;
+  // User neck/chin clicks are easy to place too close together in a 2D flow.
+  // Keep the actual head joint mostly above the neck with only a small forward
+  // component so VRMA head/neck motion does not fold through the face.
+  if (headFromNeck.length() < height * 0.055 || headFromNeck.y < minHeadRise || headFromNeck.z * facing < -maxBackset) {
+    head.x = chin.x;
+    head.y = Math.max(chin.y, neck.y + minHeadRise);
+    head.z = neck.z + Math.max(height * 0.012, Math.min(Math.abs(headFromNeck.z), height * 0.035)) * facing;
+  }
   world['Spine'] = lerp(spineBottom, spineTop, 0.30);
-  world['Spine1'] = lerp(spineBottom, spineTop, 0.58);
-  world['Spine2'] = lerp(spineBottom, spineTop, 0.82);
-  world['Neck'] = V(centerX, neckBaseY, midZ);
-  world['Head'] = chin.clone();
-  world['HeadTop_End'] = V(chin.x, topY, chin.z);
+  world['Spine1'] = lerp(spineBottom, chest, 0.68);
+  world['Spine2'] = chest.clone();
+  world['Neck'] = neck.clone();
+  world['Head'] = head.clone();
+  world['HeadTop_End'] = V(head.x, topY, head.z);
 
   // Shoulder sockets: at upper-chest height, offset laterally toward each elbow.
   // IMPORTANT: derive the lateral direction from the MARKER's own side
@@ -70,11 +93,11 @@ export function buildSkeletonFromMarkers(markers, bbox, facing = -1) {
   const leftArmSign = Math.sign(elbowL.x - centerX) || 1;        // +1 or -1
   const rightArmSign = Math.sign(elbowR.x - centerX) || -1;
   world['LeftShoulder'] = V(centerX + leftArmSign * shoulderHalf * 0.4, shoulderY, midZ);
-  world['LeftArm'] = V(centerX + leftArmSign * shoulderHalf, shoulderY, midZ);
+  world['LeftArm'] = marker('shoulderL', V(centerX + leftArmSign * shoulderHalf, shoulderY, midZ));
   world['LeftForeArm'] = elbowL.clone();
   world['LeftHand'] = wristL.clone();
   world['RightShoulder'] = V(centerX + rightArmSign * shoulderHalf * 0.4, shoulderY, midZ);
-  world['RightArm'] = V(centerX + rightArmSign * shoulderHalf, shoulderY, midZ);
+  world['RightArm'] = marker('shoulderR', V(centerX + rightArmSign * shoulderHalf, shoulderY, midZ));
   world['RightForeArm'] = elbowR.clone();
   world['RightHand'] = wristR.clone();
 
@@ -90,17 +113,17 @@ export function buildSkeletonFromMarkers(markers, bbox, facing = -1) {
   // Toes point "forward" = the direction the character faces. `facing` is the
   // side the rig camera sat on (-1 => faces -Z, +1 => faces +Z), so forward Z
   // = facing. footFwd is applied toward +Z*facing.
-  const footFwd = 0.10 * (topY - floorY) * facing;
-  world['LeftUpLeg'] = V(centerX + leftLegSign * hipHalf, groin.y, midZ);
+  const footFwd = 0.10 * height * facing;
+  world['LeftUpLeg'] = marker('hipL', V(centerX + leftLegSign * hipHalf, groin.y, midZ));
   world['LeftLeg'] = kneeL.clone();
-  world['LeftFoot'] = V(kneeL.x, floorY + (topY - floorY) * 0.04, kneeL.z);
-  world['LeftToeBase'] = V(kneeL.x, floorY + (topY - floorY) * 0.01, kneeL.z + footFwd);
-  world['LeftToe_End'] = V(kneeL.x, floorY, kneeL.z + footFwd * 1.6);
-  world['RightUpLeg'] = V(centerX + rightLegSign * hipHalf, groin.y, midZ);
+  world['LeftFoot'] = marker('ankleL', V(kneeL.x, floorY + height * 0.04, kneeL.z));
+  world['LeftToeBase'] = marker('toeL', V(world['LeftFoot'].x, floorY + height * 0.01, world['LeftFoot'].z + footFwd));
+  world['LeftToe_End'] = world['LeftToeBase'].clone().add(forward.clone().multiplyScalar(Math.max(Math.abs(footFwd) * 0.6, height * 0.04)));
+  world['RightUpLeg'] = marker('hipR', V(centerX + rightLegSign * hipHalf, groin.y, midZ));
   world['RightLeg'] = kneeR.clone();
-  world['RightFoot'] = V(kneeR.x, floorY + (topY - floorY) * 0.04, kneeR.z);
-  world['RightToeBase'] = V(kneeR.x, floorY + (topY - floorY) * 0.01, kneeR.z + footFwd);
-  world['RightToe_End'] = V(kneeR.x, floorY, kneeR.z + footFwd * 1.6);
+  world['RightFoot'] = marker('ankleR', V(kneeR.x, floorY + height * 0.04, kneeR.z));
+  world['RightToeBase'] = marker('toeR', V(world['RightFoot'].x, floorY + height * 0.01, world['RightFoot'].z + footFwd));
+  world['RightToe_End'] = world['RightToeBase'].clone().add(forward.clone().multiplyScalar(Math.max(Math.abs(footFwd) * 0.6, height * 0.04)));
 
   // Parent → children tree (names without the mixamorig: prefix here).
   const tree = {
@@ -130,22 +153,69 @@ export function buildSkeletonFromMarkers(markers, bbox, facing = -1) {
     bones.push(bone);
   }
 
-  // Parent the bones and set LOCAL positions (rest rotations are identity, so
-  // local position = childWorld - parentWorld).
+  // Parent the bones, then assign LOCAL transforms from desired world-space
+  // joint positions. Keep core humanoid rest rotations identity: VRM/VRMA
+  // retargeting expects a T-pose-ish humanoid frame where arms use X as the
+  // lateral axis, not a DCC-style bone frame where local Y points down each
+  // limb. Rolling the arms toward their child positions makes VRMA elbow bends
+  // look flat even when the joint positions are correct.
   for (const name of order) {
     const children = tree[name] || [];
     for (const childName of children) {
       boneByName[name].add(boneByName[childName]);
     }
   }
+
+  function safePole(dir, primary) {
+    const projected = dir.clone().sub(primary.clone().multiplyScalar(dir.dot(primary)));
+    if (projected.lengthSq() > 1e-8) return projected.normalize();
+    const fallback = Math.abs(primary.y) < 0.85 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0);
+    return fallback.sub(primary.clone().multiplyScalar(fallback.dot(primary))).normalize();
+  }
+
+  function poleFor(name) {
+    if (/Leg|UpLeg/.test(name)) return kneePole;
+    if (/Arm|ForeArm|Hand/.test(name)) return elbowPole;
+    if (/Foot|Toe/.test(name)) return new THREE.Vector3(0, 1, 0);
+    return forward;
+  }
+
+  function jointQuaternion(name) {
+    if (/^(Hips|Spine|Spine1|Spine2|Neck|Head|LeftShoulder|LeftArm|LeftForeArm|LeftHand|RightShoulder|RightArm|RightForeArm|RightHand|LeftUpLeg|LeftLeg|LeftFoot|LeftToeBase|RightUpLeg|RightLeg|RightFoot|RightToeBase)$/.test(name)) {
+      return new THREE.Quaternion();
+    }
+    const children = tree[name] || [];
+    const firstChild = children.find((childName) => world[childName]);
+    let primary;
+    if (firstChild) primary = world[firstChild].clone().sub(world[name]);
+    else {
+      const parentName = order.find((p) => (tree[p] || []).includes(name));
+      primary = parentName ? world[name].clone().sub(world[parentName]) : new THREE.Vector3(0, 1, 0);
+    }
+    if (primary.lengthSq() < 1e-8) primary.set(0, 1, 0);
+    const yAxis = primary.normalize();
+    const zAxis = safePole(poleFor(name), yAxis);
+    const xAxis = new THREE.Vector3().crossVectors(yAxis, zAxis).normalize();
+    zAxis.crossVectors(xAxis, yAxis).normalize();
+    const m = new THREE.Matrix4().makeBasis(xAxis, yAxis, zAxis);
+    return new THREE.Quaternion().setFromRotationMatrix(m);
+  }
+
+  const desiredWorld = {};
+  const unitScale = new THREE.Vector3(1, 1, 1);
+  for (const name of order) {
+    const m = new THREE.Matrix4();
+    m.compose(world[name], jointQuaternion(name), unitScale);
+    desiredWorld[name] = m;
+  }
+
   for (const name of order) {
     const parentName = order.find((p) => (tree[p] || []).includes(name));
-    const wp = world[name];
+    let local = desiredWorld[name].clone();
     if (parentName) {
-      boneByName[name].position.copy(wp.clone().sub(world[parentName]));
-    } else {
-      boneByName[name].position.copy(wp); // Hips: world == local (root)
+      local = desiredWorld[parentName].clone().invert().multiply(local);
     }
+    local.decompose(boneByName[name].position, boneByName[name].quaternion, boneByName[name].scale);
   }
 
   boneByName['Hips'].updateMatrixWorld(true);
@@ -184,7 +254,48 @@ export function computeBoneMidpoints(bones) {
 // End-cap / non-deforming bones never receive vertices (keeps weights on real
 // bones). Matches the spirit of mesh2motion's non-deforming-control-bone skip.
 function isNonDeformingBone(bone) {
-  return /_End$/.test(bone.name) || /HeadTop/.test(bone.name);
+  const name = bone.name.toLowerCase();
+  return /_end$/.test(name) ||
+    /headtop/.test(name) ||
+    name.startsWith('ik') ||
+    name.includes('poletarget') ||
+    name.startsWith('pole') ||
+    /^ff[blr]{0,2}$/.test(name);
+}
+
+function boneCategory(bone) {
+  const name = bone.name.toLowerCase();
+  const extremity = [
+    'hand', 'foot', 'toe', 'ball',
+    'thumb', 'index', 'middle', 'ring', 'pinky', 'finger',
+    'eye', 'tongue', 'wing', 'feather',
+  ];
+  if (extremity.some((kw) => name.includes(kw))) return 'extremity';
+
+  const limb = [
+    'arm', 'upperarm', 'lowerarm', 'forearm', 'elbow', 'wrist',
+    'shoulder', 'clavicle', 'ankle', 'fin',
+    'thigh', 'calf', 'shin', 'knee', 'leg', 'upleg', 'lowleg',
+  ];
+  if (limb.some((kw) => name.includes(kw))) return 'limb';
+
+  const torso = [
+    'spine', 'chest', 'hips', 'pelvis', 'neck', 'torso', 'abdomen', 'body',
+    'tail', 'head', 'mouth', 'stomach', 'chin', 'teeth',
+  ];
+  if (torso.some((kw) => name.includes(kw))) return 'torso';
+
+  return 'other';
+}
+
+function isTorsoBoundary(bones, a, b) {
+  const ca = boneCategory(bones[a]);
+  const cb = boneCategory(bones[b]);
+  return (ca === 'torso' || cb === 'torso') && ca !== 'extremity' && cb !== 'extremity';
+}
+
+function isLimbBoundary(bones, a, b) {
+  return boneCategory(bones[a]) === 'limb' || boneCategory(bones[b]) === 'limb';
 }
 
 // ---------------------------------------------------------------------------
@@ -250,53 +361,136 @@ function buildAdjacency(geometry) {
 // For each vertex sitting on a bone boundary (a neighbor bound to a different
 // bone), blend in that neighbor bone by distance to the two bone midpoints.
 // Single-ring 50/50-ish gradient — the "standard" path of the original.
-export function smoothBoneWeightBoundaries(geometry, skinIndices, skinWeights, bones, midpoints, worldMatrix, crotchY) {
+function buildPositionMap(geometry) {
   const count = geometry.attributes.position.count;
-  const adj = buildAdjacency(geometry);
   const pos = geometry.attributes.position;
-  const v = new THREE.Vector3();
-  const hipsIdx = bones.findIndex((b) => /:Hips$/.test(b.name));
+  const map = new Map();
+  for (let i = 0; i < count; i++) {
+    const key = `${pos.getX(i).toFixed(6)},${pos.getY(i).toFixed(6)},${pos.getZ(i).toFixed(6)}`;
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push(i);
+  }
+  return map;
+}
 
-  // Snapshot the pre-smoothing single-bone assignment.
-  const baseBone = new Int32Array(count);
-  for (let i = 0; i < count; i++) baseBone[i] = skinIndices[i * 4];
+function sharedVertices(geometry, vertex, positionMap) {
+  const pos = geometry.attributes.position;
+  const key = `${pos.getX(vertex).toFixed(6)},${pos.getY(vertex).toFixed(6)},${pos.getZ(vertex).toFixed(6)}`;
+  return positionMap.get(key) || [vertex];
+}
+
+function setBlend(geometry, skinIndices, skinWeights, positionMap, vertex, primary, secondary, secondaryWeight) {
+  const primaryWeight = 1.0 - secondaryWeight;
+  for (const idx of sharedVertices(geometry, vertex, positionMap)) {
+    const o = idx * 4;
+    skinIndices[o] = primary;
+    skinIndices[o + 1] = secondary;
+    skinIndices[o + 2] = 0;
+    skinIndices[o + 3] = 0;
+    skinWeights[o] = primaryWeight;
+    skinWeights[o + 1] = secondaryWeight;
+    skinWeights[o + 2] = 0;
+    skinWeights[o + 3] = 0;
+  }
+}
+
+function isParentOf(bones, parentIndex, childIndex) {
+  const parent = bones[parentIndex];
+  let child = bones[childIndex];
+  while (child && child.parent && child.parent.isBone) {
+    if (child.parent === parent) return true;
+    child = child.parent;
+  }
+  return false;
+}
+
+function findBoundaryPairs(geometry, skinIndices, skinWeights, bones, adjacency, crotchY, hipsIdx) {
+  const count = geometry.attributes.position.count;
+  const pos = geometry.attributes.position;
+  const pairs = [];
+  const visited = new Set();
+  const v = new THREE.Vector3();
 
   for (let i = 0; i < count; i++) {
-    const myBone = baseBone[i];
-    // Collect distinct neighbor bones.
-    const neighborBones = new Set();
-    for (const j of adj[i]) {
-      if (baseBone[j] !== myBone) neighborBones.add(baseBone[j]);
+    const oi = i * 4;
+    const boneA = skinIndices[oi];
+    if (skinWeights[oi] !== 1.0) continue;
+
+    for (const j of adjacency[i]) {
+      const oj = j * 4;
+      const boneB = skinIndices[oj];
+      if (boneA === boneB || skinWeights[oj] !== 1.0) continue;
+
+      v.fromBufferAttribute(pos, i);
+      const aDisallowedHip = crotchY !== undefined && boneB === hipsIdx && v.y < crotchY;
+      v.fromBufferAttribute(pos, j);
+      const bDisallowedHip = crotchY !== undefined && boneA === hipsIdx && v.y < crotchY;
+      if (aDisallowedHip || bDisallowedHip) continue;
+
+      const key = i < j ? `${i},${j}` : `${j},${i}`;
+      if (visited.has(key)) continue;
+      visited.add(key);
+
+      let smoothingType = 'standard';
+      if (isTorsoBoundary(bones, boneA, boneB)) smoothingType = 'torso';
+      else if (isLimbBoundary(bones, boneA, boneB)) smoothingType = 'limb';
+
+      pairs.push({ vertexA: i, vertexB: j, boneA, boneB, smoothingType });
     }
-    if (neighborBones.size === 0) continue;
+  }
+  return pairs;
+}
 
-    v.fromBufferAttribute(pos, i);
-    if (worldMatrix) v.applyMatrix4(worldMatrix);
+export function smoothBoneWeightBoundaries(geometry, skinIndices, skinWeights, bones, midpoints, worldMatrix, crotchY) {
+  const adjacency = buildAdjacency(geometry);
+  const positionMap = buildPositionMap(geometry);
+  const hipsIdx = bones.findIndex((b) => /:Hips$/.test(b.name));
+  const pairs = findBoundaryPairs(geometry, skinIndices, skinWeights, bones, adjacency, crotchY, hipsIdx);
 
-    // Honor the hip rule during smoothing too: a vertex below the crotch must
-    // never blend back into Hips (otherwise the leg/pelvis seam re-grabs it).
-    if (crotchY !== undefined && v.y < crotchY) neighborBones.delete(hipsIdx);
-    if (neighborBones.size === 0) continue;
+  for (const pair of pairs.filter((p) => p.smoothingType === 'torso')) {
+    setBlend(geometry, skinIndices, skinWeights, positionMap, pair.vertexA, pair.boneA, pair.boneB, 0.5);
+    setBlend(geometry, skinIndices, skinWeights, positionMap, pair.vertexB, pair.boneB, pair.boneA, 0.5);
+  }
 
-    // Build influence list: self bone + up to 3 nearest neighbor bones, weighted
-    // by inverse distance to each bone midpoint.
-    const candidates = [myBone, ...neighborBones];
-    const weighted = candidates.map((b) => {
-      const d = Math.sqrt(midpoints[b].distanceToSquared(v)) + 1e-6;
-      return { bone: b, w: 1 / d };
-    });
-    weighted.sort((a, b) => b.w - a.w);
-    const top = weighted.slice(0, MAX_INFLUENCES);
-    const sum = top.reduce((s, c) => s + c.w, 0) || 1;
-    for (let k = 0; k < MAX_INFLUENCES; k++) {
-      if (k < top.length) {
-        skinIndices[i * 4 + k] = top[k].bone;
-        skinWeights[i * 4 + k] = top[k].w / sum;
-      } else {
-        skinIndices[i * 4 + k] = 0;
-        skinWeights[i * 4 + k] = 0;
+  const processed = new Set();
+  for (const pair of pairs.filter((p) => p.smoothingType === 'torso')) {
+    processed.add(pair.vertexA);
+    processed.add(pair.vertexB);
+  }
+  let currentRing = new Set(processed);
+  for (const secondaryWeight of [0.25, 0.10]) {
+    const nextRing = new Set();
+    for (const vertex of currentRing) {
+      const primary = skinIndices[vertex * 4];
+      const secondary = skinIndices[vertex * 4 + 1];
+      if (skinWeights[vertex * 4 + 1] <= 0 || secondary === primary) continue;
+      for (const neighbor of adjacency[vertex]) {
+        if (processed.has(neighbor)) continue;
+        if (skinIndices[neighbor * 4] !== primary || skinWeights[neighbor * 4] !== 1.0) continue;
+        setBlend(geometry, skinIndices, skinWeights, positionMap, neighbor, primary, secondary, secondaryWeight);
+        processed.add(neighbor);
+        nextRing.add(neighbor);
       }
     }
+    currentRing = nextRing;
+  }
+
+  for (const pair of pairs.filter((p) => p.smoothingType === 'limb')) {
+    const aParent = isParentOf(bones, pair.boneA, pair.boneB);
+    const bParent = isParentOf(bones, pair.boneB, pair.boneA);
+    if (aParent) {
+      setBlend(geometry, skinIndices, skinWeights, positionMap, pair.vertexB, pair.boneB, pair.boneA, 0.5);
+    } else if (bParent) {
+      setBlend(geometry, skinIndices, skinWeights, positionMap, pair.vertexA, pair.boneA, pair.boneB, 0.5);
+    } else {
+      setBlend(geometry, skinIndices, skinWeights, positionMap, pair.vertexA, pair.boneA, pair.boneB, 0.5);
+      setBlend(geometry, skinIndices, skinWeights, positionMap, pair.vertexB, pair.boneB, pair.boneA, 0.5);
+    }
+  }
+
+  for (const pair of pairs.filter((p) => p.smoothingType === 'standard')) {
+    setBlend(geometry, skinIndices, skinWeights, positionMap, pair.vertexA, pair.boneA, pair.boneB, 0.5);
+    setBlend(geometry, skinIndices, skinWeights, positionMap, pair.vertexB, pair.boneB, pair.boneA, 0.5);
   }
 }
 
@@ -357,8 +551,13 @@ export function skinMesh(mesh, skeleton, bones, midpoints, crotchY, rigidThresho
 
 // Full pipeline helper: given the loaded model root + a markers map + bbox,
 // returns { root, skeleton, skinnedMeshes } ready for GLTFExporter.
-export function rigModel(modelRoot, markers, bbox, facing = -1) {
-  const { bones, skeleton, hipsBone, crotchY } = buildSkeletonFromMarkers(markers, bbox, facing);
+export function rigModel(modelRoot, markers, bbox, facing = -1, options = {}) {
+  const { bones, skeleton, hipsBone, crotchY } = buildSkeletonFromMarkers(
+    markers,
+    bbox,
+    facing,
+    options.directions || {}
+  );
   hipsBone.updateMatrixWorld(true);
   const midpoints = computeBoneMidpoints(bones);
 

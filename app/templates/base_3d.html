@@ -1478,8 +1478,8 @@
                     },
                     // --- Auto-rig editor -------------------------------------
                     // A Mixamo-style 2D "pick the joints" flow: switch to a flat
-                    // orthographic front view, click to place a few markers
-                    // (chin, wrists, elbows, knees, groin), then build a
+                    // orthographic front view, click to place body landmarks,
+                    // confirm bend directions with a test pose, then build a
                     // mixamorig:* skeleton + skin the mesh (client-side) and
                     // export a rigged GLB. Bone names match tools/vrm-bone-map.js
                     // so the result converts to a VRM + plays VRMA clips.
@@ -1488,10 +1488,25 @@
                         // marker; otherwise a mirrored L/R pair (place L, R auto-mirrors).
                         const PLAN = [
                             { key: 'groin', label: 'Groin / hips', center: true,  color: 0xff4081 },
+                            { key: 'chest', label: 'Chest',        center: true,  color: 0x7c3aed },
+                            { key: 'neck',  label: 'Neck',         center: true,  color: 0x06b6d4 },
                             { key: 'chin',  label: 'Chin',         center: true,  color: 0x00bcd4 },
-                            { key: 'knee',  label: 'Knees',        center: false, color: 0xff9800 },
+                            { key: 'shoulder', label: 'Shoulders', center: false, color: 0x60a5fa },
                             { key: 'elbow', label: 'Elbows',       center: false, color: 0xffeb3b },
                             { key: 'wrist', label: 'Wrists',       center: false, color: 0x8bc34a },
+                            { key: 'hip',   label: 'Hip sockets',  center: false, color: 0xf472b6 },
+                            { key: 'knee',  label: 'Knees',        center: false, color: 0xff9800 },
+                            { key: 'ankle', label: 'Ankles',       center: false, color: 0x22c55e },
+                            { key: 'toe',   label: 'Toes',         center: false, color: 0x14b8a6 },
+                        ];
+                        const PROFILE_PLAN = [
+                            { key: 'chest', label: 'Chest depth', center: true, color: 0x7c3aed },
+                            { key: 'neck',  label: 'Neck depth',  center: true, color: 0x06b6d4 },
+                            { key: 'elbow', label: 'Elbow bend depth', center: false, color: 0xffeb3b },
+                            { key: 'wrist', label: 'Wrist depth', center: false, color: 0x8bc34a },
+                            { key: 'knee',  label: 'Knee bend depth', center: false, color: 0xff9800 },
+                            { key: 'ankle', label: 'Ankle depth', center: false, color: 0x22c55e },
+                            { key: 'toe',   label: 'Toe direction', center: false, color: 0x14b8a6 },
                         ];
                         let active = false;
                         let prevCamera = null;       // perspective cam to restore
@@ -1500,10 +1515,19 @@
                         let markers = {};            // key -> { world:Vector3, sprite }
                         let mirror = true;
                         let stepIndex = 0;           // which PLAN row we're placing
+                        let profileStepIndex = 0;
                         let pendingSide = 'L';       // for paired markers
                         let bbox = null, centerX = 0;
+                        let bboxSize = null;
                         let meshes = [];
                         let onChange = null;         // UI callback(progress)
+                        let directions = { knees: 1, elbows: -1 };
+                        let previewRoot = null;
+                        let previewHidden = false;
+                        let viewMode = 'front';
+                        let profileSide = 1;
+                        let normalizeAvatarForward = true;
+                        let normalizeAvatarSides = true;
                         // Which side the ortho cam sits on: -1 = camera at -Z
                         // looking toward +Z (shows a -Z-facing model's FRONT,
                         // which is the common image-to-3D case); +1 = the other
@@ -1518,7 +1542,21 @@
                         function positionCamera() {
                             if (!orthoCam || !bboxCenter) return;
                             const c = bboxCenter;
-                            orthoCam.position.set(c.x, c.y, c.z + facing * viewDepth);
+                            const size = bboxSize || new THREE.Vector3(1, 1, 1);
+                            const pad = 1.12;
+                            if (viewMode === 'profile') {
+                                const halfW = Math.max(size.z / 2, size.x * 0.18) * pad;
+                                const halfH = (size.y / 2) * pad;
+                                orthoCam.left = -halfW; orthoCam.right = halfW;
+                                orthoCam.top = halfH; orthoCam.bottom = -halfH;
+                                orthoCam.position.set(c.x + profileSide * viewDepth, c.y, c.z);
+                            } else {
+                                const halfW = (size.x / 2) * pad;
+                                const halfH = (size.y / 2) * pad;
+                                orthoCam.left = -halfW; orthoCam.right = halfW;
+                                orthoCam.top = halfH; orthoCam.bottom = -halfH;
+                                orthoCam.position.set(c.x, c.y, c.z + facing * viewDepth);
+                            }
                             orthoCam.up.set(0, 1, 0);
                             orthoCam.lookAt(c);
                             orthoCam.updateProjectionMatrix();
@@ -1556,13 +1594,23 @@
                             return out;
                         }
 
-                        function makeSprite(color) {
+                        function makeSprite(color, label) {
                             const cv = document.createElement('canvas');
                             cv.width = cv.height = 64;
                             const ctx = cv.getContext('2d');
                             ctx.beginPath(); ctx.arc(32, 32, 26, 0, Math.PI * 2);
                             ctx.fillStyle = '#' + color.toString(16).padStart(6, '0');
                             ctx.fill(); ctx.lineWidth = 6; ctx.strokeStyle = '#fff'; ctx.stroke();
+                            if (label) {
+                                ctx.font = 'bold 30px system-ui, -apple-system, Segoe UI, sans-serif';
+                                ctx.textAlign = 'center';
+                                ctx.textBaseline = 'middle';
+                                ctx.lineWidth = 5;
+                                ctx.strokeStyle = 'rgba(15, 23, 42, 0.8)';
+                                ctx.strokeText(label, 32, 34);
+                                ctx.fillStyle = '#ffffff';
+                                ctx.fillText(label, 32, 34);
+                            }
                             const tex = new THREE.CanvasTexture(cv);
                             const mat = new THREE.SpriteMaterial({ map: tex, depthTest: false, depthWrite: false });
                             const sp = new THREE.Sprite(mat);
@@ -1575,10 +1623,22 @@
                         // Place/replace a marker at a world position.
                         function setMarker(key, world, color) {
                             if (markers[key]) scene.remove(markers[key].sprite);
-                            const sp = makeSprite(color);
+                            const sideLabel = key.endsWith('L') ? 'L' : (key.endsWith('R') ? 'R' : '');
+                            const sp = makeSprite(color, sideLabel);
                             sp.position.copy(world);
                             scene.add(sp);
                             markers[key] = { world: world.clone(), sprite: sp };
+                        }
+
+                        function profileTargetKeys(row) {
+                            if (!row) return [];
+                            return row.center ? [row.key] : [row.key + 'L', row.key + 'R'];
+                        }
+
+                        function profileTargetLabel(row) {
+                            if (!row) return '';
+                            const name = row.label.replace(/\s+depth$/i, '').replace(/\s+direction$/i, '');
+                            return row.center ? name : name + ' L/R';
                         }
 
                         // 2D click -> world position on the mesh medial axis:
@@ -1596,15 +1656,146 @@
 
                         function progress() {
                             const placed = Object.keys(markers);
-                            const need = ['groin', 'chin', 'kneeL', 'kneeR', 'elbowL', 'elbowR', 'wristL', 'wristR'];
+                            const need = [];
+                            for (const row of PLAN) {
+                                if (row.center) need.push(row.key);
+                                else need.push(row.key + 'L', row.key + 'R');
+                            }
+                            const profileRow = PROFILE_PLAN[profileStepIndex];
                             return {
                                 placed,
                                 complete: need.every((k) => markers[k]),
-                                step: PLAN[stepIndex] ? PLAN[stepIndex].label : 'Done',
+                                step: viewMode === 'profile'
+                                    ? (profileRow ? profileRow.label : 'Profile pass done')
+                                    : (PLAN[stepIndex] ? PLAN[stepIndex].label : 'Done'),
                                 side: pendingSide,
                                 done: need.filter((k) => markers[k]).length,
                                 total: need.length,
+                                directions: { ...directions },
+                                viewMode,
+                                profileDone: profileStepIndex >= PROFILE_PLAN.length,
+                                profileStep: profileStepIndex + 1,
+                                profileTotal: PROFILE_PLAN.length,
+                                profileTargets: profileTargetKeys(profileRow),
+                                profileTargetLabel: profileTargetLabel(profileRow),
                             };
+                        }
+
+                        function clearPreview() {
+                            if (previewRoot) {
+                                scene.remove(previewRoot);
+                                previewRoot.traverse((o) => {
+                                    if (o.geometry) o.geometry.dispose && o.geometry.dispose();
+                                });
+                                previewRoot = null;
+                            }
+                            if (previewHidden && model) model.visible = true;
+                            previewHidden = false;
+                        }
+
+                        function currentMarkerVectors() {
+                            const m = {};
+                            for (const k of Object.keys(markers)) m[k] = markers[k].world.clone();
+                            return canonicalizeAvatarSides(m);
+                        }
+
+                        function canonicalizeAvatarSides(m) {
+                            if (!normalizeAvatarSides) return m;
+                            const pairs = ['shoulder', 'elbow', 'wrist', 'hip', 'knee', 'ankle', 'toe'];
+                            const scored = pairs
+                                .filter((key) => m[key + 'L'] && m[key + 'R'])
+                                .map((key) => Math.sign((m[key + 'L'].x || 0) - (m[key + 'R'].x || 0)))
+                                .filter((sign) => sign !== 0);
+                            const currentSign = scored.reduce((sum, sign) => sum + sign, 0) >= 0 ? 1 : -1;
+                            // If export wraps a -Z-facing avatar with a 180deg
+                            // yaw, world X flips. Prepare the pre-export marker
+                            // labels so the final VRM still lands with Left on
+                            // +X, matching VRoid/Mixamo validation.
+                            const targetSign = normalizeAvatarForward && facing < 0 ? -1 : 1;
+                            if (currentSign === targetSign) return m;
+                            for (const key of pairs) {
+                                const leftKey = key + 'L';
+                                const rightKey = key + 'R';
+                                if (!m[leftKey] || !m[rightKey]) continue;
+                                const tmp = m[leftKey];
+                                m[leftKey] = m[rightKey];
+                                m[rightKey] = tmp;
+                            }
+                            return m;
+                        }
+
+                        function plainMarkerData() {
+                            const out = {};
+                            for (const k of Object.keys(markers)) {
+                                const p = markers[k].world;
+                                out[k] = { x: p.x, y: p.y, z: p.z };
+                            }
+                            return out;
+                        }
+
+                        function nudgeMarkerDepth(keys, amount) {
+                            if (!bbox) return;
+                            const step = bbox.getSize(new THREE.Vector3()).length() * 0.018 * amount;
+                            for (const key of keys) {
+                                if (!markers[key]) continue;
+                                markers[key].world.z += facing * step;
+                                markers[key].sprite.position.copy(markers[key].world);
+                            }
+                            clearPreview();
+                            if (onChange) onChange(progress());
+                        }
+
+                        function updateMarkerFromProfile(key, world, color) {
+                            if (!markers[key]) return;
+                            const next = markers[key].world.clone();
+                            next.y = world.y;
+                            next.z = world.z;
+                            setMarker(key, next, color);
+                        }
+
+                        function posePreviewBones(bones) {
+                            const byName = {};
+                            bones.forEach((b) => { byName[b.name.replace(/^mixamorig:/, '')] = b; });
+                            // Keep the thigh fixed: this preview is a hinge test,
+                            // not a walk cycle. If the calf/foot folds the wrong
+                            // way, the knee pole is wrong and the user should flip
+                            // knees before saving.
+                            const kneeBend = -0.95 * directions.knees;
+                            const elbowBend = 1.35 * -directions.elbows;
+                            if (byName.LeftLeg) byName.LeftLeg.rotation.x += kneeBend;
+                            if (byName.RightLeg) byName.RightLeg.rotation.x += kneeBend;
+                            if (byName.LeftFoot) byName.LeftFoot.rotation.x += -kneeBend * 0.55;
+                            if (byName.RightFoot) byName.RightFoot.rotation.x += -kneeBend * 0.55;
+                            // Make elbows visually diagnostic: lift the upper
+                            // arms away from the torso, then fold forearms hard.
+                            if (byName.LeftArm) {
+                                byName.LeftArm.rotation.z += -0.75;
+                                byName.LeftArm.rotation.x += 0.18;
+                            }
+                            if (byName.RightArm) {
+                                byName.RightArm.rotation.z += 0.75;
+                                byName.RightArm.rotation.x += 0.18;
+                            }
+                            if (byName.LeftForeArm) byName.LeftForeArm.rotation.x += elbowBend;
+                            if (byName.RightForeArm) byName.RightForeArm.rotation.x += elbowBend;
+                            if (byName.LeftHand) byName.LeftHand.rotation.x += -elbowBend * 0.35;
+                            if (byName.RightHand) byName.RightHand.rotation.x += -elbowBend * 0.35;
+                        }
+
+                        function exportRootForAvatar(root) {
+                            // VRM 1.0 viewers/animations expect the avatar's
+                            // front to face +Z. Many image-to-3D meshes face -Z;
+                            // when the rigging camera had to sit on -Z to see the
+                            // face, wrap the rig in a 180deg yaw around its center
+                            // so animated playback presents the front.
+                            if (!normalizeAvatarForward || facing >= 0 || !bboxCenter) return root;
+                            const wrapper = new THREE.Group();
+                            wrapper.name = 'rig_root_vrm_forward';
+                            wrapper.position.copy(bboxCenter);
+                            root.position.sub(bboxCenter);
+                            wrapper.rotation.y = Math.PI;
+                            wrapper.add(root);
+                            return wrapper;
                         }
 
                         function advance() {
@@ -1617,15 +1808,39 @@
                             if (onChange) onChange(progress());
                         }
 
+                        function advanceProfile() {
+                            const row = PROFILE_PLAN[profileStepIndex];
+                            if (row && !row.center && !mirror && pendingSide === 'L') {
+                                pendingSide = 'R';
+                            } else {
+                                if (profileStepIndex < PROFILE_PLAN.length) profileStepIndex++;
+                                pendingSide = 'L';
+                            }
+                            if (onChange) onChange(progress());
+                        }
+
                         function onPointerDown(e) {
                             if (!active) return;
-                            const row = PLAN[stepIndex];
+                            const row = viewMode === 'profile' ? PROFILE_PLAN[profileStepIndex] : PLAN[stepIndex];
                             if (!row) return;
                             const rect = renderer.domElement.getBoundingClientRect();
                             const ndcX = ((e.clientX - rect.left) / rect.width) * 2 - 1;
                             const ndcY = -((e.clientY - rect.top) / rect.height) * 2 + 1;
                             const world = pickWorld(ndcX, ndcY);
                             if (!world) return; // missed silhouette
+                            if (viewMode === 'profile') {
+                                if (row.center) {
+                                    updateMarkerFromProfile(row.key, world, row.color);
+                                } else if (!mirror) {
+                                    updateMarkerFromProfile(row.key + pendingSide, world, row.color);
+                                } else {
+                                    updateMarkerFromProfile(row.key + 'L', world, row.color);
+                                    updateMarkerFromProfile(row.key + 'R', world, row.color);
+                                }
+                                clearPreview();
+                                advanceProfile();
+                                return;
+                            }
                             if (row.center) {
                                 setMarker(row.key, world, row.color);
                             } else {
@@ -1637,6 +1852,7 @@
                                     setMarker(row.key + (side === 'L' ? 'R' : 'L'), mirrored, row.color);
                                 }
                             }
+                            clearPreview();
                             advance();
                         }
 
@@ -1645,6 +1861,48 @@
                             set onChange(fn) { onChange = fn; },
                             get mirror() { return mirror; },
                             setMirror(v) { mirror = Boolean(v); },
+                            setDirections(next) {
+                                directions = {
+                                    knees: next && next.knees === -1 ? -1 : 1,
+                                    elbows: next && next.elbows === 1 ? 1 : -1,
+                                };
+                                clearPreview();
+                                if (onChange) onChange(progress());
+                            },
+                            get directions() { return { ...directions }; },
+                            setNormalizeAvatarForward(v) {
+                                normalizeAvatarForward = Boolean(v);
+                                clearPreview();
+                                if (onChange) onChange(progress());
+                            },
+                            get normalizeAvatarForward() { return normalizeAvatarForward; },
+                            setNormalizeAvatarSides(v) {
+                                normalizeAvatarSides = Boolean(v);
+                                clearPreview();
+                                if (onChange) onChange(progress());
+                            },
+                            get normalizeAvatarSides() { return normalizeAvatarSides; },
+                            setViewMode(mode) {
+                                if (!active) return;
+                                viewMode = mode === 'profile' ? 'profile' : 'front';
+                                clearPreview();
+                                positionCamera();
+                                if (onChange) onChange(progress());
+                            },
+                            get viewMode() { return viewMode; },
+                            resetProfile() {
+                                profileStepIndex = 0;
+                                viewMode = 'profile';
+                                clearPreview();
+                                positionCamera();
+                                if (onChange) onChange(progress());
+                            },
+                            nudgeKnees(amount) {
+                                nudgeMarkerDepth(['kneeL', 'kneeR'], amount);
+                            },
+                            nudgeElbows(amount) {
+                                nudgeMarkerDepth(['elbowL', 'elbowR'], amount);
+                            },
                             progress,
 
                             // Enter rig mode: freeze auto-rotate, swap to an
@@ -1657,6 +1915,7 @@
                                 bbox = new THREE.Box3().setFromObject(model);
                                 const c = bbox.getCenter(new THREE.Vector3());
                                 const size = bbox.getSize(new THREE.Vector3());
+                                bboxSize = size.clone();
                                 centerX = c.x;
                                 bboxCenter = c.clone();
                                 viewDepth = size.z + size.length();
@@ -1666,6 +1925,7 @@
                                 raycaster = new THREE.Raycaster();
                                 meshes = meshList();
                                 facing = detectFacing();     // auto-pick the front
+                                viewMode = 'front';
                                 positionCamera();
                                 prevCamera = camera;
                                 camera = orthoCam;           // animate() renders `camera`
@@ -1689,12 +1949,15 @@
 
                             // Remove a placed marker (re-place flow).
                             clearMarker(key) {
+                                clearPreview();
                                 if (markers[key]) { scene.remove(markers[key].sprite); delete markers[key]; }
                             },
 
                             reset() {
+                                clearPreview();
                                 Object.values(markers).forEach((m) => scene.remove(m.sprite));
-                                markers = {}; stepIndex = 0; pendingSide = 'L';
+                                markers = {}; stepIndex = 0; profileStepIndex = 0; pendingSide = 'L'; viewMode = 'front';
+                                positionCamera();
                                 if (onChange) onChange(progress());
                             },
 
@@ -1708,18 +1971,48 @@
                                 active = false;
                             },
 
+                            previewPose() {
+                                const p = progress();
+                                if (!p.complete) throw new Error('Place all joint markers first.');
+                                clearPreview();
+                                const { root, bones } = rigModel(model, currentMarkerVectors(), bbox, facing, { directions });
+                                root.name = 'rig_preview_pose';
+                                posePreviewBones(bones);
+                                root.updateMatrixWorld(true);
+                                scene.add(root);
+                                previewRoot = root;
+                                if (model) {
+                                    model.visible = false;
+                                    previewHidden = true;
+                                }
+                            },
+
+                            clearPreview,
+
+                            metadata() {
+                                return {
+                                    markers: plainMarkerData(),
+                                    facing,
+                                    directions: { ...directions },
+                                    profileAdjusted: profileStepIndex > 0,
+                                    normalizeAvatarForward,
+                                    normalizeAvatarSides,
+                                    version: 2,
+                                };
+                            },
+
                             // Build the skeleton + skin the mesh from the placed
                             // markers and export a rigged GLB Blob. Throws if the
                             // marker set is incomplete.
                             async exportGLB() {
                                 const p = progress();
                                 if (!p.complete) throw new Error('Place all joint markers first.');
-                                const m = {};
-                                for (const k of Object.keys(markers)) m[k] = markers[k].world.clone();
-                                const { root } = rigModel(model, m, bbox, facing);
+                                clearPreview();
+                                const { root } = rigModel(model, currentMarkerVectors(), bbox, facing, { directions });
+                                const finalRoot = exportRootForAvatar(root);
 
                                 const exportRoot = new THREE.Scene();
-                                exportRoot.add(root);
+                                exportRoot.add(finalRoot);
                                 const glb = await new Promise((resolve, reject) => {
                                     new GLTFExporter().parse(exportRoot, resolve, reject, { binary: true, onlyVisible: true });
                                 });
@@ -2235,6 +2528,7 @@
                 <div class="hidden md:flex items-center space-x-4">
                     <a href="{{ url_for('main.index') }}" class="text-gray-600 hover:text-indigo-600 transition">Home</a>
                     <a href="{{ url_for('main.browse') }}" class="text-gray-600 hover:text-indigo-600 transition">Browse</a>
+                    <a href="{{ url_for('main.animations') }}" class="text-gray-600 hover:text-indigo-600 transition">Animations</a>
                     <a href="{{ url_for('main.local_assets') }}" class="text-gray-600 hover:text-indigo-600 transition">Local Assets</a>
                     <a href="{{ url_for('api.swagger_ui') }}" class="text-gray-600 hover:text-indigo-600 transition">API</a>
                     {% if current_user.is_authenticated %}
@@ -2268,6 +2562,9 @@
                         <a href="{{ url_for('main.browse') }}" class="flex-shrink-0 bg-white px-4 py-2 rounded-lg text-sm text-gray-600 hover:text-indigo-600 transition duration-200 shadow-sm">
                             <i class="fas fa-search mr-1"></i>Browse
                         </a>
+                        <a href="{{ url_for('main.animations') }}" class="flex-shrink-0 bg-white px-4 py-2 rounded-lg text-sm text-gray-600 hover:text-indigo-600 transition duration-200 shadow-sm">
+                            <i class="fas fa-person-running mr-1"></i>Animations
+                        </a>
                         <a href="{{ url_for('main.local_assets') }}" class="flex-shrink-0 bg-white px-4 py-2 rounded-lg text-sm text-gray-600 hover:text-indigo-600 transition duration-200 shadow-sm">
                             <i class="fas fa-database mr-1"></i>Local
                         </a>
@@ -2290,6 +2587,9 @@
                     </a>
                     <a href="{{ url_for('main.browse') }}" class="block px-3 py-2 text-gray-600 hover:text-indigo-600 hover:bg-gray-100 rounded-md transition duration-200">
                         <i class="fas fa-search mr-2"></i>Browse Models
+                    </a>
+                    <a href="{{ url_for('main.animations') }}" class="block px-3 py-2 text-gray-600 hover:text-indigo-600 hover:bg-gray-100 rounded-md transition duration-200">
+                        <i class="fas fa-person-running mr-2"></i>Animations
                     </a>
                     <a href="{{ url_for('main.local_assets') }}" class="block px-3 py-2 text-gray-600 hover:text-indigo-600 hover:bg-gray-100 rounded-md transition duration-200">
                         <i class="fas fa-database mr-2"></i>Local Assets

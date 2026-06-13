@@ -250,7 +250,8 @@ def browse():
             search=search if search else None,
             sort=sort, tag=tags if tags else None,
             category=category, style=styles if styles else None,
-            asset_type=asset_types if asset_types else None)
+            asset_type=asset_types if asset_types else None,
+            exclude_formats=['vrma', 'bvh'])
 
         # Add owner username + current variant flags.
         _attach_preview_variant_flags(models)
@@ -287,6 +288,83 @@ def browse():
                            asset_types=asset_types, facets=facets,
                            has_vrm=has_vrm,
                            asset_admin=is_asset_admin_user(current_user) if current_user.is_authenticated else False)
+
+
+def _animation_asset_item(model, *, generated=False):
+    owner = User.get_by_id(model.user_id)
+    if generated:
+        view_url = url_for('api.export_model', model_id=model.id) + '?format=vrma'
+        download_url = view_url
+        source = 'Generated'
+    else:
+        view_url = url_for('api.view_model', model_id=model.id)
+        download_url = url_for('api.download_model', model_id=model.id)
+        source = 'VRMA'
+    return {
+        'id': (model.id + ':vrma') if generated else model.id,
+        'model_id': model.id,
+        'name': (model.name or 'Untitled') + (' animation' if generated else ''),
+        'source': source,
+        'owner_username': owner.username if owner else 'Unknown',
+        'download_count': model.download_count or 0,
+        'upload_date': model.upload_date,
+        'tags': model.tags or [],
+        'view_url': view_url,
+        'download_url': download_url,
+        'detail_url': url_for('main.model_detail', model_id=model.id),
+        'thumbnail_url': url_for('api.get_thumbnail', model_id=model.id) if model.thumbnail_file_id else None,
+        'preview_url': url_for('api.get_preview', model_id=model.id) if model.preview_file_id else None,
+    }
+
+
+def _sort_animation_items(items, sort):
+    if sort == 'name':
+        return sorted(items, key=lambda item: (item['name'] or '').lower())
+    if sort == 'oldest':
+        return sorted(items, key=lambda item: item['upload_date'] or 0)
+    if sort == 'downloads':
+        return sorted(items, key=lambda item: item['download_count'], reverse=True)
+    return sorted(items, key=lambda item: item['upload_date'] or 0, reverse=True)
+
+
+@main_bp.route('/animations')
+def animations():
+    """Browse VRMA animation clips separately from model assets."""
+    try:
+        search = request.args.get('search', '').strip().lower()
+        sort = request.args.get('sort', 'newest')
+        user_id = current_user.id if current_user.is_authenticated else None
+        items = [
+            _animation_asset_item(model)
+            for model in Model3D.list_vrma_for_user(user_id)
+        ]
+        items.extend(
+            _animation_asset_item(model, generated=True)
+            for model in Model3D.list_generated_vrma_for_user(user_id)
+            if (model.file_format or '').lower() != 'vrma'
+        )
+        if search:
+            items = [
+                item for item in items
+                if search in (item['name'] or '').lower()
+                or search in (item['owner_username'] or '').lower()
+                or any(search in str(tag or '').lower() for tag in item['tags'])
+            ]
+        items = _sort_animation_items(items, sort)
+        avatars = Model3D.list_vrm_for_user(user_id) + Model3D.list_with_vrm_variant_for_user(user_id)
+        return render_template(
+            'animations.html',
+            animations=items,
+            search=search,
+            sort=sort,
+            avatar_count=len({avatar.id for avatar in avatars}),
+        )
+    except Exception as e:
+        print(f"Animations page error: {e}")
+        import traceback
+        traceback.print_exc()
+        return render_template('animations.html', animations=[], search='', sort='newest',
+                               avatar_count=0, error=str(e))
 
 
 @main_bp.route('/local-assets')

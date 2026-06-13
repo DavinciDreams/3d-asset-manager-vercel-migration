@@ -1,0 +1,5 @@
+from app import create_app
+app = create_app()
+app.config["TEMPLATES_AUTO_RELOAD"] = True
+app.jinja_env.auto_reload = True
+app.run(host="0.0.0.0", port=8000, debug=False, use_reloader=False, threaded=True)

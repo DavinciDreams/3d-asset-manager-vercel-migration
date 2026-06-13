@@ -339,12 +339,13 @@
                 <p class="text-sm text-gray-700 mb-3">
                     <i class="fas fa-info-circle text-slate-500 mr-1"></i>
                     The viewer switched to a flat <b>front view</b>. Click on the
-                    character to place each joint. Use a clean front-facing pose.
+                    character to place each landmark. L/R dots mean the avatar's
+                    left/right, not your screen left/right.
                 </p>
                 <div class="text-sm mb-2">
                     <div class="font-medium text-slate-800">Place: <span id="rig-step">Groin / hips</span>
                         <span id="rig-side" class="text-slate-500"></span></div>
-                    <div class="text-xs text-gray-500" id="rig-progress">0 / 8 placed</div>
+                    <div class="text-xs text-gray-500" id="rig-progress">0 / 18 placed</div>
                 </div>
                 <label class="flex items-center gap-2 text-sm text-gray-700 mb-2">
                     <input type="checkbox" id="rig-mirror" checked>
@@ -355,7 +356,67 @@
                     <i class="fas fa-sync-alt mr-1"></i>Turn model around
                     <span class="block text-xs text-amber-600">Use if you see the back, not the face.</span>
                 </button>
+                <div class="mb-3 rounded border border-slate-200 bg-white p-3">
+                    <div class="text-sm font-medium text-slate-800 mb-2">2D view</div>
+                    <div class="grid grid-cols-2 gap-2 text-sm">
+                        <button type="button" id="rig-front-view"
+                                class="border border-slate-300 bg-slate-700 text-white px-2 py-2 rounded hover:bg-slate-800">
+                            Front
+                        </button>
+                        <button type="button" id="rig-profile-view"
+                                class="border border-slate-300 bg-white px-2 py-2 rounded hover:bg-slate-50 disabled:opacity-50"
+                                disabled>
+                            Profile
+                        </button>
+                    </div>
+                    <p id="rig-view-help" class="mt-2 text-xs text-slate-500">
+                        Place all front landmarks, then use Profile to adjust depth on the same dots.
+                    </p>
+                </div>
+                <div class="mb-3 rounded border border-slate-200 bg-white p-3">
+                    <div class="text-sm font-medium text-slate-800 mb-2">Bend directions</div>
+                    <div class="grid grid-cols-2 gap-2 text-sm">
+                        <button type="button" id="rig-knees-flip"
+                                class="border border-slate-300 bg-white px-2 py-2 rounded hover:bg-slate-50">
+                            Flip knees
+                        </button>
+                        <button type="button" id="rig-elbows-flip"
+                                class="border border-slate-300 bg-white px-2 py-2 rounded hover:bg-slate-50">
+                            Flip elbows
+                        </button>
+                    </div>
+                    <div class="grid grid-cols-2 gap-2 text-sm mt-2">
+                        <button type="button" id="rig-knees-forward"
+                                class="border border-slate-300 bg-white px-2 py-2 rounded hover:bg-slate-50">
+                            Knees forward
+                        </button>
+                        <button type="button" id="rig-knees-back"
+                                class="border border-slate-300 bg-white px-2 py-2 rounded hover:bg-slate-50">
+                            Knees back
+                        </button>
+                    </div>
+                    <div class="grid grid-cols-2 gap-2 text-sm mt-2">
+                        <button type="button" id="rig-elbows-forward"
+                                class="border border-slate-300 bg-white px-2 py-2 rounded hover:bg-slate-50">
+                            Elbows forward
+                        </button>
+                        <button type="button" id="rig-elbows-back"
+                                class="border border-slate-300 bg-white px-2 py-2 rounded hover:bg-slate-50">
+                            Elbows back
+                        </button>
+                    </div>
+                    <p id="rig-directions" class="mt-2 text-xs text-slate-500">Knees forward, elbows backward.</p>
+                </div>
                 <div class="flex flex-wrap gap-2 mb-3">
+                    <button type="button" id="rig-preview"
+                            class="bg-white border border-slate-300 text-slate-700 px-3 py-2 rounded text-sm hover:bg-slate-50 transition disabled:opacity-50"
+                            disabled>
+                        <i class="fas fa-person-running mr-1"></i>Test Bend
+                    </button>
+                    <button type="button" id="rig-preview-clear"
+                            class="bg-white border border-slate-300 text-slate-700 px-3 py-2 rounded text-sm hover:bg-slate-50 transition">
+                        Clear Test
+                    </button>
                     <button type="button" id="rig-build"
                             class="bg-slate-700 text-white px-3 py-2 rounded text-sm hover:bg-slate-800 transition disabled:opacity-50"
                             disabled>
@@ -373,6 +434,20 @@
                 <label class="flex items-center gap-2 text-sm text-gray-700 mb-2">
                     <input type="checkbox" id="rig-to-vrm" checked>
                     Also make a VRM avatar
+                </label>
+                <label class="flex items-start gap-2 text-sm text-gray-700 mb-2">
+                    <input type="checkbox" id="rig-normalize-forward" checked class="mt-1">
+                    <span>
+                        Fix animated facing
+                        <span class="block text-xs text-gray-500">Rotates -Z-facing rigs to VRM's +Z front on export.</span>
+                    </span>
+                </label>
+                <label class="flex items-start gap-2 text-sm text-gray-700 mb-2">
+                    <input type="checkbox" id="rig-normalize-sides" checked class="mt-1">
+                    <span>
+                        Fix avatar left/right
+                        <span class="block text-xs text-gray-500">Maps VRM/Mixamo Left bones to the +X side before export.</span>
+                    </span>
                 </label>
                 <p id="rig-status" class="text-xs text-slate-600"></p>
             </div>
@@ -1499,12 +1574,27 @@ document.addEventListener('DOMContentLoaded', function() {
     const progEl = document.getElementById('rig-progress');
     const mirrorEl = document.getElementById('rig-mirror');
     const buildBtn = document.getElementById('rig-build');
+    const previewBtn = document.getElementById('rig-preview');
+    const previewClearBtn = document.getElementById('rig-preview-clear');
     const restartBtn = document.getElementById('rig-restart');
     const flipBtn = document.getElementById('rig-flip');
+    const frontViewBtn = document.getElementById('rig-front-view');
+    const profileViewBtn = document.getElementById('rig-profile-view');
+    const viewHelpEl = document.getElementById('rig-view-help');
+    const kneesFlipBtn = document.getElementById('rig-knees-flip');
+    const elbowsFlipBtn = document.getElementById('rig-elbows-flip');
+    const kneesForwardBtn = document.getElementById('rig-knees-forward');
+    const kneesBackBtn = document.getElementById('rig-knees-back');
+    const elbowsForwardBtn = document.getElementById('rig-elbows-forward');
+    const elbowsBackBtn = document.getElementById('rig-elbows-back');
+    const directionsEl = document.getElementById('rig-directions');
     const cancelBtn = document.getElementById('rig-close');
     const cancelBtn2 = document.getElementById('rig-cancel');
     const toVrmEl = document.getElementById('rig-to-vrm');
+    const normalizeForwardEl = document.getElementById('rig-normalize-forward');
+    const normalizeSidesEl = document.getElementById('rig-normalize-sides');
     const statusEl = document.getElementById('rig-status');
+    let rigDirections = { knees: 1, elbows: -1 };
 
     function viewer() {
         const c = document.getElementById('viewer-detail-' + MODEL_ID);
@@ -1521,11 +1611,48 @@ document.addEventListener('DOMContentLoaded', function() {
 
     function renderProgress(p) {
         if (!p) return;
-        stepEl.textContent = p.complete ? 'All joints placed ✓' : p.step;
-        sideEl.textContent = (!p.complete && p.side && p.step && /knee|elbow|wrist/i.test(p.step) && !mirrorEl.checked)
+        stepEl.textContent = p.viewMode === 'profile'
+            ? (p.step || 'Profile pass done')
+            : (p.complete ? 'All joints placed ✓' : p.step);
+        sideEl.textContent = (p.side && p.step && /shoulder|elbow|wrist|hip|knee|ankle|toe/i.test(p.step) && !mirrorEl.checked)
             ? '(' + (p.side === 'L' ? 'left' : 'right') + ')' : '';
         progEl.textContent = p.done + ' / ' + p.total + ' placed';
         buildBtn.disabled = !p.complete;
+        if (previewBtn) previewBtn.disabled = !p.complete;
+        if (profileViewBtn) profileViewBtn.disabled = !p.complete;
+        if (frontViewBtn && profileViewBtn) {
+            const inProfile = p.viewMode === 'profile';
+            frontViewBtn.className = inProfile
+                ? 'border border-slate-300 bg-white px-2 py-2 rounded hover:bg-slate-50'
+                : 'border border-slate-300 bg-slate-700 text-white px-2 py-2 rounded hover:bg-slate-800';
+            profileViewBtn.className = inProfile
+                ? 'border border-slate-300 bg-slate-700 text-white px-2 py-2 rounded hover:bg-slate-800 disabled:opacity-50'
+                : 'border border-slate-300 bg-white px-2 py-2 rounded hover:bg-slate-50 disabled:opacity-50';
+        }
+        if (viewHelpEl) {
+            if (p.viewMode === 'profile') {
+                const target = p.profileTargetLabel || p.step || 'current marker';
+                viewHelpEl.textContent = 'Profile pass ' + Math.min(p.profileStep, p.profileTotal)
+                    + ' / ' + p.profileTotal + ': adjust ' + target
+                    + ' depth. These are not new dots; click the side silhouette where that existing dot should sit front/back.';
+            } else {
+                viewHelpEl.textContent = 'Place all front landmarks, then use Profile to adjust depth on the same dots.';
+            }
+        }
+        if (p.directions) rigDirections = { ...p.directions };
+        renderDirections();
+    }
+
+    function renderDirections() {
+        if (!directionsEl) return;
+        directionsEl.textContent = 'Knees ' + (rigDirections.knees === 1 ? 'forward' : 'reversed')
+            + ', elbows ' + (rigDirections.elbows === -1 ? 'backward' : 'forward') + '.';
+    }
+
+    function pushDirections() {
+        const r = rig();
+        if (r && r.setDirections) r.setDirections(rigDirections);
+        renderDirections();
     }
 
     function open() {
@@ -1536,9 +1663,16 @@ document.addEventListener('DOMContentLoaded', function() {
         if (v && v.eyes && v.eyes.active) v.eyes.remove && v.eyes.remove();
         r.onChange = renderProgress;
         r.setMirror(mirrorEl.checked);
+        if (r.setDirections) r.setDirections(rigDirections);
+        if (r.setNormalizeAvatarForward && normalizeForwardEl) {
+            r.setNormalizeAvatarForward(normalizeForwardEl.checked);
+        }
+        if (r.setNormalizeAvatarSides && normalizeSidesEl) {
+            r.setNormalizeAvatarSides(normalizeSidesEl.checked);
+        }
         r.enter();
         panel.classList.remove('hidden');
-        setStatus('Click on the character to place each joint.');
+        setStatus('Click on the character to place each landmark.');
     }
     function close() {
         const r = rig();
@@ -1557,6 +1691,91 @@ document.addEventListener('DOMContentLoaded', function() {
         if (r && r.flip) { r.flip(); setStatus('Turned around — re-place the joints on the front.'); }
     });
     mirrorEl.addEventListener('change', () => { const r = rig(); if (r) r.setMirror(mirrorEl.checked); });
+    if (normalizeForwardEl) normalizeForwardEl.addEventListener('change', () => {
+        const r = rig();
+        if (r && r.setNormalizeAvatarForward) {
+            r.setNormalizeAvatarForward(normalizeForwardEl.checked);
+            setStatus(normalizeForwardEl.checked
+                ? 'Animated facing fix enabled for export.'
+                : 'Animated facing fix disabled for export.');
+        }
+    });
+    if (normalizeSidesEl) normalizeSidesEl.addEventListener('change', () => {
+        const r = rig();
+        if (r && r.setNormalizeAvatarSides) {
+            r.setNormalizeAvatarSides(normalizeSidesEl.checked);
+            setStatus(normalizeSidesEl.checked
+                ? 'Avatar left/right fix enabled for preview and export.'
+                : 'Avatar left/right fix disabled for preview and export.');
+        }
+    });
+    if (frontViewBtn) frontViewBtn.addEventListener('click', () => {
+        const r = rig();
+        if (r && r.setViewMode) {
+            r.setViewMode('front');
+            setStatus('Front view: place or correct left/right landmarks.');
+        }
+    });
+    if (profileViewBtn) profileViewBtn.addEventListener('click', () => {
+        const r = rig();
+        if (r && r.resetProfile) {
+            r.resetProfile();
+            setStatus('Profile view: adjust depth for the existing dots, starting with chest depth.');
+        }
+    });
+    if (kneesFlipBtn) kneesFlipBtn.addEventListener('click', () => {
+        rigDirections.knees *= -1;
+        pushDirections();
+        setStatus('Knee bend direction flipped. Use Test Bend to check it.');
+    });
+    if (elbowsFlipBtn) elbowsFlipBtn.addEventListener('click', () => {
+        rigDirections.elbows *= -1;
+        pushDirections();
+        setStatus('Elbow bend direction flipped. Use Test Bend to check it.');
+    });
+    if (kneesForwardBtn) kneesForwardBtn.addEventListener('click', () => {
+        const r = rig();
+        if (r && r.nudgeKnees) {
+            r.nudgeKnees(1);
+            setStatus('Knee markers nudged forward in depth. Use Test Bend again.');
+        }
+    });
+    if (kneesBackBtn) kneesBackBtn.addEventListener('click', () => {
+        const r = rig();
+        if (r && r.nudgeKnees) {
+            r.nudgeKnees(-1);
+            setStatus('Knee markers nudged backward in depth. Use Test Bend again.');
+        }
+    });
+    if (elbowsForwardBtn) elbowsForwardBtn.addEventListener('click', () => {
+        const r = rig();
+        if (r && r.nudgeElbows) {
+            r.nudgeElbows(1);
+            setStatus('Elbow markers nudged forward in depth. Use Test Bend again.');
+        }
+    });
+    if (elbowsBackBtn) elbowsBackBtn.addEventListener('click', () => {
+        const r = rig();
+        if (r && r.nudgeElbows) {
+            r.nudgeElbows(-1);
+            setStatus('Elbow markers nudged backward in depth. Use Test Bend again.');
+        }
+    });
+    if (previewBtn) previewBtn.addEventListener('click', () => {
+        const r = rig();
+        if (!r || !r.previewPose) return;
+        try {
+            r.previewPose();
+            setStatus('Previewing test bend. Flip knees/elbows if the joints bend the wrong way.');
+        } catch (err) {
+            setStatus(err.message || 'Could not preview test bend.', true);
+        }
+    });
+    if (previewClearBtn) previewClearBtn.addEventListener('click', () => {
+        const r = rig();
+        if (r && r.clearPreview) r.clearPreview();
+        setStatus('Test pose cleared.');
+    });
 
     buildBtn.addEventListener('click', async () => {
         const r = rig();
@@ -1567,6 +1786,7 @@ document.addEventListener('DOMContentLoaded', function() {
             const blob = await r.exportGLB();
             const fd = new FormData();
             fd.append('file', blob, 'rigged.glb');
+            if (r.metadata) fd.append('markers', JSON.stringify(r.metadata()));
             if (toVrmEl.checked) fd.append('to_vrm', '1');
             setStatus('Uploading rigged model…');
             const resp = await fetch('/api/model/' + MODEL_ID + '/rig', { method: 'POST', body: fd });
