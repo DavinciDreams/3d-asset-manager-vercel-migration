@@ -217,6 +217,16 @@
                         {% endfor %}
                     </div>
                     {% endif %}
+                    {% if is_owner %}
+                    <button type="button"
+                            data-admin-delete
+                            data-model-id="{{ model.id }}"
+                            class="mt-3 inline-flex w-fit items-center gap-1 rounded bg-red-50 px-2 py-1 text-[11px] font-medium text-red-700 hover:bg-red-100"
+                            title="Delete asset">
+                        <i class="fas fa-trash"></i>
+                        Delete
+                    </button>
+                    {% endif %}
                 </div>
             </div>
             {% endfor %}
@@ -328,6 +338,11 @@
                     return `<a href="/browse?${tagQuery(active ? null : t)}" class="text-[10px] px-1.5 py-0.5 rounded ${cls}">${esc(t)}</a>`;
                 }).join('');
                 const tagBlock = tags ? `<div class="flex flex-wrap gap-1 mt-2">${tags}</div>` : '';
+                const deleteButton = m.is_owner ? `<button type="button"
+                            data-admin-delete
+                            data-model-id="${esc(m.id)}"
+                            class="mt-3 inline-flex w-fit items-center gap-1 rounded bg-red-50 px-2 py-1 text-[11px] font-medium text-red-700 hover:bg-red-100"
+                            title="Delete asset"><i class="fas fa-trash"></i> Delete</button>` : '';
 
                 const viewable = m.viewable && m.view_url;
                 const mediaAttrs =
@@ -351,9 +366,46 @@
                             <span><i class="fas fa-download mr-0.5"></i>${m.download_count}</span>
                         </div>
                         ${tagBlock}
+                        ${deleteButton}
                     </div>
                 </div>`;
             }
+
+            async function deleteModelFromCard(button) {
+                const modelId = button.dataset.modelId;
+                if (!modelId) return;
+                if (!confirm('Delete this asset from the store? This cannot be undone.')) return;
+                button.disabled = true;
+                button.classList.add('opacity-60', 'cursor-not-allowed');
+                try {
+                    const res = await fetch(`/api/model/${encodeURIComponent(modelId)}`, {
+                        method: 'DELETE',
+                        headers: { 'Accept': 'application/json' },
+                    });
+                    if (!res.ok) {
+                        let message = `Delete failed (HTTP ${res.status})`;
+                        try {
+                            const body = await res.json();
+                            if (body && body.error) message = body.error;
+                        } catch (_) {}
+                        throw new Error(message);
+                    }
+                    const card = button.closest('.model-card');
+                    if (card) card.remove();
+                } catch (err) {
+                    alert(err.message || 'Delete failed');
+                    button.disabled = false;
+                    button.classList.remove('opacity-60', 'cursor-not-allowed');
+                }
+            }
+
+            grid.addEventListener('click', (event) => {
+                const button = event.target.closest('[data-admin-delete]');
+                if (!button) return;
+                event.preventDefault();
+                event.stopPropagation();
+                deleteModelFromCard(button);
+            });
 
             async function loadMore() {
                 if (loading || !hasNext) return;

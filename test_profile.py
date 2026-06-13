@@ -88,6 +88,42 @@ def test_asset_admin_can_manage_other_users_models(monkeypatch):
         assert Model3D.get_by_id(model_id) is None
 
 
+def test_asset_admin_sees_delete_on_public_cards(monkeypatch):
+    monkeypatch.setenv("ASSET_MANAGER_ADMIN_USERNAMES", "storeadmin")
+    app = create_app()
+    client = app.test_client()
+
+    with app.app_context():
+        owner = User(username="publicowner", email="public-owner@example.com")
+        owner.set_password("pw123456")
+        owner.save()
+        model = Model3D(
+            name="Public Cleanup Target",
+            description="Should be removable from public pages",
+            original_filename="public-cleanup.glb",
+            file_format="glb",
+            file_size=72,
+            gridfs_file_id="public-cleanup-file-id",
+            user_id=owner.id,
+            is_public=True,
+        ).save()
+        model_id = model.id
+
+    _login(app, client, username="storeadmin", email="admin@example.com")
+
+    browse = client.get("/browse")
+    assert browse.status_code == 200
+    browse_html = browse.get_data(as_text=True)
+    assert f'data-model-id="{model_id}"' in browse_html
+    assert "data-admin-delete" in browse_html
+
+    home = client.get("/")
+    assert home.status_code == 200
+    home_html = home.get_data(as_text=True)
+    assert f'data-model-id="{model_id}"' in home_html
+    assert "data-admin-delete" in home_html
+
+
 def test_api_me_reports_asset_admin_state(monkeypatch):
     monkeypatch.setenv("ASSET_MANAGER_ADMIN_EMAILS", "admin@example.com")
     app = create_app()

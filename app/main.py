@@ -110,7 +110,8 @@ def index():
                              recent_models=recent_models,
                              total_models=stats['public_models'],
                              total_users=stats['total_users'],
-                             total_downloads=stats['total_downloads'])
+                             total_downloads=stats['total_downloads'],
+                             asset_admin=is_asset_admin_user(current_user) if current_user.is_authenticated else False)
     except Exception as e:
         print(f"Index page error: {e}")
         import traceback
@@ -120,7 +121,8 @@ def index():
                              recent_models=[],
                              total_models=0,
                              total_users=0,
-                             total_downloads=0)
+                             total_downloads=0,
+                             asset_admin=False)
 
 @main_bp.route('/dashboard')
 @login_required

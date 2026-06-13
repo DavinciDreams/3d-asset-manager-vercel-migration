@@ -157,6 +157,16 @@
                            class="bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-indigo-700">
                             View Details
                         </a>
+                        {% if asset_admin or (current_user.is_authenticated and current_user.id == model.user_id) %}
+                        <button type="button"
+                                data-admin-delete
+                                data-model-id="{{ model.id }}"
+                                class="ml-2 inline-flex items-center gap-1 rounded-lg bg-red-50 px-3 py-2 text-sm font-medium text-red-700 hover:bg-red-100"
+                                title="Delete asset">
+                            <i class="fas fa-trash"></i>
+                            Delete
+                        </button>
+                        {% endif %}
                     </div>
                 </div>
             </div>
@@ -180,6 +190,38 @@ document.addEventListener('DOMContentLoaded', function() {
         window.LivePreviews.observeMediaIn(document);
         window.LivePreviews.observeLiveIn(document);
     }
+
+    document.querySelectorAll('[data-admin-delete]').forEach((button) => {
+        button.addEventListener('click', async (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            const modelId = button.dataset.modelId;
+            if (!modelId) return;
+            if (!confirm('Delete this asset from the store? This cannot be undone.')) return;
+            button.disabled = true;
+            button.classList.add('opacity-60', 'cursor-not-allowed');
+            try {
+                const res = await fetch(`/api/model/${encodeURIComponent(modelId)}`, {
+                    method: 'DELETE',
+                    headers: { 'Accept': 'application/json' },
+                });
+                if (!res.ok) {
+                    let message = `Delete failed (HTTP ${res.status})`;
+                    try {
+                        const body = await res.json();
+                        if (body && body.error) message = body.error;
+                    } catch (_) {}
+                    throw new Error(message);
+                }
+                const card = button.closest('.card-shadow');
+                if (card) card.remove();
+            } catch (err) {
+                alert(err.message || 'Delete failed');
+                button.disabled = false;
+                button.classList.remove('opacity-60', 'cursor-not-allowed');
+            }
+        });
+    });
 });
 </script>
 {% endif %}
