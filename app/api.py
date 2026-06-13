@@ -2268,6 +2268,15 @@ def _store_one_upload(file, base_name, description, is_public, tags, allowed_ext
     # involved, the caller passes base_name="" so each model is named from its
     # own filename. A single-file upload keeps the typed name.
     model_name = base_name or _name_from_filename(file.filename)
+    is_legacy_pixal3d_direct = _is_legacy_pixal3d_direct_payload(
+        file.filename,
+        model_name,
+        description,
+        tags,
+        world_id,
+    )
+    if is_legacy_pixal3d_direct and _block_legacy_pixal3d_uploads_enabled():
+        return None, 'Pixal3D direct uploads are disabled; use the Tellus world upload path.'
     existing_generation = _find_existing_generation_upload(generation_id, owner_id)
     if existing_generation:
         if world_id and _is_legacy_pixal3d_direct_model(existing_generation):
@@ -2279,10 +2288,7 @@ def _store_one_upload(file, base_name, description, is_public, tags, allowed_ext
         else:
             return None, f'Duplicate generation already exists: {existing_generation.name} ({existing_generation.id}).'
     stats = _mesh_stats(runtime_metadata)
-    if (
-        stats
-        and _is_legacy_pixal3d_direct_payload(file.filename, model_name, description, tags, world_id)
-    ):
+    if stats and is_legacy_pixal3d_direct:
         existing = _find_recent_authoritative_tellus_duplicate(stats, owner_id)
         if existing:
             return None, f'Duplicate generation already exists: {existing.name} ({existing.id}).'
@@ -2539,6 +2545,10 @@ def _is_legacy_pixal3d_direct_payload(filename, model_name, description, tags, w
             or 'pixal3d hyades-' in values
         )
     )
+
+
+def _block_legacy_pixal3d_uploads_enabled():
+    return os.environ.get('BLOCK_LEGACY_PIXAL3D_UPLOADS', '1').lower() not in ('0', 'false', 'no', 'off')
 
 
 def _is_legacy_pixal3d_direct_model(model):
@@ -3684,7 +3694,11 @@ def upload_model():
                     'model': _serialize_model(model)
                 }), 201
             error_text = errors[0]['error'].lower()
-            status = 409 if ('duplicate model' in error_text or 'duplicate generation' in error_text) else 400
+            status = 409 if (
+                'duplicate model' in error_text
+                or 'duplicate generation' in error_text
+                or 'pixal3d direct uploads are disabled' in error_text
+            ) else 400
             return jsonify({'error': errors[0]['error']}), status
 
         # Multi-file path: report per-file outcomes.
