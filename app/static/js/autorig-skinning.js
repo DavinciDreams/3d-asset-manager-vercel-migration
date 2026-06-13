@@ -346,11 +346,18 @@ export function rigModel(modelRoot, markers, bbox) {
   hipsBone.updateMatrixWorld(true);
   const midpoints = computeBoneMidpoints(bones);
 
-  const meshes = [];
+  // Collect renderable meshes. Prefer plain (unrigged) meshes — the common
+  // case. If the model is ALREADY skinned (re-rigging), fall back to its
+  // SkinnedMeshes: we re-skin their geometry to the new skeleton (the old
+  // skinIndex/skinWeight attributes are overwritten by skinMesh).
+  const plain = [];
+  const skinned = [];
   modelRoot.updateMatrixWorld(true);
   modelRoot.traverse((o) => {
-    if (o.isMesh && !o.isSkinnedMesh) meshes.push(o);
+    if (!o.isMesh) return;
+    if (o.isSkinnedMesh) skinned.push(o); else plain.push(o);
   });
+  const meshes = plain.length ? plain : skinned;
   if (meshes.length === 0) throw new Error('autorig: model has no meshes to skin');
 
   const root = new THREE.Group();
