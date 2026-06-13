@@ -1378,6 +1378,61 @@ def _cached_export_file_id(model_id, fmt):
     return None
 
 
+def _assimp_unfriendly_gltf(src_bytes, src_fmt):
+    if (src_fmt or '').lower() not in ('glb', 'gltf'):
+        return False
+    gltf = _gltf_json_from_bytes(src_bytes, (src_fmt or '').lower())
+    if not isinstance(gltf, dict):
+        return False
+    used = set(gltf.get('extensionsUsed') or [])
+    required = set(gltf.get('extensionsRequired') or [])
+    return bool((used | required) & {'EXT_meshopt_compression', 'KHR_mesh_quantization'})
+
+
+def _assimp_export_source_path(src_bytes, src_fmt, workdir):
+    """Write a temporary source file for Assimp.
+
+    Assimp still fails on many gltfpack/meshopt GLBs. When the source declares
+    those extensions, first repack it through gltfpack without mesh compression
+    so FBX/OBJ/STL/etc. export has a compatible input.
+    """
+    import shutil
+    import subprocess
+
+    src_fmt = (src_fmt or 'glb').lower()
+    in_path = os.path.join(workdir, f'src.{src_fmt}')
+    with open(in_path, 'wb') as f:
+        f.write(src_bytes)
+
+    if src_fmt not in ('glb', 'gltf') or not _assimp_unfriendly_gltf(src_bytes, src_fmt):
+        return in_path
+
+    gltfpack_bin = shutil.which('gltfpack')
+    if not gltfpack_bin:
+        raise RuntimeError('gltfpack is required to prepare this optimized GLB for export.')
+
+    out_path = os.path.join(workdir, 'assimp-source.glb')
+    result = subprocess.run(
+        [
+            gltfpack_bin,
+            '-i', in_path,
+            '-o', out_path,
+            '-kn',
+            '-km',
+        ],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    if result.returncode != 0:
+        msg = (result.stderr or result.stdout or 'gltfpack failed.').strip()
+        raise RuntimeError(msg[-1000:] or 'gltfpack failed.')
+    if not os.path.exists(out_path):
+        raise RuntimeError('gltfpack produced no export source.')
+    return out_path
+
+
 @api_bp.route('/export/<model_id>')
 def export_model(model_id):
     import shutil
@@ -1418,11 +1473,9 @@ def export_model(model_id):
 
         workdir = tempfile.mkdtemp(prefix='export_')
         try:
-            in_path = os.path.join(workdir, f'src.{src_fmt or "glb"}')
             out_path = os.path.join(workdir, f'out.{fmt}')
-            with open(in_path, 'wb') as f:
-                f.write(src_bytes)
             try:
+                in_path = _assimp_export_source_path(src_bytes, src_fmt, workdir)
                 assimp_export(tool_paths(current_app)['assimp'], in_path, out_path, timeout=60)
             except Exception as e:
                 print(f"Export transcode failed: {e}")

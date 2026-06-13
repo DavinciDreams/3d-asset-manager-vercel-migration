@@ -179,16 +179,15 @@
                             {{ fmt.upper() }}
                         </a>
                         {% endfor %}
-                        {# OBJ/STL/PLY/FBX/DAE/3DS go through assimp, which cannot read
-                           meshopt-compressed GLBs and 502s. Hide them for such models. #}
-                        {% if not model_is_meshopt %}
+                        {# OBJ/STL/PLY/FBX/DAE/3DS go through assimp. Optimized
+                           GLBs are repacked server-side into an Assimp-friendly
+                           temporary source before export. #}
                         {% for fmt in ['obj', 'stl', 'ply', 'fbx', 'dae', '3ds'] %}
                         <a href="{{ url_for('api.export_model', model_id=model.id) }}?format={{ fmt }}"
                            class="block px-4 py-2 text-sm text-gray-700 hover:bg-indigo-50">
                             {{ fmt.upper() }}
                         </a>
                         {% endfor %}
-                        {% endif %}
                         {% if model.vrma_file_id %}
                         <div class="border-t border-gray-100 my-1"></div>
                         <a href="{{ url_for('api.export_model', model_id=model.id) }}?format=vrma"

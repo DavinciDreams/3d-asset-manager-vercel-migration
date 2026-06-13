@@ -1,5 +1,7 @@
 import io
 import os
+import json
+import struct
 
 os.environ.setdefault("SQLITE_PATH", ":memory:")
 os.environ.setdefault("AI_AUTOTAG_WORKER", "0")
@@ -158,3 +160,35 @@ def test_tellus_admin_username_grants_asset_admin(monkeypatch):
     body = response.get_json()
     assert body["is_asset_admin"] is True
     assert body["asset_admin_configured"] is True
+
+
+def test_fbx_export_visible_for_optimized_glb():
+    app = create_app()
+    client = app.test_client()
+    _login(app, client)
+
+    gltf = {
+        "asset": {"version": "2.0"},
+        "extensionsUsed": ["EXT_meshopt_compression"],
+        "extensionsRequired": ["EXT_meshopt_compression"],
+        "buffers": [{"byteLength": 0}],
+    }
+    chunk = json.dumps(gltf).encode("utf-8")
+    chunk += b" " * ((4 - (len(chunk) % 4)) % 4)
+    glb = (
+        struct.pack("<4sII", b"glTF", 2, 12 + 8 + len(chunk))
+        + struct.pack("<II", len(chunk), 0x4E4F534A)
+        + chunk
+    )
+    response = client.post("/api/upload", data={
+        "name": "Optimized Export Target",
+        "is_public": "true",
+        "file": (io.BytesIO(glb), "optimized.glb"),
+    }, content_type="multipart/form-data")
+    assert response.status_code == 201, response.get_json()
+    model_id = response.get_json()["model"]["id"]
+
+    detail = client.get(f"/model/{model_id}")
+    assert detail.status_code == 200
+    html = detail.get_data(as_text=True)
+    assert f"/api/export/{model_id}?format=fbx" in html
