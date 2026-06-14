@@ -67,6 +67,37 @@ services:
       - "8088:8000"        # publish container 8000 on host 8088
     restart: unless-stopped
 
+  media-capture:
+    build:
+      context: .
+      dockerfile: Dockerfile.media-capture
+    depends_on:
+      - app
+    environment:
+      ASSET_MANAGER_BASE_URL: http://app:8000
+      ASSET_CAPTURE_TOKEN: ${ASSET_CAPTURE_TOKEN}
+      TELLUS_ADMIN_API_TOKEN: ${TELLUS_ADMIN_API_TOKEN}
+      ASSET_MANAGER_API_TOKEN: ${ASSET_MANAGER_API_TOKEN}
+      MEDIA_CAPTURE_KIND: ${MEDIA_CAPTURE_KIND:-all}
+      MEDIA_CAPTURE_LIMIT: ${MEDIA_CAPTURE_LIMIT:-25}
+      MEDIA_CAPTURE_INTERVAL: ${MEDIA_CAPTURE_INTERVAL:-20}
+      MEDIA_CAPTURE_TIMEOUT: ${MEDIA_CAPTURE_TIMEOUT:-60}
+    command:
+      - python
+      - scripts/backfill_media_capture.py
+      - --base-url
+      - http://app:8000
+      - --kind
+      - ${MEDIA_CAPTURE_KIND:-all}
+      - --limit
+      - ${MEDIA_CAPTURE_LIMIT:-25}
+      - --interval
+      - ${MEDIA_CAPTURE_INTERVAL:-20}
+      - --capture-timeout
+      - ${MEDIA_CAPTURE_TIMEOUT:-60}
+      - --poll
+    restart: unless-stopped
+
   postgres:
     image: postgres:16-alpine
     environment:

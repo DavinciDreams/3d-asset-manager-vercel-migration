@@ -1864,8 +1864,16 @@ def upload_thumbnail(model_id):
         )
         model.thumbnail_file_id = str(new_id)
         model.save()
+        enrichment_queued = _maybe_enqueue_autotag_after_thumbnail(
+            model,
+            context={'source': 'thumbnail_capture'},
+        )
 
-        return jsonify({'success': True, 'thumbnail_file_id': model.thumbnail_file_id})
+        return jsonify({
+            'success': True,
+            'thumbnail_file_id': model.thumbnail_file_id,
+            'ai_enrichment_queued': enrichment_queued,
+        })
 
     except Exception as e:
         print(f"API thumbnail upload error: {e}")
@@ -3189,6 +3197,48 @@ def _thumbnail_required_error(model):
     if model and model.thumbnail_file_id:
         return None
     return 'AI enrichment requires a saved thumbnail. Capture/upload a thumbnail before enriching metadata.'
+
+
+def _ai_enrichment_needs_visual_retry(model):
+    if not model:
+        return False
+    if model.ai_status in ('pending', 'processing'):
+        return False
+    if model.ai_status in (None, '', 'failed'):
+        return True
+    metadata = model.ai_metadata if isinstance(model.ai_metadata, dict) else {}
+    if metadata.get('vision_fallback') or metadata.get('vision_mcp_error'):
+        return True
+    if model.ai_error and 'thumbnail' in str(model.ai_error).lower():
+        return True
+    if model.ai_status == 'done':
+        try:
+            from app.ai_enrichment import _generic_description, _generic_title
+            return (
+                _generic_title(model.name)
+                or _generic_description(model.description)
+                or _generic_description(model.ai_description)
+            )
+        except Exception:
+            return False
+    return False
+
+
+def _maybe_enqueue_autotag_after_thumbnail(model, context=None):
+    if not _as_bool(os.environ.get('AI_AUTOTAG_ON_UPLOAD', '0')):
+        return False
+    if not model or not model.thumbnail_file_id:
+        return False
+    if not _ai_enrichment_needs_visual_retry(model):
+        return False
+    _enqueue_ai_enrichment(model, {
+        'overwrite': os.environ.get('AI_AUTOTAG_OVERWRITE_ON_UPLOAD', '1'),
+        'include_title': os.environ.get('AI_AUTOTAG_INCLUDE_TITLE', '1'),
+        'include_description': os.environ.get('AI_AUTOTAG_INCLUDE_DESCRIPTION', '1'),
+        'context': context or {},
+    })
+    _kick_ai_enrichment_worker(current_app._get_current_object())
+    return True
 
 
 def _run_ai_enrichment_worker(app, model_id, data):

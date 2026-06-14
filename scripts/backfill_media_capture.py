@@ -136,11 +136,11 @@ def _process_item(page, context, base_url: str, item: dict, args) -> bool:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default=os.environ.get("ASSET_MANAGER_BASE_URL", "http://127.0.0.1:5000"))
-    parser.add_argument("--limit", type=int, default=50)
+    parser.add_argument("--limit", type=int, default=int(os.environ.get("MEDIA_CAPTURE_LIMIT", "50")))
     parser.add_argument(
         "--kind",
         choices=["all", "models", "animations"],
-        default="all",
+        default=os.environ.get("MEDIA_CAPTURE_KIND", "all"),
         help="Capture regular model media, animation clip media, or both.",
     )
     parser.add_argument(
@@ -149,8 +149,8 @@ def main(argv: list[str] | None = None) -> int:
         help="Queue matching items even when media already exists, replacing stale thumbnails/previews.",
     )
     parser.add_argument("--poll", action="store_true", help="Keep draining the queue for future uploads.")
-    parser.add_argument("--interval", type=int, default=60, help="Seconds between poll cycles.")
-    parser.add_argument("--capture-timeout", type=int, default=45)
+    parser.add_argument("--interval", type=int, default=int(os.environ.get("MEDIA_CAPTURE_INTERVAL", "60")), help="Seconds between poll cycles.")
+    parser.add_argument("--capture-timeout", type=int, default=int(os.environ.get("MEDIA_CAPTURE_TIMEOUT", "45")))
     parser.add_argument("--show", action="store_true", help="Run a visible browser instead of headless.")
     parser.add_argument("--enrich", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--overwrite-enrichment", action="store_true")
@@ -179,7 +179,14 @@ def main(argv: list[str] | None = None) -> int:
 
         try:
             while True:
-                items = _fetch_queue(context, args.base_url, args.limit, args.kind, args.recapture)
+                try:
+                    items = _fetch_queue(context, args.base_url, args.limit, args.kind, args.recapture)
+                except Exception as exc:
+                    print(f"[queue] fetch failed: {exc}", file=sys.stderr)
+                    if not args.poll:
+                        return 1
+                    time.sleep(args.interval)
+                    continue
                 if not items:
                     print("[queue] empty")
                     if not args.poll:

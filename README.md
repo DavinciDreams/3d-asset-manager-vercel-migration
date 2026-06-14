@@ -196,8 +196,26 @@ set ASSET_CAPTURE_PASSWORD=your-password
 python scripts/backfill_media_capture.py --base-url https://3d.flobots.xyz --limit 50
 ```
 
-For future uploads, run the same worker in poll mode from a machine/container
-with Chromium available:
+For future uploads, the compose stack includes a `media-capture` service built
+from `Dockerfile.media-capture`. It runs Playwright/Chromium continuously
+against the internal app URL, drains missing model and animation media, and
+uploads thumbnails plus rotating WebM previews. When a thumbnail is saved and
+`AI_AUTOTAG_ON_UPLOAD=1`, the app queues AI enrichment automatically so listing
+title, description, tags, and facets are filled after visual media exists.
+
+The worker authenticates with `ASSET_CAPTURE_TOKEN`, falling back to the same
+service tokens used by the app (`TELLUS_ADMIN_API_TOKEN` /
+`ASSET_MANAGER_API_TOKEN`). Useful knobs:
+
+```bash
+MEDIA_CAPTURE_KIND=all          # all, models, or animations
+MEDIA_CAPTURE_LIMIT=25
+MEDIA_CAPTURE_INTERVAL=20       # seconds between empty-queue polls
+MEDIA_CAPTURE_TIMEOUT=60        # seconds to wait for one capture page
+```
+
+To run the same worker manually from a machine/container with Chromium
+available:
 
 ```bash
 python scripts/backfill_media_capture.py --base-url https://3d.flobots.xyz --poll --interval 60
