@@ -104,7 +104,9 @@ def index():
     try:
         
         # Get recent public models
-        recent_models, total_public = Model3D.get_public_models(page=1, per_page=6)
+        recent_models, total_public = Model3D.get_public_models(
+            page=1, per_page=6,
+            exclude_animation_carriers=True)
 
 
         # Add owner username + current variant flags.
@@ -263,7 +265,8 @@ def browse():
             sort=sort, tag=tags if tags else None,
             category=category, style=styles if styles else None,
             asset_type=asset_types if asset_types else None,
-            exclude_formats=['vrma', 'bvh'])
+            exclude_formats=['vrma', 'bvh'],
+            exclude_animation_carriers=True)
 
         # Add owner username + current variant flags.
         _attach_preview_variant_flags(models)
@@ -272,8 +275,8 @@ def browse():
             model.owner_username = user.username if user else 'Unknown'
 
         pagination = Pagination(models, total, page, per_page)
-        all_tags = Model3D.get_public_tags()
-        facets = Model3D.get_public_facets()
+        all_tags = Model3D.get_public_tags(exclude_animation_carriers=True)
+        facets = Model3D.get_public_facets(exclude_animation_carriers=True)
         # Only load the (heavy) VRM viewer module if a VRM card is on the page.
         has_vrm = any(m.file_format == 'vrm' for m in models)
 

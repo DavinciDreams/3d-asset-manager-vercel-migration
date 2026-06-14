@@ -647,7 +647,8 @@ def list_models():
             # Get public models
             models, total = Model3D.get_public_models(
                 page=page, per_page=per_page, search=search if search else None,
-                category=category, style=styles or None, asset_type=asset_types or None)
+                category=category, style=styles or None, asset_type=asset_types or None,
+                exclude_animation_carriers=True)
         
         # Convert models to JSON-serializable format
         models_data = []
@@ -1467,6 +1468,7 @@ def _media_summary(model):
     game-optimized variant. URLs are only included when the asset exists."""
     fmt = (model.file_format or '').lower()
     viewable = bool(model.viewable_file_id) or fmt in ('glb', 'gltf', 'vrm')
+    view_format = (model.viewable_format or 'glb') if model.viewable_file_id else model.file_format
     go = _game_optimized_fields(model)
     return {
         'id': model.id,
@@ -1489,6 +1491,7 @@ def _media_summary(model):
             'view_url': url_for('api.view_model', model_id=model.id) if viewable else None,
             'download_url': url_for('api.download_model', model_id=model.id),
             'file_format': model.file_format,
+            'view_format': view_format if viewable else None,
         },
         'game_optimized': go['game_optimized'],
         'has_game_optimized': go['has_game_optimized'],
@@ -1620,6 +1623,20 @@ def export_model(model_id):
             return jsonify({'error': f'Unsupported export format: {fmt or "(none)"}'}), 400
 
         fs = current_app.config['FILE_STORE']
+
+        # If the caller asks for the model's native uploaded format (notably
+        # FBX), return the original bytes instead of re-exporting the converted
+        # preview GLB back through Assimp. The preview/export source may be a
+        # derived GLB, but "format=fbx" on an FBX upload should preserve the
+        # creator/player's original FBX.
+        original_fmt = (model.file_format or '').lower()
+        if fmt == original_fmt:
+            original = model.get_file_data()
+            if not original:
+                return jsonify({'error': 'Original file not found'}), 404
+            filename = model.original_filename or f'{_safe_stem(model)}.{fmt}'
+            return _download_bytes(original, filename, _mime_for(fmt))
+
         cached_id = _cached_export_file_id(model.id, fmt)
         if cached_id:
             return _download_bytes(fs.get(cached_id).read(), f'{_safe_stem(model)}.{fmt}', _mime_for(fmt))
@@ -2224,7 +2241,8 @@ def list_public_models():
             search=search or None, sort=sort,
             tag=tags or None, category=category, style=styles or None,
             asset_type=asset_types or None,
-            exclude_formats=['vrma', 'bvh'])
+            exclude_formats=['vrma', 'bvh'],
+            exclude_animation_carriers=True)
 
         for model in models_list:
             user = User.get_by_id(model.user_id)
@@ -2618,7 +2636,7 @@ def _media_presence_fields(model):
 def _media_capture_ready(model):
     """Return True when the detail page can render this model for capture."""
     fmt = (model.file_format or '').lower()
-    if fmt in ('vrma', 'bvh') or model.vrma_file_id:
+    if fmt in ('vrma', 'bvh'):
         return False
     if fmt in ('glb', 'gltf', 'vrm'):
         return True
@@ -3911,7 +3929,10 @@ def admin_media_capture_queue():
                 .where(
                     missing,
                     model_rows.c.file_format.not_in(['vrma', 'bvh']),
-                    model_rows.c.vrma_file_id.is_(None),
+                    or_(
+                        model_rows.c.vrma_file_id.is_(None),
+                        model_rows.c.viewable_file_id.is_not(None),
+                    ),
                 )
                 .order_by(model_rows.c.upload_date.desc())
                 .limit(limit * 3)
@@ -3933,7 +3954,8 @@ def admin_media_capture_queue():
             include_not_ready=include_not_ready,
             recapture=recapture,
         )
-        items.extend(animation_items)
+        seen_ids = {item.get('id') for item in items}
+        items.extend(item for item in animation_items if item.get('id') not in seen_ids)
         skipped_not_ready += animation_skipped
 
     return jsonify({

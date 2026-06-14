@@ -57,7 +57,7 @@
             </div>
         {% else %}
             {% set native_view = model.file_format in ['glb', 'gltf'] %}
-            {% set viewable_ready = native_view or model.viewable_file_id or model.conversion_status in ['done', 'skipped'] %}
+            {% set viewable_ready = native_view or model.viewable_file_id %}
             <div id="viewer-detail-{{ model.id }}" class="model-viewer-large"
                  data-conversion-status="{{ model.conversion_status or '' }}"
                  data-viewable-ready="{{ '1' if viewable_ready else '0' }}">

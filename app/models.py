@@ -730,7 +730,7 @@ class Model3D:
     @staticmethod
     def list_models(page=1, per_page=20, search=None, sort="newest", tag=None,
                     category=None, style=None, asset_type=None, public_only=True,
-                    owner_id=None, exclude_formats=None):
+                    owner_id=None, exclude_formats=None, exclude_animation_carriers=False):
         engine = current_app.config["DB_ENGINE"]
         predicates = []
         if public_only:
@@ -741,6 +741,8 @@ class Model3D:
             predicates.append(models.c.file_format.not_in([
                 str(fmt).strip().lower() for fmt in exclude_formats if str(fmt).strip()
             ]))
+        if exclude_animation_carriers:
+            predicates.append(models.c.vrma_file_id.is_(None))
         search_predicate = Model3D._search_predicate(search)
         if search_predicate is not None:
             predicates.append(search_predicate)
@@ -762,11 +764,13 @@ class Model3D:
 
     @staticmethod
     def get_public_models(page=1, per_page=20, search=None, sort="newest", tag=None,
-                          category=None, style=None, asset_type=None, exclude_formats=None):
+                          category=None, style=None, asset_type=None, exclude_formats=None,
+                          exclude_animation_carriers=False):
         return Model3D.list_models(
             page=page, per_page=per_page, search=search, sort=sort, tag=tag,
             category=category, style=style, asset_type=asset_type,
             public_only=True, exclude_formats=exclude_formats,
+            exclude_animation_carriers=exclude_animation_carriers,
         )
 
     @staticmethod
@@ -840,9 +844,12 @@ class Model3D:
             return []
 
     @staticmethod
-    def get_public_tags():
+    def get_public_tags(exclude_animation_carriers=False):
         try:
-            return Model3D._distinct_tags(models.c.is_public.is_(True))
+            predicates = [models.c.is_public.is_(True)]
+            if exclude_animation_carriers:
+                predicates.append(models.c.vrma_file_id.is_(None))
+            return Model3D._distinct_tags(and_(*predicates))
         except Exception as e:
             print(f"Error getting public tags: {e}")
             return []
@@ -864,8 +871,11 @@ class Model3D:
         }
 
     @staticmethod
-    def get_public_facets():
-        where = models.c.is_public.is_(True)
+    def get_public_facets(exclude_animation_carriers=False):
+        predicates = [models.c.is_public.is_(True)]
+        if exclude_animation_carriers:
+            predicates.append(models.c.vrma_file_id.is_(None))
+        where = and_(*predicates)
         return {
             "categories": Model3D._distinct_column_values(models.c.asset_category, where),
             "styles": Model3D._distinct_column_values(models.c.asset_styles, where, list_values=True),

@@ -220,7 +220,35 @@ def process_model_doc(app, doc):
             return "done"
 
         if fmt == "fbx":
-            glb_path = fbx2gltf_to_glb(paths["fbx2gltf"], in_path, workdir)
+            try:
+                glb_path = fbx2gltf_to_glb(paths["fbx2gltf"], in_path, workdir)
+            except Exception as glb_error:
+                # Some FBX uploads are animation-only clips rather than mesh
+                # assets. They cannot produce a preview GLB, but they can still
+                # be useful as VRMA avatar animations.
+                try:
+                    vrma_path = os.path.join(workdir, "clip.vrma")
+                    fbx_to_vrma(paths["node"], paths["fbx2vrma_dir"], paths["fbx2gltf"], in_path, vrma_path)
+                    with open(vrma_path, "rb") as f:
+                        vrma_bytes = f.read()
+                    vrma_id = fs.put(
+                        vrma_bytes,
+                        filename=f"clip_{model_id}.vrma",
+                        content_type="application/octet-stream",
+                        metadata={"derived_for": str(model_id), "kind": "vrma"},
+                    )
+                    patch_model(
+                        app, model_id,
+                        vrma_file_id=str(vrma_id),
+                        conversion_status="done",
+                        conversion_error=None,
+                    )
+                    return "done"
+                except Exception as vrma_error:
+                    raise RuntimeError(
+                        f"FBX preview conversion failed: {glb_error}; "
+                        f"FBX animation conversion failed: {vrma_error}"
+                    ) from glb_error
         else:
             glb_path = os.path.join(workdir, "viewable.glb")
             assimp_export(paths["assimp"], in_path, glb_path)

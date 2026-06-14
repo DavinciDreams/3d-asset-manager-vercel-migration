@@ -278,6 +278,96 @@ def test_admin_media_capture_queue_lists_only_renderable_missing_media():
     assert native_item["capture_ready"] is True
     assert native_item["capture_url"].endswith(f"/model/{native_id}?capture=1")
 
+    with app.app_context():
+        converted_fbx = Model3D.get_by_id(fbx_id)
+        viewable_id = app.config["FILE_STORE"].put(
+            b"glTF" + b"\x04" * 64,
+            filename="prop_source_viewable.glb",
+            content_type="model/gltf-binary",
+            metadata={"derived_for": fbx_id, "kind": "viewable"},
+        )
+        vrma_clip_id = app.config["FILE_STORE"].put(
+            b"vrma",
+            filename="prop_source_clip.vrma",
+            content_type="application/octet-stream",
+            metadata={"derived_for": fbx_id, "kind": "vrma"},
+        )
+        converted_fbx.viewable_file_id = str(viewable_id)
+        converted_fbx.viewable_format = "glb"
+        converted_fbx.vrma_file_id = str(vrma_clip_id)
+        converted_fbx.conversion_status = "done"
+        converted_fbx.save()
+
+    converted_queue = client.get("/api/admin/media-capture/queue?limit=20", headers=headers)
+    assert converted_queue.status_code == 200, converted_queue.get_json()
+    converted_ids = {item["id"] for item in converted_queue.get_json()["models"]}
+    assert fbx_id in converted_ids
+    fbx_item = next(item for item in converted_queue.get_json()["models"] if item["id"] == fbx_id)
+    assert fbx_item["capture_ready"] is True
+
+
+def test_fbx_source_with_vrm_and_vrma_lives_in_avatar_animation_apis():
+    app = create_app()
+    client = app.test_client()
+    headers = {"Authorization": "Bearer test-token"}
+
+    upload = client.post("/api/upload", headers=headers, data={
+        "is_public": "true",
+        "file": (io.BytesIO(b"Kaydara FBX Binary" + b"\x05" * 64), "avatar_source.fbx"),
+    }, content_type="multipart/form-data")
+    assert upload.status_code == 201, upload.get_json()
+    model_id = upload.get_json()["model"]["id"]
+
+    with app.app_context():
+        source = Model3D.get_by_id(model_id)
+        viewable_id = app.config["FILE_STORE"].put(
+            b"glTF" + b"\x06" * 64,
+            filename="avatar_source_viewable.glb",
+            content_type="model/gltf-binary",
+            metadata={"derived_for": model_id, "kind": "viewable"},
+        )
+        vrm_id = app.config["FILE_STORE"].put(
+            b"glTF" + b"\x07" * 64,
+            filename="avatar_source.vrm",
+            content_type="model/gltf-binary",
+            metadata={"derived_for": model_id, "kind": "vrm"},
+        )
+        vrma_id = app.config["FILE_STORE"].put(
+            b"vrma",
+            filename="avatar_source.vrma",
+            content_type="application/octet-stream",
+            metadata={"derived_for": model_id, "kind": "vrma"},
+        )
+        source.viewable_file_id = str(viewable_id)
+        source.viewable_format = "glb"
+        source.vrma_file_id = str(vrma_id)
+        source.conversion_status = "done"
+        source.save()
+        ModelVariant.upsert(
+            model_id, "vrm", str(vrm_id),
+            file_format="vrm", size=68, status="ready",
+        )
+
+    browse = client.get("/api/models/browse?per_page=20")
+    assert browse.status_code == 200, browse.get_json()
+    assert model_id not in {item["id"] for item in browse.get_json()["models"]}
+
+    public_models = client.get("/api/models")
+    assert public_models.status_code == 200, public_models.get_json()
+    assert model_id not in {item["id"] for item in public_models.get_json()["models"]}
+
+    avatars = client.get("/api/vrm")
+    assert avatars.status_code == 200, avatars.get_json()
+    avatar = next(item for item in avatars.get_json()["avatars"] if item["model_id"] == model_id)
+    assert avatar["id"] == model_id + ":vrm"
+    assert avatar["view_url"].endswith(f"/api/model/{model_id}/vrm")
+
+    animations = client.get("/api/vrma")
+    assert animations.status_code == 200, animations.get_json()
+    clip = next(item for item in animations.get_json()["animations"] if item["model_id"] == model_id)
+    assert clip["id"] == model_id + ":vrma"
+    assert clip["view_url"].endswith(f"/api/export/{model_id}?format=vrma")
+
 
 def test_upload_does_not_tag_static_unrigged_glb():
     app = create_app()

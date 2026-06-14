@@ -94,6 +94,12 @@ def test_worker_converts_fbx(monkeypatch):
     view = client.get(f"/api/view/{model_id}")
     assert view.status_code == 200
     assert view.content_type == "model/gltf-binary"
+    assert view.data == glb_bytes
+
+    original = client.get(f"/api/export/{model_id}?format=fbx")
+    assert original.status_code == 200
+    assert original.data == b"fake-fbx"
+    assert original.headers["Content-Disposition"].endswith('filename="hero.fbx"')
 
 
 def test_worker_failure_marks_failed(monkeypatch):
@@ -115,6 +121,42 @@ def test_worker_failure_marks_failed(monkeypatch):
         model = Model3D.get_by_id(model_id)
     assert model.conversion_status == "failed"
     assert "exploded" in model.conversion_error
+
+
+def test_worker_converts_animation_only_fbx_to_vrma(monkeypatch):
+    app = _app()
+    client = app.test_client()
+    _login(app, client, "convclip")
+
+    def no_preview_glb(*args, **kwargs):
+        raise RuntimeError("no mesh in FBX")
+
+    def fake_fbx2vrma(node, cdir, fbxbin, input_path, output_path, timeout=180):
+        with open(output_path, "wb") as f:
+            f.write(b'{"vrma": true}')
+        return output_path
+
+    monkeypatch.setattr(conversion, "fbx2gltf_to_glb", no_preview_glb)
+    monkeypatch.setattr(conversion, "fbx_to_vrma", fake_fbx2vrma)
+
+    response = client.post("/api/upload", data={
+        "name": "Dance Clip", "is_public": "true",
+        "file": (io.BytesIO(b"animation-only-fbx"), "dance.fbx"),
+    }, content_type="multipart/form-data")
+    assert response.status_code == 201, response.get_json()
+    model_id = response.get_json()["model"]["id"]
+
+    assert conversion.drain_once(app) == 1
+    with app.app_context():
+        model = Model3D.get_by_id(model_id)
+    assert model.conversion_status == "done"
+    assert not model.viewable_file_id
+    assert model.vrma_file_id
+
+    status = client.get(f"/api/model/{model_id}/status").get_json()
+    assert status["status"] == "done"
+    assert status["has_viewable"] is False
+    assert status["has_vrma"] is True
 
 
 def test_obj_uses_assimp(monkeypatch):
