@@ -1974,6 +1974,20 @@ def _pick_default_vrma(items):
     return None
 
 
+def _animation_clip_name(model):
+    runtime = model.runtime_metadata or {}
+    for clip in runtime.get('animations') or []:
+        if isinstance(clip, dict) and str(clip.get('name') or '').strip():
+            return str(clip.get('name')).strip()
+        if isinstance(clip, str) and clip.strip():
+            return clip.strip()
+    name = model.name or 'Untitled'
+    for suffix in (' Humanoid Animation Clip', ' animation', ' Animation'):
+        if name.lower().endswith(suffix.lower()):
+            return name[:-len(suffix)].strip() or name
+    return name
+
+
 @api_bp.route('/vrma')
 def list_vrma():
     """List VRMA animation assets available to apply on a VRM avatar:
@@ -1987,7 +2001,7 @@ def list_vrma():
             view_url = url_for('api.view_model', model_id=model.id)
             items.append({
                 'id': model.id,
-                'name': model.name or 'Untitled',
+                'name': _animation_clip_name(model),
                 'view_url': view_url,
                 'download_url': url_for('api.download_model', model_id=model.id),
                 'source': 'upload',
@@ -1997,7 +2011,7 @@ def list_vrma():
             vrma_url = url_for('api.export_model', model_id=model.id) + '?format=vrma'
             items.append({
                 'id': model.id + ':vrma',
-                'name': (model.name or 'Untitled') + ' (animation)',
+                'name': _animation_clip_name(model),
                 'view_url': vrma_url,
                 # The generated VRMA is served via export; expose an explicit
                 # download URL so API consumers can fetch the .vrma file.
@@ -4059,6 +4073,8 @@ def admin_media_capture_queue():
 
         for row in rows:
             model = Model3D.from_doc(row)
+            if model.is_animation_carrier():
+                continue
             item = _media_capture_queue_item(model, force_capture=recapture)
             if not item['capture_ready'] and not include_not_ready:
                 skipped_not_ready += 1

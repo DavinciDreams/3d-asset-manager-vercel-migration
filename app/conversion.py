@@ -166,6 +166,19 @@ def looks_humanoid(node_names):
     return len(node_names & MIXAMO_BONES) >= HUMANOID_BONE_THRESHOLD
 
 
+def is_animation_library_source(doc):
+    runtime = doc.get("runtime_metadata") or {}
+    upload = runtime.get("upload") if isinstance(runtime, dict) else {}
+    tags = {str(tag or "").strip().lower() for tag in (doc.get("tags") or [])}
+    asset_types = {str(tag or "").strip().lower() for tag in (doc.get("asset_types") or [])}
+    return (
+        (isinstance(upload, dict) and upload.get("source") == "vrma-library-import")
+        or (doc.get("asset_category") == "animation")
+        or bool(tags & {"animation-source", "animation-library", "vrma-library"})
+        or bool(asset_types & {"animation", "avatar-animation"})
+    )
+
+
 def patch_model(app, model_id, **fields):
     with app.config["DB_ENGINE"].begin() as conn:
         conn.execute(update(models).where(models.c.id == str(model_id)).values(**fields))
@@ -268,7 +281,10 @@ def process_model_doc(app, doc):
             "conversion_error": None,
         }
 
-        if fmt == "fbx" and looks_humanoid(gltf_node_names(glb_path)):
+        fbx_is_humanoid = fmt == "fbx" and looks_humanoid(gltf_node_names(glb_path))
+        fbx_is_animation_source = fmt == "fbx" and is_animation_library_source(doc)
+
+        if fbx_is_humanoid or fbx_is_animation_source:
             try:
                 vrma_path = os.path.join(workdir, "clip.vrma")
                 fbx_to_vrma(paths["node"], paths["fbx2vrma_dir"], paths["fbx2gltf"], in_path, vrma_path)
@@ -287,6 +303,7 @@ def process_model_doc(app, doc):
             # mixamorig:* skeleton -- exactly what glb2vrm needs. Auto-produce a
             # VRM avatar variant so the model can play VRMA clips in the VRM
             # viewer. Non-fatal: a non-humanoid-enough GLB just won't get a VRM.
+        if fbx_is_humanoid:
             try:
                 vrm_path = os.path.join(workdir, "avatar.vrm")
                 glb_to_vrm(

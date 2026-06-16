@@ -363,9 +363,16 @@ def test_admin_media_capture_queue_lists_only_renderable_missing_media():
     converted_queue = client.get("/api/admin/media-capture/queue?limit=20", headers=headers)
     assert converted_queue.status_code == 200, converted_queue.get_json()
     converted_ids = {item["id"] for item in converted_queue.get_json()["models"]}
-    assert fbx_id in converted_ids
-    fbx_item = next(item for item in converted_queue.get_json()["models"] if item["id"] == fbx_id)
-    assert fbx_item["capture_ready"] is True
+    assert fbx_id not in converted_ids
+
+    animation_queue = client.get(
+        "/api/admin/media-capture/queue?kind=animations&include_not_ready=true&limit=20",
+        headers=headers,
+    )
+    assert animation_queue.status_code == 200, animation_queue.get_json()
+    fbx_item = next(item for item in animation_queue.get_json()["models"] if item["id"] == fbx_id)
+    assert fbx_item["capture_mode"] == "animation"
+    assert fbx_item["capture_url"].endswith(f"/animations?capture_clip={fbx_id}:vrma")
 
 
 def test_fbx_source_with_vrm_and_vrma_lives_in_avatar_animation_apis():
@@ -429,6 +436,53 @@ def test_fbx_source_with_vrm_and_vrma_lives_in_avatar_animation_apis():
     clip = next(item for item in animations.get_json()["animations"] if item["model_id"] == model_id)
     assert clip["id"] == model_id + ":vrma"
     assert clip["view_url"].endswith(f"/api/export/{model_id}?format=vrma")
+
+
+def test_fbx_animation_source_without_vrma_is_animation_catalog_only():
+    app = create_app()
+    client = app.test_client()
+    headers = {"Authorization": "Bearer test-token"}
+
+    upload = client.post("/api/upload", headers=headers, data={
+        "name": "Pharoah",
+        "description": "Humanoid animation source.",
+        "is_public": "true",
+        "tags": "animation-library, animation-source, humanoid-animation",
+        "asset_category": "animation",
+        "asset_styles": "humanoid, vrm",
+        "asset_types": "animation, humanoid, fbx",
+        "runtime_metadata": json.dumps({
+            "animations": [{"name": "Pharoah"}],
+            "behaviors": ["avatar-animation"],
+            "upload": {"source": "vrma-library-import"},
+        }),
+        "file": (io.BytesIO(b"Kaydara FBX Binary" + b"\x09" * 64), "Animations_pharoah.fbx"),
+    }, content_type="multipart/form-data")
+    assert upload.status_code == 201, upload.get_json()
+    model_id = upload.get_json()["model"]["id"]
+    assert upload.get_json()["model"]["has_vrma"] is False
+
+    browse = client.get("/api/models/browse?per_page=20")
+    assert browse.status_code == 200, browse.get_json()
+    assert model_id not in {item["id"] for item in browse.get_json()["models"]}
+
+    public_models = client.get("/api/models")
+    assert public_models.status_code == 200, public_models.get_json()
+    assert model_id not in {item["id"] for item in public_models.get_json()["models"]}
+
+    media_queue = client.get("/api/admin/media-capture/queue?limit=20", headers=headers)
+    assert media_queue.status_code == 200, media_queue.get_json()
+    assert model_id not in {item["id"] for item in media_queue.get_json()["models"]}
+
+    animations_api = client.get("/api/vrma")
+    assert animations_api.status_code == 200, animations_api.get_json()
+    assert model_id not in {item["model_id"] for item in animations_api.get_json()["animations"]}
+
+    animations_page = client.get("/animations")
+    assert animations_page.status_code == 200
+    html = animations_page.get_data(as_text=True)
+    assert "Pharoah" in html
+    assert "VRMA conversion needed" in html
 
 
 def test_upload_does_not_tag_static_unrigged_glb():

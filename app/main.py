@@ -305,25 +305,55 @@ def browse():
                            asset_admin=is_asset_admin_user(current_user) if current_user.is_authenticated else False)
 
 
-def _animation_asset_item(model, *, generated=False):
+def _animation_clip_name(model):
+    runtime = model.runtime_metadata or {}
+    for clip in runtime.get('animations') or []:
+        if isinstance(clip, dict) and str(clip.get('name') or '').strip():
+            return str(clip.get('name')).strip()
+        if isinstance(clip, str) and clip.strip():
+            return clip.strip()
+    name = model.name or 'Untitled'
+    for suffix in (' Humanoid Animation Clip', ' animation', ' Animation'):
+        if name.lower().endswith(suffix.lower()):
+            return name[:-len(suffix)].strip() or name
+    return name
+
+
+def _animation_asset_item(model, *, generated=False, source_only=False):
     owner = User.get_by_id(model.user_id)
-    if generated:
+    playable = False
+    if generated and model.vrma_file_id:
         view_url = url_for('api.export_model', model_id=model.id) + '?format=vrma'
         download_url = view_url
         source = 'Generated'
+        playable = True
+    elif source_only:
+        view_url = None
+        download_url = url_for('api.download_model', model_id=model.id)
+        source = (model.file_format or 'source').upper()
     else:
         view_url = url_for('api.view_model', model_id=model.id)
         download_url = url_for('api.download_model', model_id=model.id)
         source = 'VRMA'
+        playable = True
     return {
         'id': (model.id + ':vrma') if generated else model.id,
         'model_id': model.id,
-        'name': (model.name or 'Untitled') + (' animation' if generated else ''),
+        'name': _animation_clip_name(model),
+        'description': model.description or '',
+        'file_format': model.file_format,
+        'conversion_status': model.conversion_status,
+        'conversion_error': model.conversion_error,
         'source': source,
+        'playable': playable,
+        'can_manage': can_manage_model(current_user, model) if current_user.is_authenticated else False,
         'owner_username': owner.username if owner else 'Unknown',
         'download_count': model.download_count or 0,
         'upload_date': model.upload_date,
         'tags': model.tags or [],
+        'asset_category': model.asset_category,
+        'asset_styles': model.asset_styles or [],
+        'asset_types': model.asset_types or [],
         'view_url': view_url,
         'download_url': download_url,
         'detail_url': url_for('main.model_detail', model_id=model.id),
@@ -373,6 +403,12 @@ def animations():
             _animation_asset_item(model, generated=True)
             for model in Model3D.list_generated_vrma_for_user(user_id)
             if (model.file_format or '').lower() != 'vrma'
+        )
+        generated_ids = {item['model_id'] for item in items if item['id'].endswith(':vrma')}
+        items.extend(
+            _animation_asset_item(model, source_only=True)
+            for model in Model3D.list_animation_sources_for_user(user_id)
+            if model.id not in generated_ids
         )
         if search:
             items = [

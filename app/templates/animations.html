@@ -83,7 +83,7 @@
                 <video class="w-full h-full object-cover lazy-media" loop muted playsinline preload="none"
                        data-preview-src="{{ clip.preview_url }}"
                        poster="{{ clip.thumbnail_url or '' }}"></video>
-                {% elif preview_avatar_url %}
+                {% elif preview_avatar_url and clip.playable and (capture_clip_id == clip.id or capture_clip_id == clip.model_id) %}
                 <div id="animation-vrm-preview-{{ loop.index }}"
                      class="animation-vrm-preview absolute inset-0"
                      data-model-id="{{ clip.model_id }}"
@@ -98,6 +98,14 @@
                 {% elif clip.thumbnail_url %}
                 <img alt="{{ clip.name }}" class="w-full h-full object-cover lazy-media"
                      loading="lazy" data-img-src="{{ clip.thumbnail_url }}">
+                {% elif not clip.playable %}
+                <div class="motion-placeholder absolute inset-0 flex items-center justify-center p-4 text-center">
+                    <div>
+                        <div class="text-3xl text-amber-500 mb-2"><i class="fas fa-triangle-exclamation"></i></div>
+                        <div class="text-sm font-medium text-gray-700">VRMA conversion needed</div>
+                        <div class="text-xs text-gray-500 mt-1">{{ clip.file_format|upper }} source</div>
+                    </div>
+                </div>
                 {% else %}
                 <div class="motion-placeholder absolute inset-0 flex items-center justify-center">
                     <div class="relative w-24 h-24 text-indigo-700">
@@ -117,10 +125,20 @@
                 <a href="{{ clip.detail_url }}"
                    class="font-semibold text-gray-900 hover:text-indigo-700 truncate"
                    title="{{ clip.name }}">{{ clip.name }}</a>
+                {% if clip.description %}
+                <p class="mt-1 text-xs text-gray-500 line-clamp-2">{{ clip.description }}</p>
+                {% endif %}
                 <div class="mt-1 flex justify-between items-center text-xs text-gray-400">
                     <span class="truncate">{{ clip.owner_username }}</span>
                     <span><i class="fas fa-download mr-0.5"></i>{{ clip.download_count }}</span>
                 </div>
+                {% if clip.conversion_status in ['pending', 'processing'] %}
+                <div class="mt-2 text-xs text-amber-700"><i class="fas fa-spinner fa-spin mr-1"></i>Converting animation</div>
+                {% elif clip.conversion_status == 'failed' %}
+                <div class="mt-2 text-xs text-red-700" title="{{ clip.conversion_error or 'Conversion failed' }}">
+                    <i class="fas fa-exclamation-triangle mr-1"></i>Conversion failed
+                </div>
+                {% endif %}
                 {% if clip.tags %}
                 <div class="flex flex-wrap gap-1 mt-3">
                     {% for tag in clip.tags[:4] %}
@@ -135,15 +153,127 @@
                     </a>
                     <a href="{{ clip.download_url }}"
                        class="inline-flex items-center gap-1 rounded bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-700">
-                        <i class="fas fa-download"></i> VRMA
+                        <i class="fas fa-download"></i> {{ 'VRMA' if clip.playable else clip.file_format|upper }}
                     </a>
+                    {% if clip.can_manage %}
+                    <button type="button" onclick="toggleAnimationEdit('{{ clip.model_id }}')"
+                            class="inline-flex items-center gap-1 rounded bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-700 hover:bg-blue-100">
+                        <i class="fas fa-pen"></i> Edit
+                    </button>
+                    <button type="button" onclick="enrichAnimation('{{ clip.model_id }}', this)"
+                            class="inline-flex items-center gap-1 rounded bg-purple-50 px-3 py-1.5 text-xs font-medium text-purple-700 hover:bg-purple-100">
+                        <i class="fas fa-robot"></i>
+                    </button>
+                    <button type="button" onclick="deleteAnimation('{{ clip.model_id }}')"
+                            class="inline-flex items-center gap-1 rounded bg-red-50 px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-100">
+                        <i class="fas fa-trash"></i>
+                    </button>
+                    {% endif %}
                 </div>
+                {% if clip.can_manage %}
+                <form id="animation-edit-{{ clip.model_id }}" class="hidden mt-4 space-y-2 border-t border-gray-100 pt-3"
+                      onsubmit="return saveAnimationEdit(event, '{{ clip.model_id }}')">
+                    <input id="anim-name-{{ clip.model_id }}" type="text" value="{{ clip.name }}"
+                           class="w-full border border-gray-300 rounded px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                    <textarea id="anim-desc-{{ clip.model_id }}" rows="3"
+                              class="w-full border border-gray-300 rounded px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500">{{ clip.description }}</textarea>
+                    <input id="anim-tags-{{ clip.model_id }}" type="text" value="{{ clip.tags|join(', ') }}"
+                           class="w-full border border-gray-300 rounded px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                           placeholder="tags, comma-separated">
+                    <div class="grid grid-cols-3 gap-2">
+                        <input id="anim-category-{{ clip.model_id }}" type="text" value="{{ clip.asset_category or '' }}"
+                               class="border border-gray-300 rounded px-2 py-1.5 text-xs" placeholder="category">
+                        <input id="anim-styles-{{ clip.model_id }}" type="text" value="{{ clip.asset_styles|join(', ') }}"
+                               class="border border-gray-300 rounded px-2 py-1.5 text-xs" placeholder="styles">
+                        <input id="anim-types-{{ clip.model_id }}" type="text" value="{{ clip.asset_types|join(', ') }}"
+                               class="border border-gray-300 rounded px-2 py-1.5 text-xs" placeholder="types">
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <button type="submit" class="rounded bg-green-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-green-700">Save</button>
+                        <button type="button" onclick="toggleAnimationEdit('{{ clip.model_id }}')"
+                                class="rounded bg-gray-100 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-200">Cancel</button>
+                    </div>
+                </form>
+                {% endif %}
             </div>
         </div>
         {% endfor %}
     </div>
     <script>
         window.LivePreviews.observeMediaIn(document.getElementById('animation-grid'));
+
+        function toggleAnimationEdit(modelId) {
+            const form = document.getElementById(`animation-edit-${modelId}`);
+            if (form) form.classList.toggle('hidden');
+        }
+
+        async function saveAnimationEdit(event, modelId) {
+            event.preventDefault();
+            const btn = event.target.querySelector('button[type="submit"]');
+            const original = btn ? btn.textContent : '';
+            if (btn) { btn.disabled = true; btn.textContent = 'Saving...'; }
+            try {
+                const response = await fetch(`/api/model/${modelId}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                    body: JSON.stringify({
+                        name: document.getElementById(`anim-name-${modelId}`).value.trim(),
+                        description: document.getElementById(`anim-desc-${modelId}`).value.trim(),
+                        tags: document.getElementById(`anim-tags-${modelId}`).value,
+                        asset_category: document.getElementById(`anim-category-${modelId}`).value,
+                        asset_styles: document.getElementById(`anim-styles-${modelId}`).value,
+                        asset_types: document.getElementById(`anim-types-${modelId}`).value,
+                    })
+                });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok || !data.success) throw new Error(data.error || `Save failed (HTTP ${response.status}).`);
+                location.reload();
+            } catch (err) {
+                alert('Error saving animation: ' + err.message);
+            } finally {
+                if (btn) { btn.disabled = false; btn.textContent = original; }
+            }
+            return false;
+        }
+
+        async function enrichAnimation(modelId, btn) {
+            const icon = btn && btn.querySelector('i');
+            const original = icon ? icon.className : '';
+            if (btn) btn.disabled = true;
+            if (icon) icon.className = 'fas fa-spinner fa-spin';
+            try {
+                const response = await fetch(`/api/model/${modelId}/ai/autotag`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                    body: JSON.stringify({
+                        async: false,
+                        overwrite: true,
+                        include_title: true,
+                        include_description: true,
+                        context: { source: 'animations' }
+                    })
+                });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok || !data.success) throw new Error(data.detail || data.error || `Enrichment failed (HTTP ${response.status}).`);
+                location.reload();
+            } catch (err) {
+                alert('Error enriching animation: ' + err.message);
+                if (icon) icon.className = original;
+                if (btn) btn.disabled = false;
+            }
+        }
+
+        async function deleteAnimation(modelId) {
+            if (!confirm('Delete this animation record? This cannot be undone.')) return;
+            try {
+                const response = await fetch(`/api/model/${modelId}`, { method: 'DELETE' });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(data.error || `Delete failed (HTTP ${response.status}).`);
+                location.reload();
+            } catch (err) {
+                alert('Error deleting animation: ' + err.message);
+            }
+        }
     </script>
     {% if preview_avatar_url %}
     <script>

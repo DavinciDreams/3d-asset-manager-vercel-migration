@@ -418,6 +418,20 @@ class Model3D:
     def get_vrma_data(self):
         return self._read_stored_file(self.vrma_file_id)
 
+    def is_animation_carrier(self):
+        runtime = self.runtime_metadata or {}
+        upload = runtime.get("upload") if isinstance(runtime, dict) else {}
+        tags = {str(tag or "").strip().lower() for tag in (self.tags or [])}
+        asset_types = {str(tag or "").strip().lower() for tag in (self.asset_types or [])}
+        return (
+            bool(self.vrma_file_id)
+            or (self.file_format or "").lower() in {"vrma", "bvh"}
+            or self.asset_category == "animation"
+            or bool(tags & {"animation-source", "animation-library", "vrma-library"})
+            or bool(asset_types & {"animation", "avatar-animation"})
+            or (isinstance(upload, dict) and upload.get("source") == "vrma-library-import")
+        )
+
     def get_file_size_formatted(self):
         if not self.file_size:
             return "Unknown"
@@ -693,8 +707,30 @@ class Model3D:
         engine = current_app.config["DB_ENGINE"]
         if engine.dialect.name == "sqlite":
             safe_value = str(value).replace("%", "\\%").replace("_", "\\_").replace('"', '\\"')
-            return cast(column, String).like(f'%"{safe_value}"%', escape="\\")
-        return column.contains([value])
+            return func.coalesce(cast(column, String), "").like(f'%"{safe_value}"%', escape="\\")
+        return and_(column.is_not(None), column.contains([value]))
+
+    @staticmethod
+    def _animation_carrier_predicate():
+        """Rows that should live in the animation catalog, not model browse.
+
+        A clean generated clip has vrma_file_id. Older FBX library imports can
+        miss that field if conversion failed, so also recognize their source
+        metadata/category/tags to keep raw FBX animation shells out of asset
+        browse.
+        """
+        runtime_text = func.lower(func.coalesce(cast(models.c.runtime_metadata, String), ""))
+        return or_(
+            models.c.vrma_file_id.is_not(None),
+            models.c.file_format.in_(["vrma", "bvh"]),
+            models.c.asset_category == "animation",
+            Model3D._json_list_contains(models.c.tags, "animation-source"),
+            Model3D._json_list_contains(models.c.tags, "animation-library"),
+            Model3D._json_list_contains(models.c.tags, "vrma-library"),
+            Model3D._json_list_contains(models.c.asset_types, "animation"),
+            Model3D._json_list_contains(models.c.asset_types, "avatar-animation"),
+            runtime_text.like("%vrma-library-import%"),
+        )
 
     @staticmethod
     def _facet_predicates(category=None, style=None, asset_type=None):
@@ -742,7 +778,7 @@ class Model3D:
                 str(fmt).strip().lower() for fmt in exclude_formats if str(fmt).strip()
             ]))
         if exclude_animation_carriers:
-            predicates.append(models.c.vrma_file_id.is_(None))
+            predicates.append(~Model3D._animation_carrier_predicate())
         search_predicate = Model3D._search_predicate(search)
         if search_predicate is not None:
             predicates.append(search_predicate)
@@ -784,7 +820,7 @@ class Model3D:
                 str(fmt).strip().lower() for fmt in exclude_formats if str(fmt).strip()
             ]))
         if exclude_animation_carriers:
-            predicates.append(models.c.vrma_file_id.is_(None))
+            predicates.append(~Model3D._animation_carrier_predicate())
         predicates.extend(Model3D._tag_predicates(tag))
         predicates.extend(Model3D._facet_predicates(category=category, style=style, asset_type=asset_type))
         where = and_(*predicates) if predicates else true()
@@ -837,7 +873,7 @@ class Model3D:
                     str(fmt).strip().lower() for fmt in exclude_formats if str(fmt).strip()
                 ]))
             if exclude_animation_carriers:
-                predicates.append(models.c.vrma_file_id.is_(None))
+                predicates.append(~Model3D._animation_carrier_predicate())
             return Model3D._distinct_tags(and_(*predicates))
         except Exception as e:
             print(f"Error getting user tags: {e}")
@@ -848,7 +884,7 @@ class Model3D:
         try:
             predicates = [models.c.is_public.is_(True)]
             if exclude_animation_carriers:
-                predicates.append(models.c.vrma_file_id.is_(None))
+                predicates.append(~Model3D._animation_carrier_predicate())
             return Model3D._distinct_tags(and_(*predicates))
         except Exception as e:
             print(f"Error getting public tags: {e}")
@@ -862,7 +898,7 @@ class Model3D:
                 str(fmt).strip().lower() for fmt in exclude_formats if str(fmt).strip()
             ]))
         if exclude_animation_carriers:
-            predicates.append(models.c.vrma_file_id.is_(None))
+            predicates.append(~Model3D._animation_carrier_predicate())
         where = and_(*predicates)
         return {
             "categories": Model3D._distinct_column_values(models.c.asset_category, where),
@@ -874,7 +910,7 @@ class Model3D:
     def get_public_facets(exclude_animation_carriers=False):
         predicates = [models.c.is_public.is_(True)]
         if exclude_animation_carriers:
-            predicates.append(models.c.vrma_file_id.is_(None))
+            predicates.append(~Model3D._animation_carrier_predicate())
         where = and_(*predicates)
         return {
             "categories": Model3D._distinct_column_values(models.c.asset_category, where),
@@ -914,6 +950,26 @@ class Model3D:
     def list_generated_vrma_for_user(user_id=None):
         engine = current_app.config["DB_ENGINE"]
         predicates = [models.c.vrma_file_id.is_not(None)]
+        if user_id:
+            predicates.append(or_(models.c.is_public.is_(True), models.c.user_id == str(user_id)))
+        else:
+            predicates.append(models.c.is_public.is_(True))
+
+        with engine.begin() as conn:
+            rows = conn.execute(
+                select(models).where(and_(*predicates)).order_by(models.c.name.asc())
+            ).mappings().all()
+        return [Model3D.from_doc(row) for row in rows]
+
+    @staticmethod
+    def list_animation_sources_for_user(user_id=None):
+        """Animation catalog rows that are source files or failed/pending
+        conversion records rather than native .vrma uploads."""
+        engine = current_app.config["DB_ENGINE"]
+        predicates = [
+            Model3D._animation_carrier_predicate(),
+            models.c.file_format != "vrma",
+        ]
         if user_id:
             predicates.append(or_(models.c.is_public.is_(True), models.c.user_id == str(user_id)))
         else:
