@@ -21,6 +21,7 @@ os.environ.pop("ZAI_API_KEY", None)
 os.environ.pop("Z_AI_API_KEY", None)
 
 from app import create_app
+from app import conversion
 from app.models import Model3D, ModelVariant, User
 
 
@@ -234,6 +235,55 @@ def test_upload_derives_rig_and_animation_metadata_from_glb():
     assert fetched_model["effective_mesh_stats"] == {"vertices": 24, "triangles": 12, "primitives": 1}
     assert fetched_model["game_optimized"]["physical"]["height"] == 1
     assert fetched_model["effective_physical_metadata"]["suggested_scale"] == 1
+
+
+def test_humanoid_glb_upload_auto_creates_vrm_variant(monkeypatch):
+    app = create_app()
+    client = app.test_client()
+    headers = {"Authorization": "Bearer test-token"}
+    monkeypatch.setenv("AUTO_GAME_OPTIMIZE", "0")
+
+    created = {"called": False}
+
+    def fake_convert(model, data, author=None):
+        created["called"] = True
+        variant, _old = ModelVariant.upsert(
+            model.id,
+            "vrm",
+            model.gridfs_file_id,
+            file_format="vrm",
+            size=len(data),
+            status="ready",
+        )
+        return variant, False
+
+    import app.api as api
+    monkeypatch.setattr(api, "_convert_glb_bytes_to_vrm", fake_convert)
+
+    glb = _minimal_glb({
+        "asset": {"version": "2.0"},
+        "nodes": [{"name": name} for name in sorted(conversion.MIXAMO_BONES)],
+    })
+    upload = client.post("/api/upload", headers=headers, data={
+        "is_public": "false",
+        "file": (io.BytesIO(glb), "mixamo_avatar.glb"),
+    }, content_type="multipart/form-data")
+    assert upload.status_code == 201, upload.get_json()
+    model_id = upload.get_json()["model"]["id"]
+    assert created["called"] is True
+
+    with app.app_context():
+        variant = ModelVariant.get(model_id, "vrm")
+    assert variant is not None
+    assert variant.status == "ready"
+
+
+def test_vrm_viewer_supports_compressed_vrm_assets():
+    viewer = Path("app/templates/_vrm_viewer.html").read_text(encoding="utf-8")
+    assert "KTX2Loader" in viewer
+    assert "MeshoptDecoder" in viewer
+    assert "setKTX2Loader" in viewer
+    assert "setMeshoptDecoder" in viewer
 
 
 def test_admin_media_capture_queue_lists_only_renderable_missing_media():

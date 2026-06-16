@@ -117,6 +117,44 @@ def _force_meshopt_required_for_external_fallback(glb_bytes):
         return glb_bytes
 
 
+def _gltf_container_json_from_bytes(data):
+    if not data:
+        return None
+    try:
+        if data[:4] == _GLB_MAGIC:
+            if len(data) < 20:
+                return None
+            magic, version, declared_length = struct.unpack_from('<4sII', data, 0)
+            if magic != _GLB_MAGIC or version != 2 or declared_length > len(data):
+                return None
+            offset = 12
+            while offset + 8 <= declared_length:
+                chunk_length, chunk_type = struct.unpack_from('<II', data, offset)
+                data_start = offset + 8
+                data_end = data_start + chunk_length
+                if data_end > declared_length:
+                    return None
+                if chunk_type == _GLB_JSON_CHUNK:
+                    return json.loads(data[data_start:data_end].decode('utf-8').rstrip(' \t\r\n\0'))
+                offset = data_end
+            return None
+        return json.loads(data.decode('utf-8', errors='ignore'))
+    except Exception as error:
+        print(f"GLTF metadata parse warning: {error}")
+        return None
+
+
+def _gltf_node_names_from_bytes(data):
+    gltf = _gltf_container_json_from_bytes(data)
+    if not isinstance(gltf, dict):
+        return set()
+    return {
+        node.get('name')
+        for node in (gltf.get('nodes') or [])
+        if isinstance(node, dict) and node.get('name')
+    }
+
+
 def _glb_is_meshopt_compressed(glb_bytes):
     """True if the GLB already uses EXT_meshopt_compression (i.e. it is already
     gltfpack/meshopt output). Such files are effectively already game-optimized,
@@ -2573,6 +2611,7 @@ def _store_one_upload(file, base_name, description, is_public, tags, allowed_ext
     from app.conversion import enqueue
     enqueue(model, enabled=current_app.config.get('ENABLE_CONVERSION', True))
     model.save()
+    _maybe_create_vrm_avatar_variant(model, file_content)
     # Auto-generate a game-optimized variant for GLB/GLTF uploads so every
     # asset gets a small, performant browse preview/download by default.
     _maybe_autostart_game_optimization(model)
@@ -2649,6 +2688,29 @@ def _media_capture_ready(model):
     if fmt in ('glb', 'gltf', 'vrm'):
         return True
     return bool(model.viewable_file_id)
+
+
+def _maybe_create_vrm_avatar_variant(model, file_content):
+    if os.environ.get('AUTO_VRM_FROM_HUMANOID_GLB', '1').lower() in ('0', 'false', 'no', 'off'):
+        return False
+    fmt = (model.file_format or '').lower()
+    if fmt not in ('glb', 'gltf'):
+        return False
+    if ModelVariant.get(model.id, 'vrm'):
+        return False
+    try:
+        from app.conversion import looks_humanoid
+        if not looks_humanoid(_gltf_node_names_from_bytes(file_content)):
+            return False
+        author = None
+        if model.user_id:
+            owner = User.get_by_id(model.user_id)
+            author = owner.username if owner else None
+        variant, _optimized = _convert_glb_bytes_to_vrm(model, file_content, author)
+        return bool(variant and variant.file_id)
+    except Exception as error:
+        print(f"Auto VRM avatar generation skipped for {model.id}: {error}", flush=True)
+        return False
 
 
 def _media_capture_queue_item(model, *, force_capture=False):

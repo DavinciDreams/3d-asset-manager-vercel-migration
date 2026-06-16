@@ -1956,9 +1956,16 @@ document.addEventListener('DOMContentLoaded', function() {
             // Reveal the VRM download in the Export menu.
             if (exportVrmLink) exportVrmLink.classList.remove('hidden');
             if (exportVrmDivider) exportVrmDivider.classList.remove('hidden');
+            const toggle = document.getElementById('variant-toggle');
+            const vrmBtn = document.getElementById('variant-btn-vrm');
+            if (toggle) toggle.classList.remove('hidden');
+            if (vrmBtn) vrmBtn.classList.remove('hidden');
             if (label) label.textContent = 'VRM ready ✓';
-            alert('VRM avatar created. Download it from the "Export as" menu (VRM avatar), '
-                + 'or upload the .vrm to view it in the VRM viewer and apply animations.');
+            if (vrmBtn && document.getElementById('vrm-avatar-wrap')) {
+                switchVariant('vrm');
+            } else {
+                alert('VRM avatar created. Download it from the "Export as" menu (VRM avatar).');
+            }
         } catch (err) {
             if (label) label.textContent = original;
             alert('Could not make a VRM: ' + err.message
@@ -2496,9 +2503,8 @@ document.addEventListener('DOMContentLoaded', function() {
 {% include "_preview_capture.html" %}
 {% endif %}
 
-{% if model.file_format == 'vrm' or vrm_variant %}
+{% if model.file_format != 'vrma' %}
 {% include "_vrm_viewer.html" %}
-{% if model.file_format not in ['vrm', 'vrma'] %}{% include "_preview_capture.html" %}{% endif %}
 <script>
 // Initialize the VRM avatar viewer and wire up the VRMA picker. Serves two
 // cases: a NATIVE .vrm model (auto-starts), and a GLB model that has a derived
