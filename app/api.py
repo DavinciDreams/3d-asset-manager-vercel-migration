@@ -742,6 +742,118 @@ def list_models():
         print(f"API list models error: {e}")
         return jsonify({'error': 'Failed to retrieve models'}), 500
 
+
+def _animated_model_payload(model):
+    owner = User.get_by_id(model.user_id)
+    fmt = (model.file_format or '').lower()
+    viewable = bool(model.viewable_file_id) or fmt in ('glb', 'gltf')
+    game_variant = ModelVariant.get(model.id, 'game') if viewable else None
+    fixed_variant = ModelVariant.get(model.id, 'fixed_eyes') if viewable else None
+    game_uses_fixed = bool(
+        game_variant
+        and isinstance(game_variant.settings, dict)
+        and game_variant.settings.get('source_is_fixed_eyes')
+    )
+    current_game = bool(game_variant and game_variant.file_id and (not fixed_variant or game_uses_fixed))
+    if current_game:
+        view_url = url_for('api.get_game_optimized', model_id=model.id)
+    elif fixed_variant and fixed_variant.file_id:
+        view_url = url_for('api.get_fixed_eyes', model_id=model.id)
+    elif viewable:
+        view_url = url_for('api.view_model', model_id=model.id) + '?viewer=2'
+    else:
+        view_url = None
+
+    payload = {
+        'id': model.id,
+        'name': model.name,
+        'description': model.description,
+        'file_format': model.file_format,
+        'file_size': model.file_size,
+        'original_filename': model.original_filename,
+        'is_public': model.is_public,
+        'upload_date': model.upload_date.isoformat() if model.upload_date else None,
+        'download_count': model.download_count,
+        'conversion_status': model.conversion_status,
+        'has_viewable': viewable,
+        'has_vrma': bool(model.vrma_file_id),
+        'tags': model.tags or [],
+        'asset_category': model.asset_category,
+        'asset_styles': model.asset_styles or [],
+        'asset_types': model.asset_types or [],
+        'runtime_metadata': model.runtime_metadata or {},
+        'default_animation': model.default_animation or None,
+        'camera_orbit': model.camera_orbit or None,
+        'view_url': view_url,
+        'download_url': url_for('api.download_model', model_id=model.id),
+        'detail_url': url_for('main.model_detail', model_id=model.id),
+        'owner': {
+            'id': owner.id if owner else None,
+            'username': owner.username if owner else 'Unknown',
+        },
+        'has_game_optimized': current_game,
+        'has_fixed_eyes': bool(fixed_variant and fixed_variant.file_id),
+        'game_uses_fixed': game_uses_fixed,
+        **_media_presence_fields(model),
+    }
+    if fixed_variant and fixed_variant.file_id:
+        payload['fixed_eyes_url'] = url_for('api.get_fixed_eyes', model_id=model.id)
+    if current_game:
+        payload['game_optimized_url'] = url_for('api.get_game_optimized', model_id=model.id)
+    return payload
+
+
+@api_bp.route('/animated-models')
+def list_animated_models():
+    """List loadable GLB/GLTF models that include both a rig and animations."""
+    try:
+        page = max(request.args.get('page', 1, type=int), 1)
+        per_page = min(max(request.args.get('per_page', 20, type=int), 1), 100)
+        sort = request.args.get('sort', 'newest')
+        user_only = request.args.get('user_only', 'false').lower() == 'true'
+        include_private = request.args.get('include_private', 'false').lower() == 'true'
+        formats = Model3D.normalize_tags(request.args.getlist('format'))
+
+        principal, service = _api_principal()
+        if user_only and principal:
+            models, total = Model3D.list_animated_models(
+                page=page, per_page=per_page, sort=sort, public_only=False,
+                owner_id=principal.id, formats=formats or None)
+        elif user_only and service:
+            return jsonify({'error': 'API token is valid, but no API upload user is configured.'}), 409
+        elif include_private and service:
+            models, total = Model3D.list_animated_models(
+                page=page, per_page=per_page, sort=sort, public_only=False,
+                formats=formats or None)
+        else:
+            models, total = Model3D.list_animated_models(
+                page=page, per_page=per_page, sort=sort, public_only=True,
+                formats=formats or None)
+
+        total_pages = (total + per_page - 1) // per_page
+        return jsonify({
+            'models': [_animated_model_payload(model) for model in models],
+            'pagination': {
+                'page': page,
+                'per_page': per_page,
+                'total': total,
+                'pages': total_pages,
+                'has_prev': page > 1,
+                'has_next': page < total_pages,
+            },
+            'filters': {
+                'asset_types': ['rigged', 'animated'],
+                'formats': [
+                    fmt for fmt in (formats or ['glb', 'gltf'])
+                    if fmt in ('glb', 'gltf')
+                ] or ['glb', 'gltf'],
+            },
+        })
+    except Exception as e:
+        print(f"API animated models error: {e}")
+        return jsonify({'error': 'Failed to retrieve animated models'}), 500
+
+
 @api_bp.route('/download/<model_id>')
 def download_model(model_id):
     """Download model file"""
@@ -2045,18 +2157,28 @@ def list_vrma():
 
 
 @api_bp.route('/vrm')
+@api_bp.route('/vrm-models')
 def list_vrm():
     """List VRM avatar assets visible to the caller: models uploaded as native
     .vrm, plus models that have a derived VRM avatar (a 'vrm' variant from
     glb2vrm). Each item carries fetch + download URLs so an external client can
     load or save the avatar. The counterpart to GET /api/vrma."""
     try:
-        user_id = current_user.id if current_user.is_authenticated else None
+        user_only = request.args.get('user_only', 'false').lower() == 'true'
+        include_private = request.args.get('include_private', 'false').lower() == 'true'
+        principal, service = _api_principal()
+        if user_only and service and not principal:
+            return jsonify({'error': 'API token is valid, but no API upload user is configured.'}), 409
+        user_id = principal.id if principal else None
+        include_all_private = bool(include_private and service)
+        owner_only = bool(user_only and principal)
         items = []
         seen = set()
 
         # Native .vrm uploads: served via the standard view/download routes.
-        for model in Model3D.list_vrm_for_user(user_id):
+        for model in Model3D.list_vrm_for_user(user_id, include_private=include_all_private):
+            if owner_only and model.user_id != user_id:
+                continue
             if model.id in seen:
                 continue
             seen.add(model.id)
@@ -2073,7 +2195,9 @@ def list_vrm():
             })
 
         # Derived VRM variants (e.g. a rigged GLB converted via glb2vrm).
-        for model in Model3D.list_with_vrm_variant_for_user(user_id):
+        for model in Model3D.list_with_vrm_variant_for_user(user_id, include_private=include_all_private):
+            if owner_only and model.user_id != user_id:
+                continue
             if model.id in seen:
                 continue
             seen.add(model.id)

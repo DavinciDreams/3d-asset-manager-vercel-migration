@@ -450,6 +450,62 @@ def get_openapi_spec(base_url=''):
                     },
                 }
             },
+            '/animated-models': {
+                'get': {
+                    'tags': ['Models'],
+                    'summary': 'List animated rigged GLB/GLTF models',
+                    'description': (
+                        'Narrow catalog endpoint for realtime clients. Returns '
+                        'loadable GLB/GLTF assets tagged as both rigged and '
+                        'animated, excluding VRMA/BVH clips and animation-source '
+                        'records. Trusted service tokens can pass '
+                        '`include_private=true`.'
+                    ),
+                    'security': [{'sessionCookie': []}, {'bearerAuth': []}],
+                    'parameters': [
+                        {
+                            'name': 'page', 'in': 'query',
+                            'schema': {'type': 'integer', 'default': 1, 'minimum': 1},
+                        },
+                        {
+                            'name': 'per_page', 'in': 'query',
+                            'description': 'Items per page (max 100).',
+                            'schema': {'type': 'integer', 'default': 20, 'maximum': 100},
+                        },
+                        {
+                            'name': 'sort', 'in': 'query',
+                            'schema': {'type': 'string', 'default': 'newest'},
+                        },
+                        {
+                            'name': 'format', 'in': 'query',
+                            'description': 'Optional repeated filter. Only glb and gltf are accepted.',
+                            'schema': {'type': 'array', 'items': {'type': 'string', 'enum': ['glb', 'gltf']}},
+                            'style': 'form',
+                            'explode': True,
+                        },
+                        {
+                            'name': 'user_only', 'in': 'query',
+                            'schema': {'type': 'boolean', 'default': False},
+                        },
+                        {
+                            'name': 'include_private', 'in': 'query',
+                            'description': 'Trusted service tokens only. Include private assets across all owners.',
+                            'schema': {'type': 'boolean', 'default': False},
+                        },
+                    ],
+                    'responses': {
+                        '200': {
+                            'description': 'Paginated animated model list',
+                            'content': {
+                                'application/json': {
+                                    'schema': {'$ref': '#/components/schemas/ModelListResponse'}
+                                }
+                            },
+                        },
+                        '500': _error_response('Failed to retrieve animated models'),
+                    },
+                }
+            },
             '/user/models': {
                 'get': {
                     'tags': ['Models'],
@@ -554,6 +610,46 @@ def get_openapi_spec(base_url=''):
                                                     },
                                                 },
                                             },
+                                            'count': {'type': 'integer'},
+                                        },
+                                    }
+                                }
+                            },
+                        },
+                    },
+                }
+            },
+            '/vrm-models': {
+                'get': {
+                    'tags': ['Files'],
+                    'summary': 'List VRM avatar models',
+                    'description': (
+                        'Alias for `/vrm` with the same response shape. Lists '
+                        'visible native .vrm uploads and derived GLB-to-VRM '
+                        'avatar variants. Trusted service tokens can pass '
+                        '`include_private=true`.'
+                    ),
+                    'security': [{'sessionCookie': []}, {'bearerAuth': []}],
+                    'parameters': [
+                        {
+                            'name': 'user_only', 'in': 'query',
+                            'schema': {'type': 'boolean', 'default': False},
+                        },
+                        {
+                            'name': 'include_private', 'in': 'query',
+                            'description': 'Trusted service tokens only. Include private avatars across all owners.',
+                            'schema': {'type': 'boolean', 'default': False},
+                        },
+                    ],
+                    'responses': {
+                        '200': {
+                            'description': 'Available VRM avatars',
+                            'content': {
+                                'application/json': {
+                                    'schema': {
+                                        'type': 'object',
+                                        'properties': {
+                                            'avatars': {'type': 'array', 'items': {'type': 'object'}},
                                             'count': {'type': 'integer'},
                                         },
                                     }

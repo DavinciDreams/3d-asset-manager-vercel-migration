@@ -799,6 +799,44 @@ class Model3D:
         return [Model3D.from_doc(row) for row in rows], total
 
     @staticmethod
+    def list_animated_models(page=1, per_page=20, sort="newest", public_only=True,
+                             owner_id=None, formats=None):
+        """List renderable model assets that carry their own rig and animation.
+
+        This is intentionally narrower than the general model search: Tellus
+        needs loadable animated avatars/creatures/props, not VRMA/BVH clips or
+        raw animation-library FBX source records.
+        """
+        engine = current_app.config["DB_ENGINE"]
+        allowed_formats = [
+            fmt for fmt in Model3D.normalize_tags(formats or ["glb", "gltf"])
+            if fmt in {"glb", "gltf"}
+        ] or ["glb", "gltf"]
+        predicates = [
+            models.c.file_format.in_(allowed_formats),
+            Model3D._json_list_contains(models.c.asset_types, "rigged"),
+            Model3D._json_list_contains(models.c.asset_types, "animated"),
+            models.c.file_format.not_in(["vrma", "bvh"]),
+        ]
+        if public_only:
+            predicates.append(models.c.is_public.is_(True))
+        if owner_id:
+            predicates.append(models.c.user_id == str(owner_id))
+        where = and_(*predicates)
+
+        with engine.begin() as conn:
+            total = count_rows(conn, models, where)
+            rows = conn.execute(
+                select(models)
+                .where(where)
+                .order_by(Model3D._sort_clause(sort))
+                .offset((page - 1) * per_page)
+                .limit(per_page)
+            ).mappings().all()
+
+        return [Model3D.from_doc(row) for row in rows], total
+
+    @staticmethod
     def get_public_models(page=1, per_page=20, search=None, sort="newest", tag=None,
                           category=None, style=None, asset_type=None, exclude_formats=None,
                           exclude_animation_carriers=False):
@@ -982,14 +1020,15 @@ class Model3D:
         return [Model3D.from_doc(row) for row in rows]
 
     @staticmethod
-    def list_vrm_for_user(user_id=None):
+    def list_vrm_for_user(user_id=None, include_private=False):
         """Models uploaded as a native .vrm avatar, visible to the user."""
         engine = current_app.config["DB_ENGINE"]
         predicates = [models.c.file_format == "vrm"]
-        if user_id:
-            predicates.append(or_(models.c.is_public.is_(True), models.c.user_id == str(user_id)))
-        else:
-            predicates.append(models.c.is_public.is_(True))
+        if not include_private:
+            if user_id:
+                predicates.append(or_(models.c.is_public.is_(True), models.c.user_id == str(user_id)))
+            else:
+                predicates.append(models.c.is_public.is_(True))
 
         with engine.begin() as conn:
             rows = conn.execute(
@@ -998,7 +1037,7 @@ class Model3D:
         return [Model3D.from_doc(row) for row in rows]
 
     @staticmethod
-    def list_with_vrm_variant_for_user(user_id=None):
+    def list_with_vrm_variant_for_user(user_id=None, include_private=False):
         """Models that have a derived VRM avatar (a 'vrm' ModelVariant) -- e.g.
         a rigged GLB converted via glb2vrm. Visible to the user. Joins
         model_variants so we return the source models (one row each)."""
@@ -1007,10 +1046,11 @@ class Model3D:
             model_variants.c.kind == "vrm",
             model_variants.c.file_id.is_not(None),
         ]
-        if user_id:
-            predicates.append(or_(models.c.is_public.is_(True), models.c.user_id == str(user_id)))
-        else:
-            predicates.append(models.c.is_public.is_(True))
+        if not include_private:
+            if user_id:
+                predicates.append(or_(models.c.is_public.is_(True), models.c.user_id == str(user_id)))
+            else:
+                predicates.append(models.c.is_public.is_(True))
 
         with engine.begin() as conn:
             rows = conn.execute(

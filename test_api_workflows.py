@@ -237,6 +237,96 @@ def test_upload_derives_rig_and_animation_metadata_from_glb():
     assert fetched_model["effective_physical_metadata"]["suggested_scale"] == 1
 
 
+def test_animated_models_endpoint_lists_only_loadable_animated_glbs():
+    app = create_app()
+    client = app.test_client()
+    headers = {"Authorization": "Bearer test-token"}
+    animated_glb = _minimal_glb({
+        "asset": {"version": "2.0"},
+        "nodes": [{"mesh": 0, "skin": 0}, {"name": "Hips"}],
+        "meshes": [{"primitives": [{"attributes": {"POSITION": 1}, "indices": 2}]}],
+        "skins": [{"joints": [1]}],
+        "accessors": [
+            {"max": [2.5]},
+            {"count": 12, "min": [-0.5, 0, -0.25], "max": [0.5, 1.75, 0.25]},
+            {"count": 18},
+        ],
+        "animations": [{"name": "Wave", "samplers": [{"input": 0}]}],
+    })
+    static_glb = _minimal_glb({
+        "asset": {"version": "2.0"},
+        "nodes": [{"mesh": 0}],
+        "meshes": [{"primitives": [{"attributes": {"POSITION": 0}}]}],
+        "accessors": [{"count": 8, "min": [0, 0, 0], "max": [1, 1, 1]}],
+    })
+    private_animated_glb = _minimal_glb({
+        "asset": {"version": "2.0"},
+        "nodes": [{"mesh": 0, "skin": 0}, {"name": "Hips"}, {"name": "Arm"}],
+        "meshes": [{"primitives": [{"attributes": {"POSITION": 1}, "indices": 2}]}],
+        "skins": [{"joints": [1, 2]}],
+        "accessors": [
+            {"max": [1.0]},
+            {"count": 20, "min": [-1, 0, -1], "max": [1, 2, 1]},
+            {"count": 30},
+        ],
+        "animations": [{"name": "Dance", "samplers": [{"input": 0}]}],
+    })
+
+    public_upload = client.post("/api/upload", headers=headers, data={
+        "is_public": "true",
+        "file": (io.BytesIO(animated_glb), "public_animated.glb"),
+    }, content_type="multipart/form-data")
+    assert public_upload.status_code == 201, public_upload.get_json()
+    public_id = public_upload.get_json()["model"]["id"]
+
+    static_upload = client.post("/api/upload", headers=headers, data={
+        "is_public": "true",
+        "file": (io.BytesIO(static_glb), "static_tree.glb"),
+    }, content_type="multipart/form-data")
+    assert static_upload.status_code == 201, static_upload.get_json()
+    static_id = static_upload.get_json()["model"]["id"]
+
+    source_upload = client.post("/api/upload", headers=headers, data={
+        "is_public": "true",
+        "asset_types": "rigged, animated",
+        "tags": "animation-source",
+        "file": (io.BytesIO(b"FBX source animation bytes"), "mixamo_source.fbx"),
+    }, content_type="multipart/form-data")
+    assert source_upload.status_code == 201, source_upload.get_json()
+    source_id = source_upload.get_json()["model"]["id"]
+
+    private_upload = client.post("/api/upload", headers=headers, data={
+        "is_public": "false",
+        "file": (io.BytesIO(private_animated_glb), "private_animated.glb"),
+    }, content_type="multipart/form-data")
+    assert private_upload.status_code == 201, private_upload.get_json()
+    private_id = private_upload.get_json()["model"]["id"]
+
+    public_list = client.get("/api/animated-models")
+    assert public_list.status_code == 200, public_list.get_json()
+    public_body = public_list.get_json()
+    ids = {model["id"] for model in public_body["models"]}
+    assert public_id in ids
+    assert static_id not in ids
+    assert source_id not in ids
+    assert private_id not in ids
+    animated_model = next(model for model in public_body["models"] if model["id"] == public_id)
+    assert animated_model["file_format"] == "glb"
+    assert animated_model["asset_types"] == ["rigged", "animated"]
+    assert animated_model["runtime_metadata"]["animations"] == [{"name": "Wave", "duration": 2.5}]
+    assert animated_model["view_url"].endswith(f"/api/view/{public_id}?viewer=2")
+    assert animated_model["download_url"].endswith(f"/api/download/{public_id}")
+    assert public_body["filters"] == {"asset_types": ["rigged", "animated"], "formats": ["glb", "gltf"]}
+
+    private_list = client.get("/api/animated-models?include_private=true", headers=headers)
+    assert private_list.status_code == 200, private_list.get_json()
+    private_ids = {model["id"] for model in private_list.get_json()["models"]}
+    assert public_id in private_ids
+    assert private_id in private_ids
+    assert static_id not in private_ids
+    assert source_id not in private_ids
+
+
 def test_humanoid_glb_upload_auto_creates_vrm_variant(monkeypatch):
     app = create_app()
     client = app.test_client()
@@ -270,6 +360,7 @@ def test_humanoid_glb_upload_auto_creates_vrm_variant(monkeypatch):
     }, content_type="multipart/form-data")
     assert upload.status_code == 201, upload.get_json()
     model_id = upload.get_json()["model"]["id"]
+
     assert created["called"] is True
 
     with app.app_context():
@@ -387,6 +478,13 @@ def test_fbx_source_with_vrm_and_vrma_lives_in_avatar_animation_apis():
     assert upload.status_code == 201, upload.get_json()
     model_id = upload.get_json()["model"]["id"]
 
+    private_vrm_upload = client.post("/api/upload", headers=headers, data={
+        "is_public": "false",
+        "file": (io.BytesIO(b"glTF private vrm" + b"\x09" * 64), "private_avatar.vrm"),
+    }, content_type="multipart/form-data")
+    assert private_vrm_upload.status_code == 201, private_vrm_upload.get_json()
+    private_vrm_id = private_vrm_upload.get_json()["model"]["id"]
+
     with app.app_context():
         source = Model3D.get_by_id(model_id)
         viewable_id = app.config["FILE_STORE"].put(
@@ -430,6 +528,13 @@ def test_fbx_source_with_vrm_and_vrma_lives_in_avatar_animation_apis():
     avatar = next(item for item in avatars.get_json()["avatars"] if item["model_id"] == model_id)
     assert avatar["id"] == model_id + ":vrm"
     assert avatar["view_url"].endswith(f"/api/model/{model_id}/vrm")
+    assert private_vrm_id not in {item["model_id"] for item in avatars.get_json()["avatars"]}
+
+    avatar_models = client.get("/api/vrm-models?include_private=true", headers=headers)
+    assert avatar_models.status_code == 200, avatar_models.get_json()
+    avatar_model_ids = {item["model_id"] for item in avatar_models.get_json()["avatars"]}
+    assert model_id in avatar_model_ids
+    assert private_vrm_id in avatar_model_ids
 
     animations = client.get("/api/vrma")
     assert animations.status_code == 200, animations.get_json()
