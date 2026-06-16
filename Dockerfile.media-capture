@@ -5,6 +5,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /worker
 
+RUN pip install --no-cache-dir "playwright==1.49.1"
+
 COPY scripts/backfill_media_capture.py /worker/scripts/backfill_media_capture.py
 
 CMD ["python", "scripts/backfill_media_capture.py", "--base-url", "http://app:8000", "--kind", "all", "--poll"]
