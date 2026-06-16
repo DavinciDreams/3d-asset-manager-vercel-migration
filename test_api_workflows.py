@@ -73,6 +73,42 @@ def test_derived_conversion_files_are_reused_by_content_hash():
     assert third != first
 
 
+def test_admin_conversion_backfill_force_requeues_done_fbx():
+    app = create_app()
+    client = app.test_client()
+    headers = {"Authorization": "Bearer test-token"}
+
+    upload = client.post("/api/upload", headers=headers, data={
+        "name": "Legacy FBX Avatar",
+        "is_public": "true",
+        "file": (io.BytesIO(b"Kaydara FBX Binary legacy" + b"\x20" * 64), "legacy_avatar.fbx"),
+    }, content_type="multipart/form-data")
+    assert upload.status_code == 201, upload.get_json()
+    model_id = upload.get_json()["model"]["id"]
+    with app.app_context():
+        model = Model3D.get_by_id(model_id)
+        viewable_id = app.config["FILE_STORE"].put(
+            b"legacy glb with external textures",
+            filename="legacy_avatar.glb",
+            content_type="model/gltf-binary",
+            metadata={"derived_for": model_id, "kind": "viewable"},
+        )
+        model.viewable_file_id = str(viewable_id)
+        model.viewable_format = "glb"
+        model.conversion_status = "done"
+        model.save()
+
+    start = client.post("/api/admin/conversion-backfill?force=true&sync=true&limit=20", headers=headers)
+    assert start.status_code == 200, start.get_json()
+    status = start.get_json()
+    assert status.get("running") is False
+    assert status["queued"] >= 1
+    with app.app_context():
+        model = Model3D.get_by_id(model_id)
+    assert model.conversion_status == "pending"
+    assert model.conversion_error is None
+
+
 def _attach_thumbnail(app, model_id):
     with app.app_context():
         model = Model3D.get_by_id(model_id)
@@ -591,6 +627,10 @@ def test_fbx_source_with_vrm_and_vrma_lives_in_avatar_animation_apis():
     assert public_models.status_code == 200, public_models.get_json()
     assert model_id in {item["id"] for item in public_models.get_json()["models"]}
 
+    media_queue = client.get("/api/admin/media-capture/queue?kind=models&limit=20", headers=headers)
+    assert media_queue.status_code == 200, media_queue.get_json()
+    assert model_id in {item["id"] for item in media_queue.get_json()["models"]}
+
     avatars = client.get("/api/vrm")
     assert avatars.status_code == 200, avatars.get_json()
     avatar = next(item for item in avatars.get_json()["avatars"] if item["model_id"] == model_id)
@@ -609,6 +649,18 @@ def test_fbx_source_with_vrm_and_vrma_lives_in_avatar_animation_apis():
     clip = next(item for item in animations.get_json()["animations"] if item["model_id"] == model_id)
     assert clip["id"] == model_id + ":vrma"
     assert clip["view_url"].endswith(f"/api/export/{model_id}?format=vrma")
+
+
+def test_browse_page_renders_with_asset_filters():
+    app = create_app()
+    client = app.test_client()
+
+    for path in ("/browse", "/browse?asset=vrm", "/browse?asset=animated"):
+        response = client.get(path)
+        assert response.status_code == 200
+        html = response.get_data(as_text=True)
+        assert "Browse 3D Models" in html
+        assert 'name="asset"' in html
 
 
 def test_browse_asset_filters_include_vrm_and_animated_models():

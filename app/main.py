@@ -258,6 +258,7 @@ def browse():
         category = Model3D.normalize_category(request.args.get('category'))
         styles = Model3D.normalize_tags(request.args.getlist('style'))
         asset_types = Model3D.normalize_tags(request.args.getlist('type'))
+        asset_kinds = Model3D.normalize_tags(request.args.getlist('asset'))
 
         # Get public models with pagination. Page size matches the /api/models
         # endpoint used by the browse page's infinite scroll so page 1 (rendered
@@ -269,6 +270,7 @@ def browse():
             sort=sort, tag=tags if tags else None,
             category=category, style=styles if styles else None,
             asset_type=asset_types if asset_types else None,
+            asset_kind=asset_kinds if asset_kinds else None,
             exclude_formats=['vrma', 'bvh'],
             exclude_animation_carriers=True)
 

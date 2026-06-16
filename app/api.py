@@ -4141,6 +4141,18 @@ _backfill_state = {
     'finished_at': None,
     'last_error': None,
 }
+_CONVERSION_BACKFILL_LOCK = threading.Lock()
+_conversion_backfill_state = {
+    'running': False,
+    'total': 0,
+    'queued': 0,
+    'skipped': 0,
+    'failed': 0,
+    'current': None,
+    'started_at': None,
+    'finished_at': None,
+    'last_error': None,
+}
 
 
 def _admin_token_ok():
@@ -4235,6 +4247,138 @@ def admin_media_capture_queue():
         'skipped_not_ready': skipped_not_ready,
         'models': items,
     })
+
+
+def _conversion_backfill_candidate(model, *, force=False):
+    fmt = (model.file_format or '').lower()
+    if fmt not in {'fbx', 'bvh'}:
+        return False
+    if force:
+        return True
+    if fmt == 'bvh':
+        return not bool(model.vrma_file_id)
+    if model.conversion_status in (None, '', 'pending', 'processing', 'failed'):
+        return True
+    runtime = model.runtime_metadata or {}
+    upload = runtime.get('upload') if isinstance(runtime, dict) else {}
+    tags = {str(tag or '').strip().lower() for tag in (model.tags or [])}
+    asset_types = {str(tag or '').strip().lower() for tag in (model.asset_types or [])}
+    animation_like = (
+        bool(model.vrma_file_id)
+        or model.asset_category == 'animation'
+        or bool(tags & {'animation-source', 'animation-library', 'vrma-library'})
+        or bool(asset_types & {'animation', 'avatar-animation'})
+        or (isinstance(upload, dict) and upload.get('source') == 'vrma-library-import')
+    )
+    if animation_like and not model.vrma_file_id:
+        return True
+    if not model.viewable_file_id and not animation_like:
+        return True
+    return False
+
+
+def _run_conversion_backfill(app, *, force=False, limit=None):
+    with app.app_context():
+        try:
+            from app.conversion import enqueue
+            with app.config['DB_ENGINE'].begin() as conn:
+                query = (
+                    select(model_rows)
+                    .where(model_rows.c.file_format.in_(['fbx', 'bvh']))
+                    .order_by(model_rows.c.upload_date.asc())
+                )
+                if limit:
+                    query = query.limit(int(limit))
+                rows = conn.execute(query).mappings().all()
+
+            candidates = [Model3D.from_doc(row) for row in rows]
+            models_to_queue = [
+                model for model in candidates
+                if _conversion_backfill_candidate(model, force=force)
+            ]
+            with _CONVERSION_BACKFILL_LOCK:
+                _conversion_backfill_state['total'] = len(models_to_queue)
+                _conversion_backfill_state['skipped'] = len(rows) - len(models_to_queue)
+
+            for model in models_to_queue:
+                with _CONVERSION_BACKFILL_LOCK:
+                    _conversion_backfill_state['current'] = model.name or model.id
+                try:
+                    enqueue(model, enabled=True)
+                    model.conversion_error = None
+                    model.conversion_claimed_at = None
+                    model.save()
+                    with _CONVERSION_BACKFILL_LOCK:
+                        _conversion_backfill_state['queued'] += 1
+                except Exception as e:
+                    print(f"Conversion backfill enqueue failed for {model.id}: {e}", flush=True)
+                    with _CONVERSION_BACKFILL_LOCK:
+                        _conversion_backfill_state['failed'] += 1
+                        _conversion_backfill_state['last_error'] = f"{model.name or model.id}: {str(e)[:200]}"
+        except Exception as e:
+            print(f"Conversion backfill runner crashed: {e}", flush=True)
+            with _CONVERSION_BACKFILL_LOCK:
+                _conversion_backfill_state['last_error'] = str(e)[:300]
+        finally:
+            with _CONVERSION_BACKFILL_LOCK:
+                _conversion_backfill_state['running'] = False
+                _conversion_backfill_state['current'] = None
+                _conversion_backfill_state['finished_at'] = datetime.utcnow().isoformat()
+
+
+@api_bp.route('/admin/conversion-backfill', methods=['POST', 'GET'])
+def admin_conversion_backfill():
+    """Bulk requeue FBX/BVH conversion.
+
+    Use force=true to reconvert already-done FBX rows so legacy viewable GLBs
+    are replaced by self-contained embedded-texture GLBs and humanoid FBX rows
+    are stamped as avatar/VRM assets.
+    """
+    if not _admin_token_ok():
+        return jsonify({'error': 'Unauthorized'}), 401
+    force = request.args.get('force', 'false').lower() in {'1', 'true', 'yes'}
+    sync = request.args.get('sync', 'false').lower() in {'1', 'true', 'yes'}
+    limit = request.args.get('limit', type=int)
+    if limit is not None:
+        limit = max(1, min(limit, 1000))
+    with _CONVERSION_BACKFILL_LOCK:
+        if _conversion_backfill_state['running']:
+            return jsonify({'status': 'already_running', **_conversion_backfill_state})
+        _conversion_backfill_state.update({
+            'running': True,
+            'total': 0,
+            'queued': 0,
+            'skipped': 0,
+            'failed': 0,
+            'current': None,
+            'started_at': datetime.utcnow().isoformat(),
+            'finished_at': None,
+            'last_error': None,
+            'force': force,
+            'limit': limit,
+            'sync': sync,
+        })
+    if sync:
+        _run_conversion_backfill(current_app._get_current_object(), force=force, limit=limit)
+        with _CONVERSION_BACKFILL_LOCK:
+            return jsonify({'status': 'finished', **_conversion_backfill_state})
+    thread = threading.Thread(
+        target=_run_conversion_backfill,
+        args=(current_app._get_current_object(),),
+        kwargs={'force': force, 'limit': limit},
+        name='conversion-backfill',
+        daemon=True,
+    )
+    thread.start()
+    return jsonify({'status': 'started', **_conversion_backfill_state})
+
+
+@api_bp.route('/admin/conversion-backfill/status', methods=['GET'])
+def admin_conversion_backfill_status():
+    if not _admin_token_ok():
+        return jsonify({'error': 'Unauthorized'}), 401
+    with _CONVERSION_BACKFILL_LOCK:
+        return jsonify(dict(_conversion_backfill_state))
 
 
 def _run_backfill_optimization(app):

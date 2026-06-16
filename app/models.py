@@ -423,6 +423,8 @@ class Model3D:
         upload = runtime.get("upload") if isinstance(runtime, dict) else {}
         tags = {str(tag or "").strip().lower() for tag in (self.tags or [])}
         asset_types = {str(tag or "").strip().lower() for tag in (self.asset_types or [])}
+        if (self.file_format or "").lower() != "vrma" and bool((tags | asset_types) & {"avatar", "vrm"}):
+            return False
         return (
             bool(self.vrma_file_id)
             or (self.file_format or "").lower() in {"vrma", "bvh"}
