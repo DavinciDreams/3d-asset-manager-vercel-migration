@@ -284,6 +284,18 @@ def test_vrm_viewer_supports_compressed_vrm_assets():
     assert "MeshoptDecoder" in viewer
     assert "setKTX2Loader" in viewer
     assert "setMeshoptDecoder" in viewer
+    assert "getBoundingSphere" in viewer
+    assert "fitFov" in viewer
+    assert "VRM onLoad callback failed" in viewer
+    assert "frame(padding)" in viewer
+
+
+def test_vrm_detail_capture_flags_do_not_break_avatar_loader():
+    detail = Path("app/templates/model_detail.html").read_text(encoding="utf-8")
+    assert "window.TellusDetailMediaFlags" in detail
+    assert "function mediaFlag(name)" in detail
+    assert "typeof FORCE_REGEN !== 'undefined'" in detail
+    assert "mediaFlag('captureEnabled')" in detail
 
 
 def test_admin_media_capture_queue_lists_only_renderable_missing_media():

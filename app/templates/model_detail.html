@@ -934,6 +934,14 @@ const CLIENT_CAPTURE_ENABLED = {{ client_capture_enabled | tojson }};
 const AUTO_CAPTURE_THUMBNAIL = {{ auto_capture_thumbnail | tojson }};
 const AUTO_CAPTURE_PREVIEW = {{ auto_capture_preview | tojson }};
 const CAPTURE_ENABLED = CLIENT_CAPTURE_ENABLED && (FORCE_REGEN || FORCE_CAPTURE || AUTO_CAPTURE_THUMBNAIL || AUTO_CAPTURE_PREVIEW);
+window.TellusDetailMediaFlags = {
+    forceRegen: FORCE_REGEN,
+    forceCapture: FORCE_CAPTURE,
+    clientCaptureEnabled: CLIENT_CAPTURE_ENABLED,
+    autoCaptureThumbnail: AUTO_CAPTURE_THUMBNAIL,
+    autoCapturePreview: AUTO_CAPTURE_PREVIEW,
+    captureEnabled: CAPTURE_ENABLED,
+};
 // Saved default view angle for this model (empty string if none set yet).
 const SAVED_CAMERA_ORBIT = {{ model.camera_orbit | tojson }};
 // Whether this model already has a stored thumbnail.
@@ -2519,6 +2527,25 @@ document.addEventListener('DOMContentLoaded', function() {
     let controller = null;
     let started = false;
 
+    function mediaFlag(name) {
+        const flags = window.TellusDetailMediaFlags || {};
+        if (Object.prototype.hasOwnProperty.call(flags, name)) return !!flags[name];
+        if (name === 'forceRegen') return typeof FORCE_REGEN !== 'undefined' && FORCE_REGEN;
+        if (name === 'forceCapture') return typeof FORCE_CAPTURE !== 'undefined' && FORCE_CAPTURE;
+        if (name === 'autoCaptureThumbnail') return typeof AUTO_CAPTURE_THUMBNAIL !== 'undefined' && AUTO_CAPTURE_THUMBNAIL;
+        if (name === 'autoCapturePreview') return typeof AUTO_CAPTURE_PREVIEW !== 'undefined' && AUTO_CAPTURE_PREVIEW;
+        if (name === 'captureEnabled') return typeof CAPTURE_ENABLED !== 'undefined' && CAPTURE_ENABLED;
+        return false;
+    }
+
+    function hasThumbnail() {
+        return typeof HAS_THUMBNAIL !== 'undefined' && HAS_THUMBNAIL;
+    }
+
+    function hasPreview() {
+        return typeof HAS_PREVIEW !== 'undefined' && HAS_PREVIEW;
+    }
+
     async function start() {
         if (started) return true;
         if (!window.VRMViewer) { return false; }
@@ -2530,14 +2557,14 @@ document.addEventListener('DOMContentLoaded', function() {
                 // Apply the owner's saved default animation, if the picker is ready.
                 maybeApplyDefault();
                 {% if can_manage_model %}
-                const shouldCaptureVrmThumbnail = FORCE_REGEN || (!HAS_THUMBNAIL && (FORCE_CAPTURE || AUTO_CAPTURE_THUMBNAIL));
-                const shouldCaptureVrmPreview = FORCE_REGEN || (!HAS_PREVIEW && (FORCE_CAPTURE || AUTO_CAPTURE_PREVIEW));
+                const shouldCaptureVrmThumbnail = mediaFlag('forceRegen') || (!hasThumbnail() && (mediaFlag('forceCapture') || mediaFlag('autoCaptureThumbnail')));
+                const shouldCaptureVrmPreview = mediaFlag('forceRegen') || (!hasPreview() && (mediaFlag('forceCapture') || mediaFlag('autoCapturePreview')));
                 // Only auto-capture media for NATIVE vrm models (a GLB model's
                 // thumbnail should stay the GLB, not the avatar).
-                if (IS_NATIVE_VRM && CAPTURE_ENABLED && shouldCaptureVrmThumbnail) {
+                if (IS_NATIVE_VRM && mediaFlag('captureEnabled') && shouldCaptureVrmThumbnail) {
                     setTimeout(captureVrmThumbnail, 1000);
                 }
-                if (IS_NATIVE_VRM && CAPTURE_ENABLED && shouldCaptureVrmPreview) {
+                if (IS_NATIVE_VRM && mediaFlag('captureEnabled') && shouldCaptureVrmPreview) {
                     setTimeout(captureVrmPreview, 1500);
                 }
                 {% endif %}
@@ -2622,21 +2649,21 @@ document.addEventListener('DOMContentLoaded', function() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ image: dataUrl })
         }).then(r => r.json()).then(d => {
-            if (d.success) HAS_THUMBNAIL = true;
+            if (d.success && typeof HAS_THUMBNAIL !== 'undefined') HAS_THUMBNAIL = true;
             console.log('VRM thumbnail saved:', d.success === true);
         }).catch(() => {});
     };
 
     // Record a ~4s rotating preview of the avatar and upload it.
     window.captureVrmPreview = async function () {
-        if (!CAPTURE_ENABLED) return;  // MediaRecorder capture disabled (black-screen guard)
+        if (!mediaFlag('captureEnabled')) return;  // MediaRecorder capture disabled (black-screen guard)
         if (!controller || !window.capturePreview) return;
         // If a default animation is set, make sure it's playing in the clip.
         if (pendingDefaultUrl) { await controller.applyAnimation(pendingDefaultUrl); pendingDefaultUrl = null; }
         controller.setAutoRotate(true, 6);  // spin during capture
         const ok = await window.capturePreview(controller.canvas, MODEL_ID, { durationMs: 4000 });
         controller.setAutoRotate(false);
-        if (ok) HAS_PREVIEW = true;
+        if (ok && typeof HAS_PREVIEW !== 'undefined') HAS_PREVIEW = true;
         console.log('VRM preview saved:', ok);
     };
 

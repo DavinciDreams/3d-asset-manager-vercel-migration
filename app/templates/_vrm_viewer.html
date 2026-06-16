@@ -85,6 +85,29 @@ async function init(containerId, vrmUrl, options = {}) {
     let currentAction = null;
     let disposed = false;
 
+    function frameAvatar(padding = 1.25) {
+        if (!vrm) return;
+        const box = new THREE.Box3().setFromObject(vrm.scene);
+        if (box.isEmpty()) return;
+        const sphere = box.getBoundingSphere(new THREE.Sphere());
+        const center = sphere.center;
+        const radius = Math.max(sphere.radius, 0.1);
+        const aspect = (container.clientWidth || width) / Math.max(container.clientHeight || height, 1);
+        const vFov = THREE.MathUtils.degToRad(camera.fov);
+        const hFov = 2 * Math.atan(Math.tan(vFov / 2) * aspect);
+        const fitFov = Math.min(vFov, hFov);
+        const distance = (radius / Math.sin(fitFov / 2)) * padding;
+        const viewDir = new THREE.Vector3(0, 0, 1);
+
+        controls.target.copy(center);
+        camera.near = Math.max(distance / 100, 0.001);
+        camera.far = Math.max(distance * 100, camera.near + 10);
+        camera.position.copy(center).addScaledVector(viewDir, distance);
+        camera.lookAt(center);
+        camera.updateProjectionMatrix();
+        controls.update();
+    }
+
     try {
         const gltf = await loader.loadAsync(vrmUrl);
         vrm = gltf.userData.vrm;
@@ -115,15 +138,15 @@ async function init(containerId, vrmUrl, options = {}) {
 
         scene.add(vrm.scene);
 
-        // Frame the avatar: aim camera at chest height.
-        const box = new THREE.Box3().setFromObject(vrm.scene);
-        const center = box.getCenter(new THREE.Vector3());
-        const size = box.getSize(new THREE.Vector3());
-        controls.target.set(center.x, center.y, center.z);
-        camera.position.set(center.x, center.y + size.y * 0.1, size.y * 1.6 + 0.5);
-        controls.update();
+        frameAvatar(options.framePadding || 1.25);
 
-        if (options.onLoad) options.onLoad(vrm);
+        if (options.onLoad) {
+            try {
+                options.onLoad(vrm);
+            } catch (callbackErr) {
+                console.error('VRM onLoad callback failed:', callbackErr);
+            }
+        }
     } catch (err) {
         console.error('Failed to load VRM:', err);
         const detail = err && err.message ? String(err.message) : 'The file may be invalid or an unsupported VRM version.';
@@ -172,11 +195,15 @@ async function init(containerId, vrmUrl, options = {}) {
                 if (currentAction) currentAction.stop();
                 currentAction = mixer.clipAction(clip);
                 currentAction.play();
+                requestAnimationFrame(() => frameAvatar(options.framePadding || 1.25));
                 return true;
             } catch (err) {
                 console.error('Failed to apply VRMA:', err);
                 return false;
             }
+        },
+        frame(padding) {
+            frameAvatar(padding || options.framePadding || 1.25);
         },
         stopAnimation() {
             if (mixer) mixer.stopAllAction();
