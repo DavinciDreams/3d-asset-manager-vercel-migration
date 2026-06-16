@@ -83,7 +83,7 @@
                 <video class="w-full h-full object-cover lazy-media" loop muted playsinline preload="none"
                        data-preview-src="{{ clip.preview_url }}"
                        poster="{{ clip.thumbnail_url or '' }}"></video>
-                {% elif preview_avatar_url and clip.playable and (capture_clip_id == clip.id or capture_clip_id == clip.model_id) %}
+                {% elif preview_avatar_url and clip.playable %}
                 <div id="animation-vrm-preview-{{ loop.index }}"
                      class="animation-vrm-preview absolute inset-0"
                      data-model-id="{{ clip.model_id }}"

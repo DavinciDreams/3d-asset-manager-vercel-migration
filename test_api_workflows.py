@@ -543,6 +543,47 @@ def test_fbx_source_with_vrm_and_vrma_lives_in_avatar_animation_apis():
     assert clip["view_url"].endswith(f"/api/export/{model_id}?format=vrma")
 
 
+def test_animations_page_renders_playable_clips_on_preview_avatar():
+    app = create_app()
+    client = app.test_client()
+    headers = {"Authorization": "Bearer test-token"}
+
+    avatar_upload = client.post("/api/upload", headers=headers, data={
+        "is_public": "true",
+        "file": (io.BytesIO(b"glTF avatar vrm" + b"\x08" * 64), "preview_avatar.vrm"),
+    }, content_type="multipart/form-data")
+    assert avatar_upload.status_code == 201, avatar_upload.get_json()
+
+    clip_upload = client.post("/api/upload", headers=headers, data={
+        "name": "Generated Dance Source",
+        "is_public": "true",
+        "file": (io.BytesIO(b"Kaydara FBX Binary" + b"\x0a" * 64), "dance_source.fbx"),
+    }, content_type="multipart/form-data")
+    assert clip_upload.status_code == 201, clip_upload.get_json()
+    clip_id = clip_upload.get_json()["model"]["id"]
+
+    with app.app_context():
+        model = Model3D.get_by_id(clip_id)
+        vrma_id = app.config["FILE_STORE"].put(
+            b"vrma",
+            filename="dance_source.vrma",
+            content_type="application/octet-stream",
+            metadata={"derived_for": clip_id, "kind": "vrma"},
+        )
+        model.vrma_file_id = str(vrma_id)
+        model.runtime_metadata = {"animations": [{"name": "Friendly Wave"}]}
+        model.save()
+
+    page = client.get("/animations")
+    assert page.status_code == 200
+    html = page.get_data(as_text=True)
+    assert "Friendly Wave" in html
+    assert "animation-vrm-preview" in html
+    assert f'data-model-id="{clip_id}"' in html
+    assert f'data-clip-id="{clip_id}:vrma"' in html
+    assert "VRMA conversion needed" not in html
+
+
 def test_fbx_animation_source_without_vrma_is_animation_catalog_only():
     app = create_app()
     client = app.test_client()
