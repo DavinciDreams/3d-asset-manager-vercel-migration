@@ -3752,6 +3752,12 @@ def _run_game_optimizer(model, owner_id, settings):
         optimized_mesh_stats = optimized_runtime.get('mesh_stats')
         source_physical = source_runtime.get('physical')
         optimized_physical = optimized_runtime.get('physical')
+        # gltfpack + meshopt/KTX2 can leave accessor min/max values in a
+        # quantized integer domain when inspected statically. That is useful for
+        # low-level diagnostics but wrong for world/avatar scale. The optimized
+        # variant represents the same asset, so keep source-space physical
+        # bounds as the public/runtime physical metadata.
+        variant_physical = source_physical or optimized_physical
 
         # Attach the optimized GLB to the SOURCE model as a 'game' variant
         # (no separate Model3D). Re-optimizing replaces the existing variant;
@@ -3767,7 +3773,8 @@ def _run_game_optimizer(model, owner_id, settings):
             'source_mesh_stats': source_mesh_stats,
             'mesh_stats': optimized_mesh_stats,
             'source_physical': source_physical,
-            'physical': optimized_physical,
+            'optimized_physical_raw': optimized_physical,
+            'physical': variant_physical,
             'source_is_fixed_eyes': used_fixed_eyes,
             'report': report,
         }

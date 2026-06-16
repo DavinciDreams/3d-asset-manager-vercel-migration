@@ -949,6 +949,7 @@ let HAS_FIXED_VARIANT = {{ (fixed_eyes_variant is not none) | tojson }};
 // Whether a game-optimized variant exists (it bakes in any eyes/mouth too).
 let HAS_GAME_VARIANT = {{ game_variant_current | tojson }};
 let GAME_VARIANT_USES_FIXED = {{ game_variant_uses_fixed | tojson }};
+let DETAIL_LOAD_TOKEN = 0;
 
 // The best variant to show in the main preview: game-optimized (smallest AND
 // includes any baked eyes/mouth) -> fixed-eyes -> original. Matches browse +
@@ -963,11 +964,14 @@ function bestVariant() {
 // Which variant is currently shown: 'original' | 'game' | 'fixed_eyes'.
 let CURRENT_VARIANT = bestVariant();
 
-function loadDetailModel(modelId, variant) {
+function loadDetailModel(modelId, variant, opts = {}) {
     const container = document.getElementById(`viewer-detail-${modelId}`);
     if (!container) return;
     variant = variant || CURRENT_VARIANT;
     CURRENT_VARIANT = variant;
+    const loadToken = ++DETAIL_LOAD_TOKEN;
+    const allowFallback = opts.allowFallback !== false;
+    let fallbackStarted = false;
 
     // The game-optimized + fixed-eyes variants are each served from their own
     // endpoint; the original uses the default view URL (passing undefined lets
@@ -1005,6 +1009,22 @@ function loadDetailModel(modelId, variant) {
             srcUrl: srcUrl,
             cameraOrbit: SAVED_CAMERA_ORBIT,
             onLoad: handleDetailLoad,
+            onError: (error) => {
+                if (loadToken !== DETAIL_LOAD_TOKEN) return true;
+                if (fallbackStarted) return true;
+                if (allowFallback && variant !== 'original') {
+                    fallbackStarted = true;
+                    console.warn(`Detail ${variant} preview failed; falling back to original`, error);
+                    CURRENT_VARIANT = 'original';
+                    setTimeout(() => {
+                        if (loadToken === DETAIL_LOAD_TOKEN) {
+                            loadDetailModel(modelId, 'original', { allowFallback: false });
+                        }
+                    }, 0);
+                    return true;
+                }
+                return false;
+            },
         });
 
         console.log('Detail model viewer created successfully');

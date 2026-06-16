@@ -2781,7 +2781,8 @@
                     onError: options.onError
                 }).catch((error) => {
                     console.error('Three.js GLB viewer failed:', error);
-                    showModelViewerError(container);
+                    const handled = options.onError && options.onError(error) === true;
+                    if (!handled) showModelViewerError(container);
                 });
                 return null;
             }
@@ -2827,11 +2828,13 @@
                         onError: options.onError
                     }).catch((error) => {
                         console.error('Compressed GLB fallback failed:', error);
-                        showModelViewerError(container);
+                        const handled = options.onError && options.onError(error) === true;
+                        if (!handled) showModelViewerError(container);
                     });
                     return;
                 }
-                if (options.onError) options.onError(event.detail);
+                const handled = options.onError && options.onError(event.detail) === true;
+                if (handled) return;
                 
                 showModelViewerError(container);
             });
@@ -2933,6 +2936,8 @@
                 },
                 onError: (error) => {
                     console.error('Detailed model viewer error:', error);
+                    if (typeof modelData.onError === 'function') return modelData.onError(error);
+                    return false;
                 }
             };
             
