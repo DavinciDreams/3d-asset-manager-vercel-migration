@@ -667,26 +667,28 @@ def list_models():
         category = request.args.get('category')
         styles = Model3D.normalize_tags(request.args.getlist('style'))
         asset_types = Model3D.normalize_tags(request.args.getlist('type'))
+        asset_kinds = Model3D.normalize_tags(request.args.getlist('asset'))
         
         principal, service = _api_principal()
         if user_only and principal:
             # Get user's models
             models, total = Model3D.get_user_models(
                 principal.id, page=page, per_page=per_page,
-                category=category, style=styles or None, asset_type=asset_types or None)
+                category=category, style=styles or None, asset_type=asset_types or None,
+                asset_kind=asset_kinds or None)
         elif user_only and service:
             return jsonify({'error': 'API token is valid, but no API upload user is configured.'}), 409
         elif include_private and service:
             models, total = Model3D.list_models(
                 page=page, per_page=per_page, search=search if search else None,
                 category=category, style=styles or None, asset_type=asset_types or None,
-                public_only=False)
+                public_only=False, asset_kind=asset_kinds or None)
         else:
             # Get public models
             models, total = Model3D.get_public_models(
                 page=page, per_page=per_page, search=search if search else None,
                 category=category, style=styles or None, asset_type=asset_types or None,
-                exclude_animation_carriers=True)
+                exclude_animation_carriers=True, asset_kind=asset_kinds or None)
         
         # Convert models to JSON-serializable format
         models_data = []
@@ -1252,6 +1254,9 @@ def _convert_glb_bytes_to_vrm(model, data, author=None):
         model.id, 'vrm', str(file_id),
         file_format='vrm', size=len(vrm_bytes), status='ready',
     )
+    model.tags = _merge_tags(model.tags, ['avatar', 'vrm'])
+    model.asset_types = _merge_tags(model.asset_types, ['avatar', 'vrm'])
+    model.save()
     if old_file_id and old_file_id != str(file_id):
         try:
             fs.delete(old_file_id)
@@ -2419,12 +2424,14 @@ def list_public_models():
         category = request.args.get('category')
         styles = Model3D.normalize_tags(request.args.getlist('style'))
         asset_types = Model3D.normalize_tags(request.args.getlist('type'))
+        asset_kinds = Model3D.normalize_tags(request.args.getlist('asset'))
 
         models_list, total = Model3D.get_public_models(
             page=page, per_page=per_page,
             search=search or None, sort=sort,
             tag=tags or None, category=category, style=styles or None,
             asset_type=asset_types or None,
+            asset_kind=asset_kinds or None,
             exclude_formats=['vrma', 'bvh'],
             exclude_animation_carriers=True)
 

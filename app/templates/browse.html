@@ -59,37 +59,49 @@
                 <option value="{{ t }}" {% if t in asset_types %}selected{% endif %}>{{ t|title }}</option>
                 {% endfor %}
             </select>
+            <select name="asset" onchange="this.form.submit()"
+                    class="px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <option value="">All assets</option>
+                <option value="vrm" {% if 'vrm' in asset_kinds %}selected{% endif %}>VRM avatars</option>
+                <option value="animated" {% if 'animated' in asset_kinds %}selected{% endif %}>Animated assets</option>
+            </select>
             <button type="submit" class="bg-blue-600 text-white px-6 py-2 rounded-lg hover:bg-blue-700 transition">
                 Search
             </button>
         </form>
     </div>
 
-    {% if category or styles or asset_types or tags %}
+    {% if category or styles or asset_types or asset_kinds or tags %}
     <div class="flex flex-wrap items-center gap-2 mb-4">
         <span class="text-sm text-gray-500 mr-1">Filters:</span>
         {% for t in tags %}
-        <a href="{{ url_for('main.browse', search=search, sort=sort, category=category, style=styles, type=asset_types, tag=tags|reject('equalto', t)|list) }}"
+        <a href="{{ url_for('main.browse', search=search, sort=sort, category=category, style=styles, type=asset_types, asset=asset_kinds, tag=tags|reject('equalto', t)|list) }}"
            class="px-3 py-1 rounded-full text-sm bg-indigo-600 text-white inline-flex items-center gap-1">
             {{ t }} <i class="fas fa-times text-xs"></i>
         </a>
         {% endfor %}
         {% if category %}
-        <a href="{{ url_for('main.browse', search=search, sort=sort, tag=tags, style=styles, type=asset_types) }}"
+        <a href="{{ url_for('main.browse', search=search, sort=sort, tag=tags, style=styles, type=asset_types, asset=asset_kinds) }}"
            class="px-3 py-1 rounded-full text-sm bg-blue-600 text-white inline-flex items-center gap-1">
             {{ category|title }} <i class="fas fa-times text-xs"></i>
         </a>
         {% endif %}
         {% for s in styles %}
-        <a href="{{ url_for('main.browse', search=search, sort=sort, tag=tags, category=category, style=styles|reject('equalto', s)|list, type=asset_types) }}"
+        <a href="{{ url_for('main.browse', search=search, sort=sort, tag=tags, category=category, style=styles|reject('equalto', s)|list, type=asset_types, asset=asset_kinds) }}"
            class="px-3 py-1 rounded-full text-sm bg-blue-600 text-white inline-flex items-center gap-1">
             {{ s|title }} <i class="fas fa-times text-xs"></i>
         </a>
         {% endfor %}
         {% for t in asset_types %}
-        <a href="{{ url_for('main.browse', search=search, sort=sort, tag=tags, category=category, style=styles, type=asset_types|reject('equalto', t)|list) }}"
+        <a href="{{ url_for('main.browse', search=search, sort=sort, tag=tags, category=category, style=styles, type=asset_types|reject('equalto', t)|list, asset=asset_kinds) }}"
            class="px-3 py-1 rounded-full text-sm bg-blue-600 text-white inline-flex items-center gap-1">
             {{ t|title }} <i class="fas fa-times text-xs"></i>
+        </a>
+        {% endfor %}
+        {% for a in asset_kinds %}
+        <a href="{{ url_for('main.browse', search=search, sort=sort, tag=tags, category=category, style=styles, type=asset_types, asset=asset_kinds|reject('equalto', a)|list) }}"
+           class="px-3 py-1 rounded-full text-sm bg-purple-600 text-white inline-flex items-center gap-1">
+            {{ 'VRM avatars' if a == 'vrm' else 'Animated assets' if a == 'animated' else a|title }} <i class="fas fa-times text-xs"></i>
         </a>
         {% endfor %}
         <a href="{{ url_for('main.browse', search=search, sort=sort, tag=tags) }}"
@@ -97,7 +109,7 @@
             <i class="fas fa-times-circle mr-1"></i>Clear facets
         </a>
         {% if tags %}
-        <a href="{{ url_for('main.browse', search=search, sort=sort, category=category, style=styles, type=asset_types) }}"
+        <a href="{{ url_for('main.browse', search=search, sort=sort, category=category, style=styles, type=asset_types, asset=asset_kinds) }}"
            class="px-3 py-1 rounded-full text-sm text-red-600 hover:text-red-800">
             <i class="fas fa-times-circle mr-1"></i>Clear tags
         </a>
@@ -221,6 +233,7 @@
                 category: {{ (category or '') | tojson }},
                 styles: {{ (styles or []) | tojson }},
                 assetTypes: {{ (asset_types or []) | tojson }},
+                assetKinds: {{ (asset_kinds or []) | tojson }},
             };
             let page = {{ models.page }};
             let hasNext = {{ 'true' if models.has_next else 'false' }};
@@ -244,6 +257,7 @@
                 if (params.category) usp.set('category', params.category);
                 params.styles.forEach((s) => usp.append('style', s));
                 params.assetTypes.forEach((t) => usp.append('type', t));
+                params.assetKinds.forEach((a) => usp.append('asset', a));
                 const tagSet = new Set(params.tags);
                 if (extraTag) tagSet.add(extraTag);
                 tagSet.forEach((t) => usp.append('tag', t));
@@ -363,6 +377,7 @@
                     if (params.category) usp.set('category', params.category);
                     params.styles.forEach((s) => usp.append('style', s));
                     params.assetTypes.forEach((t) => usp.append('type', t));
+                    params.assetKinds.forEach((a) => usp.append('asset', a));
                     params.tags.forEach((t) => usp.append('tag', t));
 
                     const res = await fetch(`/api/models/browse?${usp.toString()}`, { headers: { 'Accept': 'application/json' } });

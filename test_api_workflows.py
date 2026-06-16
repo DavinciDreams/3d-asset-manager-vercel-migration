@@ -392,9 +392,13 @@ def test_vrm_detail_capture_flags_do_not_break_avatar_loader():
 def test_model_detail_escapes_metadata_in_viewer_script():
     app = create_app()
     client = app.test_client()
-    headers = {"Authorization": "Bearer test-token"}
+    with app.app_context():
+        owner = _ensure_user("detail-owner")
+        owner.set_password("pw123456")
+        owner.save()
+    client.post("/auth/login", data={"login_field": "detail-owner", "password": "pw123456"})
 
-    upload = client.post("/api/upload", headers=headers, data={
+    upload = client.post("/api/upload", data={
         "name": "Fairy's \"Walk\" Demo",
         "description": "Line one\nLine two with 'quotes' and </script> text.",
         "is_public": "true",
@@ -409,6 +413,10 @@ def test_model_detail_escapes_metadata_in_viewer_script():
     assert 'name: "Fairy\\u0027s \\"Walk\\" Demo"' in html
     assert "description: \"Line one\\nLine two with \\u0027quotes\\u0027 and \\u003c/script\\u003e text.\"" in html
     assert "description: 'Line one" not in html
+    assert 'id="edit-asset-category"' in html
+    assert 'name="asset_category"' in html
+    assert 'id="edit-asset-styles"' in html
+    assert 'id="edit-asset-types"' in html
 
 
 def test_admin_media_capture_queue_lists_only_renderable_missing_media():
@@ -563,6 +571,63 @@ def test_fbx_source_with_vrm_and_vrma_lives_in_avatar_animation_apis():
     clip = next(item for item in animations.get_json()["animations"] if item["model_id"] == model_id)
     assert clip["id"] == model_id + ":vrma"
     assert clip["view_url"].endswith(f"/api/export/{model_id}?format=vrma")
+
+
+def test_browse_asset_filters_include_vrm_and_animated_models():
+    app = create_app()
+    client = app.test_client()
+    headers = {"Authorization": "Bearer test-token"}
+
+    vrm_upload = client.post("/api/upload", headers=headers, data={
+        "name": "Filterable Avatar",
+        "is_public": "true",
+        "file": (io.BytesIO(b"glTF avatar vrm filter" + b"\x13" * 64), "filter_avatar.vrm"),
+    }, content_type="multipart/form-data")
+    assert vrm_upload.status_code == 201, vrm_upload.get_json()
+    vrm_id = vrm_upload.get_json()["model"]["id"]
+
+    glb_upload = client.post("/api/upload", headers=headers, data={
+        "name": "Converted Avatar Source",
+        "is_public": "true",
+        "asset_types": "character, avatar, vrm",
+        "tags": "avatar, vrm",
+        "file": (io.BytesIO(b"glTF avatar source filter" + b"\x14" * 64), "filter_avatar_source.glb"),
+    }, content_type="multipart/form-data")
+    assert glb_upload.status_code == 201, glb_upload.get_json()
+    glb_id = glb_upload.get_json()["model"]["id"]
+    with app.app_context():
+        vrm_file_id = app.config["FILE_STORE"].put(
+            b"vrm variant",
+            filename="filter_avatar_source.vrm",
+            content_type="model/gltf-binary",
+            metadata={"derived_for": glb_id, "kind": "vrm"},
+        )
+        ModelVariant.upsert(glb_id, "vrm", str(vrm_file_id), file_format="vrm", size=11, status="ready")
+
+    animated_upload = client.post("/api/upload", headers=headers, data={
+        "name": "Animated Creature",
+        "is_public": "true",
+        "asset_types": "rigged, animated",
+        "file": (io.BytesIO(_minimal_glb({
+            "nodes": [{"name": "Armature"}],
+            "animations": [{"name": "Hop", "channels": [], "samplers": []}],
+        })), "animated_creature.glb"),
+    }, content_type="multipart/form-data")
+    assert animated_upload.status_code == 201, animated_upload.get_json()
+    animated_id = animated_upload.get_json()["model"]["id"]
+
+    vrm_browse = client.get("/api/models/browse?asset=vrm&per_page=50")
+    assert vrm_browse.status_code == 200, vrm_browse.get_json()
+    vrm_ids = {item["id"] for item in vrm_browse.get_json()["models"]}
+    assert vrm_id in vrm_ids
+    assert glb_id in vrm_ids
+    assert animated_id not in vrm_ids
+
+    animated_browse = client.get("/api/models/browse?asset=animated&per_page=50")
+    assert animated_browse.status_code == 200, animated_browse.get_json()
+    animated_ids = {item["id"] for item in animated_browse.get_json()["models"]}
+    assert animated_id in animated_ids
+    assert vrm_id not in animated_ids
 
 
 def test_animations_page_renders_playable_clips_on_preview_avatar():

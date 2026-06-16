@@ -149,6 +149,7 @@ def dashboard():
         category = Model3D.normalize_category(request.args.get('category'))
         styles = Model3D.normalize_tags(request.args.getlist('style'))
         asset_types = Model3D.normalize_tags(request.args.getlist('type'))
+        asset_kinds = Model3D.normalize_tags(request.args.getlist('asset'))
 
         # Paginate the table (infinite scroll loads more); the headline stat
         # cards use account-wide aggregates so they don't depend on the page.
@@ -158,6 +159,7 @@ def dashboard():
             sort=sort, tag=tags if tags else None,
             category=category, style=styles if styles else None,
             asset_type=asset_types if asset_types else None,
+            asset_kind=asset_kinds if asset_kinds else None,
             exclude_formats=['vrma', 'bvh'],
             exclude_animation_carriers=True)
         _enrich_dashboard_models(user_models)
@@ -222,12 +224,14 @@ def dashboard_rows():
         category = Model3D.normalize_category(request.args.get('category'))
         styles = Model3D.normalize_tags(request.args.getlist('style'))
         asset_types = Model3D.normalize_tags(request.args.getlist('type'))
+        asset_kinds = Model3D.normalize_tags(request.args.getlist('asset'))
         per_page = DASHBOARD_PER_PAGE
         user_models, total_filtered = Model3D.get_user_models(
             current_user.id, page=page, per_page=per_page,
             sort=sort, tag=tags if tags else None,
             category=category, style=styles if styles else None,
             asset_type=asset_types if asset_types else None,
+            asset_kind=asset_kinds if asset_kinds else None,
             exclude_formats=['vrma', 'bvh'],
             exclude_animation_carriers=True)
         _enrich_dashboard_models(user_models)
@@ -292,6 +296,7 @@ def browse():
         category = None
         styles = []
         asset_types = []
+        asset_kinds = []
         facets = {'categories': [], 'styles': [], 'types': []}
         has_vrm = False
 
@@ -300,7 +305,8 @@ def browse():
     return render_template('browse.html', models=pagination, search=search,
                            sort=sort, tags=tags, all_tags=all_tags,
                            category=category, styles=styles,
-                           asset_types=asset_types, facets=facets,
+                           asset_types=asset_types, asset_kinds=asset_kinds,
+                           facets=facets,
                            has_vrm=has_vrm,
                            asset_admin=is_asset_admin_user(current_user) if current_user.is_authenticated else False)
 

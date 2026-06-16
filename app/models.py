@@ -707,7 +707,12 @@ class Model3D:
         engine = current_app.config["DB_ENGINE"]
         if engine.dialect.name == "sqlite":
             safe_value = str(value).replace("%", "\\%").replace("_", "\\_").replace('"', '\\"')
-            return func.coalesce(cast(column, String), "").like(f'%"{safe_value}"%', escape="\\")
+            safe_single = safe_value.replace("'", "''")
+            text_value = func.coalesce(cast(column, String), "")
+            return or_(
+                text_value.like(f'%"{safe_value}"%', escape="\\"),
+                text_value.like(f"%'{safe_single}'%", escape="\\"),
+            )
         return and_(column.is_not(None), column.contains([value]))
 
     @staticmethod
@@ -722,6 +727,10 @@ class Model3D:
         runtime_text = func.lower(func.coalesce(cast(models.c.runtime_metadata, String), ""))
         return and_(
             models.c.file_format != "vrm",
+            ~Model3D._json_list_contains(models.c.tags, "avatar"),
+            ~Model3D._json_list_contains(models.c.tags, "vrm"),
+            ~Model3D._json_list_contains(models.c.asset_types, "avatar"),
+            ~Model3D._json_list_contains(models.c.asset_types, "vrm"),
             or_(
                 models.c.vrma_file_id.is_not(None),
                 models.c.file_format.in_(["vrma", "bvh"]),
@@ -748,6 +757,30 @@ class Model3D:
         return predicates
 
     @staticmethod
+    def _asset_kind_predicates(asset_kind=None):
+        predicates = []
+        for kind in Model3D.normalize_tags(asset_kind):
+            if kind in {"vrm", "avatar"}:
+                predicates.append(or_(
+                    models.c.file_format == "vrm",
+                    Model3D._json_list_contains(models.c.tags, "vrm"),
+                    Model3D._json_list_contains(models.c.tags, "avatar"),
+                    Model3D._json_list_contains(models.c.asset_types, "vrm"),
+                    Model3D._json_list_contains(models.c.asset_types, "avatar"),
+                    models.c.id.in_(select(model_variants.c.model_id).where(and_(
+                        model_variants.c.kind == "vrm",
+                        model_variants.c.file_id.is_not(None),
+                    ))),
+                ))
+            elif kind in {"animated", "animation"}:
+                predicates.append(and_(
+                    models.c.file_format.in_(["glb", "gltf"]),
+                    Model3D._json_list_contains(models.c.asset_types, "rigged"),
+                    Model3D._json_list_contains(models.c.asset_types, "animated"),
+                ))
+        return predicates
+
+    @staticmethod
     def _search_predicate(search):
         if not search:
             return None
@@ -769,7 +802,8 @@ class Model3D:
     @staticmethod
     def list_models(page=1, per_page=20, search=None, sort="newest", tag=None,
                     category=None, style=None, asset_type=None, public_only=True,
-                    owner_id=None, exclude_formats=None, exclude_animation_carriers=False):
+                    owner_id=None, exclude_formats=None, exclude_animation_carriers=False,
+                    asset_kind=None):
         engine = current_app.config["DB_ENGINE"]
         predicates = []
         if public_only:
@@ -780,13 +814,15 @@ class Model3D:
             predicates.append(models.c.file_format.not_in([
                 str(fmt).strip().lower() for fmt in exclude_formats if str(fmt).strip()
             ]))
-        if exclude_animation_carriers:
+        asset_kind_values = Model3D.normalize_tags(asset_kind)
+        if exclude_animation_carriers and not ({"animated", "animation"} & set(asset_kind_values)):
             predicates.append(~Model3D._animation_carrier_predicate())
         search_predicate = Model3D._search_predicate(search)
         if search_predicate is not None:
             predicates.append(search_predicate)
         predicates.extend(Model3D._tag_predicates(tag))
         predicates.extend(Model3D._facet_predicates(category=category, style=style, asset_type=asset_type))
+        predicates.extend(Model3D._asset_kind_predicates(asset_kind_values))
         where = and_(*predicates) if predicates else true()
 
         with engine.begin() as conn:
@@ -842,28 +878,31 @@ class Model3D:
     @staticmethod
     def get_public_models(page=1, per_page=20, search=None, sort="newest", tag=None,
                           category=None, style=None, asset_type=None, exclude_formats=None,
-                          exclude_animation_carriers=False):
+                          exclude_animation_carriers=False, asset_kind=None):
         return Model3D.list_models(
             page=page, per_page=per_page, search=search, sort=sort, tag=tag,
             category=category, style=style, asset_type=asset_type,
             public_only=True, exclude_formats=exclude_formats,
             exclude_animation_carriers=exclude_animation_carriers,
+            asset_kind=asset_kind,
         )
 
     @staticmethod
     def get_user_models(user_id, page=1, per_page=20, sort="newest", tag=None,
                         category=None, style=None, asset_type=None, exclude_formats=None,
-                        exclude_animation_carriers=False):
+                        exclude_animation_carriers=False, asset_kind=None):
         engine = current_app.config["DB_ENGINE"]
         predicates = [models.c.user_id == str(user_id)]
         if exclude_formats:
             predicates.append(models.c.file_format.not_in([
                 str(fmt).strip().lower() for fmt in exclude_formats if str(fmt).strip()
             ]))
-        if exclude_animation_carriers:
+        asset_kind_values = Model3D.normalize_tags(asset_kind)
+        if exclude_animation_carriers and not ({"animated", "animation"} & set(asset_kind_values)):
             predicates.append(~Model3D._animation_carrier_predicate())
         predicates.extend(Model3D._tag_predicates(tag))
         predicates.extend(Model3D._facet_predicates(category=category, style=style, asset_type=asset_type))
+        predicates.extend(Model3D._asset_kind_predicates(asset_kind_values))
         where = and_(*predicates) if predicates else true()
 
         with engine.begin() as conn:
