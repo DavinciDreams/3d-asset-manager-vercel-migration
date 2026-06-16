@@ -389,6 +389,28 @@ def test_vrm_detail_capture_flags_do_not_break_avatar_loader():
     assert "mediaFlag('captureEnabled')" in detail
 
 
+def test_model_detail_escapes_metadata_in_viewer_script():
+    app = create_app()
+    client = app.test_client()
+    headers = {"Authorization": "Bearer test-token"}
+
+    upload = client.post("/api/upload", headers=headers, data={
+        "name": "Fairy's \"Walk\" Demo",
+        "description": "Line one\nLine two with 'quotes' and </script> text.",
+        "is_public": "true",
+        "file": (io.BytesIO(b"glTF" + b"\x0d" * 64), "fairy_walk.glb"),
+    }, content_type="multipart/form-data")
+    assert upload.status_code == 201, upload.get_json()
+    model_id = upload.get_json()["model"]["id"]
+
+    page = client.get(f"/model/{model_id}")
+    assert page.status_code == 200
+    html = page.get_data(as_text=True)
+    assert 'name: "Fairy\\u0027s \\"Walk\\" Demo"' in html
+    assert "description: \"Line one\\nLine two with \\u0027quotes\\u0027 and \\u003c/script\\u003e text.\"" in html
+    assert "description: 'Line one" not in html
+
+
 def test_admin_media_capture_queue_lists_only_renderable_missing_media():
     app = create_app()
     client = app.test_client()

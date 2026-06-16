@@ -1011,9 +1011,9 @@ function loadDetailModel(modelId, variant, opts = {}) {
 
         // Use the new model-viewer web component for detail view
         detailViewer = createDetailedModelViewer(`viewer-detail-${modelId}`, modelId, {
-            name: '{{ model.name }}',
-            description: '{{ model.description }}',
-            format: '{{ model.file_format }}',
+            name: {{ model.name | tojson }},
+            description: {{ model.description | tojson }},
+            format: {{ model.file_format | tojson }},
             srcUrl: srcUrl,
             cameraOrbit: SAVED_CAMERA_ORBIT,
             onLoad: handleDetailLoad,
