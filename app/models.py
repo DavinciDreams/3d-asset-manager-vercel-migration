@@ -736,7 +736,7 @@ class Model3D:
             or_(
                 models.c.vrma_file_id.is_not(None),
                 models.c.file_format.in_(["vrma", "bvh"]),
-                models.c.asset_category == "animation",
+                func.coalesce(models.c.asset_category, "") == "animation",
                 Model3D._json_list_contains(models.c.tags, "animation-source"),
                 Model3D._json_list_contains(models.c.tags, "animation-library"),
                 Model3D._json_list_contains(models.c.tags, "vrma-library"),

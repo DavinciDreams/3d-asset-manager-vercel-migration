@@ -132,6 +132,34 @@ def test_asset_admin_dashboard_can_start_conversion_backfill(monkeypatch):
     assert "queued" in status
 
 
+def test_uncategorized_gltf_upload_appears_in_browse():
+    app = create_app()
+    client = app.test_client()
+    headers = {"Authorization": "Bearer test-token"}
+    gltf = json.dumps({
+        "asset": {"version": "2.0"},
+        "scenes": [{"nodes": [0]}],
+        "nodes": [{"mesh": 0}],
+        "meshes": [{"primitives": []}],
+    }).encode("utf-8")
+
+    upload = client.post("/api/upload", headers=headers, data={
+        "name": "Uncategorized GLTF Probe",
+        "is_public": "true",
+        "file": (io.BytesIO(gltf), "uncategorized_probe.gltf"),
+    }, content_type="multipart/form-data")
+    assert upload.status_code == 201, upload.get_json()
+    model_id = upload.get_json()["model"]["id"]
+
+    public_models = client.get("/api/models?per_page=10")
+    assert public_models.status_code == 200, public_models.get_json()
+    assert model_id in {item["id"] for item in public_models.get_json()["models"]}
+
+    browse = client.get("/browse")
+    assert browse.status_code == 200
+    assert "Uncategorized GLTF Probe" in browse.get_data(as_text=True)
+
+
 def _attach_thumbnail(app, model_id):
     with app.app_context():
         model = Model3D.get_by_id(model_id)
