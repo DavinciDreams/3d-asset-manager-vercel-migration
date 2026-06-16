@@ -195,7 +195,12 @@ async function init(containerId, vrmUrl, options = {}) {
                 if (currentAction) currentAction.stop();
                 currentAction = mixer.clipAction(clip);
                 currentAction.play();
-                requestAnimationFrame(() => frameAvatar(options.framePadding || 1.25));
+                mixer.update(0.001);
+                vrm.update(0.001);
+                const refit = () => { if (!disposed) frameAvatar(options.framePadding || 1.25); };
+                refit();
+                setTimeout(refit, 250);
+                setTimeout(refit, 1000);
                 return true;
             } catch (err) {
                 console.error('Failed to apply VRMA:', err);

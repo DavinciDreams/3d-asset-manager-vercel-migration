@@ -584,6 +584,78 @@ def test_animations_page_renders_playable_clips_on_preview_avatar():
     assert "VRMA conversion needed" not in html
 
 
+def test_vrm_avatar_rows_do_not_show_as_animation_clips():
+    app = create_app()
+    client = app.test_client()
+    headers = {"Authorization": "Bearer test-token"}
+
+    upload = client.post("/api/upload", headers=headers, data={
+        "name": "Avatar With Motion",
+        "is_public": "true",
+        "asset_types": "animation, avatar-animation",
+        "runtime_metadata": json.dumps({"animations": [{"name": "Idle"}]}),
+        "file": (io.BytesIO(b"glTF avatar vrm" + b"\x0b" * 64), "avatar_with_motion.vrm"),
+    }, content_type="multipart/form-data")
+    assert upload.status_code == 201, upload.get_json()
+    avatar_id = upload.get_json()["model"]["id"]
+
+    with app.app_context():
+        model = Model3D.get_by_id(avatar_id)
+        vrma_id = app.config["FILE_STORE"].put(
+            b"vrma",
+            filename="avatar_idle.vrma",
+            content_type="application/octet-stream",
+            metadata={"derived_for": avatar_id, "kind": "vrma"},
+        )
+        model.vrma_file_id = str(vrma_id)
+        model.save()
+
+    animations_page = client.get("/animations")
+    assert animations_page.status_code == 200
+    html = animations_page.get_data(as_text=True)
+    assert "Avatar With Motion" not in html
+    assert f'data-model-id="{avatar_id}"' not in html
+
+    avatars = client.get("/api/vrm-models")
+    assert avatars.status_code == 200, avatars.get_json()
+    assert avatar_id in {item["model_id"] for item in avatars.get_json()["avatars"]}
+
+
+def test_vrm_avatars_stay_on_browse_and_avatar_endpoint():
+    app = create_app()
+    client = app.test_client()
+    headers = {"Authorization": "Bearer test-token"}
+
+    upload = client.post("/api/upload", headers=headers, data={
+        "name": "Browseable Avatar",
+        "is_public": "true",
+        "asset_types": "avatar-animation",
+        "runtime_metadata": json.dumps({"animations": [{"name": "Idle"}]}),
+        "file": (io.BytesIO(b"glTF avatar vrm" + b"\x0c" * 64), "browseable_avatar.vrm"),
+    }, content_type="multipart/form-data")
+    assert upload.status_code == 201, upload.get_json()
+    model = upload.get_json()["model"]
+    avatar_id = model["id"]
+    assert {"avatar", "vrm"}.issubset(set(model["tags"]))
+    assert {"avatar", "vrm"}.issubset(set(model["asset_types"]))
+
+    browse = client.get("/api/models/browse?type=avatar&per_page=20")
+    assert browse.status_code == 200, browse.get_json()
+    assert avatar_id in {item["id"] for item in browse.get_json()["models"]}
+
+    public_models = client.get("/api/models?type=avatar")
+    assert public_models.status_code == 200, public_models.get_json()
+    assert avatar_id in {item["id"] for item in public_models.get_json()["models"]}
+
+    avatars = client.get("/api/vrm-models")
+    assert avatars.status_code == 200, avatars.get_json()
+    assert avatar_id in {item["model_id"] for item in avatars.get_json()["avatars"]}
+
+    animations_page = client.get("/animations")
+    assert animations_page.status_code == 200
+    assert "Browseable Avatar" not in animations_page.get_data(as_text=True)
+
+
 def test_fbx_animation_source_without_vrma_is_animation_catalog_only():
     app = create_app()
     client = app.test_client()

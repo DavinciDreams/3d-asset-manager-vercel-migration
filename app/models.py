@@ -720,16 +720,19 @@ class Model3D:
         browse.
         """
         runtime_text = func.lower(func.coalesce(cast(models.c.runtime_metadata, String), ""))
-        return or_(
-            models.c.vrma_file_id.is_not(None),
-            models.c.file_format.in_(["vrma", "bvh"]),
-            models.c.asset_category == "animation",
-            Model3D._json_list_contains(models.c.tags, "animation-source"),
-            Model3D._json_list_contains(models.c.tags, "animation-library"),
-            Model3D._json_list_contains(models.c.tags, "vrma-library"),
-            Model3D._json_list_contains(models.c.asset_types, "animation"),
-            Model3D._json_list_contains(models.c.asset_types, "avatar-animation"),
-            runtime_text.like("%vrma-library-import%"),
+        return and_(
+            models.c.file_format != "vrm",
+            or_(
+                models.c.vrma_file_id.is_not(None),
+                models.c.file_format.in_(["vrma", "bvh"]),
+                models.c.asset_category == "animation",
+                Model3D._json_list_contains(models.c.tags, "animation-source"),
+                Model3D._json_list_contains(models.c.tags, "animation-library"),
+                Model3D._json_list_contains(models.c.tags, "vrma-library"),
+                Model3D._json_list_contains(models.c.asset_types, "animation"),
+                Model3D._json_list_contains(models.c.asset_types, "avatar-animation"),
+                runtime_text.like("%vrma-library-import%"),
+            ),
         )
 
     @staticmethod
@@ -987,7 +990,10 @@ class Model3D:
     @staticmethod
     def list_generated_vrma_for_user(user_id=None):
         engine = current_app.config["DB_ENGINE"]
-        predicates = [models.c.vrma_file_id.is_not(None)]
+        predicates = [
+            models.c.vrma_file_id.is_not(None),
+            models.c.file_format != "vrm",
+        ]
         if user_id:
             predicates.append(or_(models.c.is_public.is_(True), models.c.user_id == str(user_id)))
         else:
@@ -1006,7 +1012,7 @@ class Model3D:
         engine = current_app.config["DB_ENGINE"]
         predicates = [
             Model3D._animation_carrier_predicate(),
-            models.c.file_format != "vrma",
+            models.c.file_format.not_in(["vrma", "vrm"]),
         ]
         if user_id:
             predicates.append(or_(models.c.is_public.is_(True), models.c.user_id == str(user_id)))

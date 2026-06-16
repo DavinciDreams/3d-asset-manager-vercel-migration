@@ -2683,6 +2683,9 @@ def _store_one_upload(file, base_name, description, is_public, tags, allowed_ext
     derived_asset_types, derived_runtime_metadata = _file_derived_metadata(file_content, file_extension)
     asset_types = _merge_tags(_clean_asset_types(asset_types), derived_asset_types)
     runtime_metadata = _merge_runtime_metadata(runtime_metadata, derived_runtime_metadata)
+    if file_extension == 'vrm':
+        tags = _merge_tags(tags, ['avatar', 'vrm'])
+        asset_types = _merge_tags(asset_types, ['avatar', 'vrm'])
 
     # Per-file name: when a shared base name is given AND multiple files are
     # involved, the caller passes base_name="" so each model is named from its
