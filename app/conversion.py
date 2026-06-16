@@ -4,6 +4,7 @@ The pipeline stores derived files through the app's FILE_STORE abstraction, so
 it works with either the local database fallback or MinIO/S3 in production.
 """
 import json
+import hashlib
 import os
 import shutil
 import subprocess
@@ -11,9 +12,9 @@ import tempfile
 import threading
 from datetime import datetime, timedelta
 
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import String, and_, cast, or_, select, update
 
-from app.db import models
+from app.db import asset_files, models
 
 
 NATIVE_VIEWABLE = {"glb", "gltf", "vrm"}
@@ -132,7 +133,7 @@ def glb_to_vrm(node_bin, converter_dir, input_path, output_path,
     return output_path
 
 
-def gltf_node_names(glb_or_gltf_path):
+def _load_gltf_json(glb_or_gltf_path):
     try:
         with open(glb_or_gltf_path, "rb") as f:
             head = f.read(4)
@@ -156,6 +157,15 @@ def gltf_node_names(glb_or_gltf_path):
                 gltf = json.loads(json_bytes.decode("utf-8", errors="ignore"))
             else:
                 gltf = json.loads(f.read().decode("utf-8", errors="ignore"))
+        return gltf
+    except Exception as e:
+        print(f"gltf parse warning: {e}")
+        return {}
+
+
+def gltf_node_names(glb_or_gltf_path):
+    try:
+        gltf = _load_gltf_json(glb_or_gltf_path)
         return {node.get("name") for node in gltf.get("nodes", []) if node.get("name")}
     except Exception as e:
         print(f"gltf_node_names warning: {e}")
@@ -164,6 +174,15 @@ def gltf_node_names(glb_or_gltf_path):
 
 def looks_humanoid(node_names):
     return len(node_names & MIXAMO_BONES) >= HUMANOID_BONE_THRESHOLD
+
+
+def gltf_has_mesh(glb_or_gltf_path):
+    try:
+        gltf = _load_gltf_json(glb_or_gltf_path)
+        return bool(gltf.get("meshes")) or any("mesh" in node for node in gltf.get("nodes", []))
+    except Exception as e:
+        print(f"gltf_has_mesh warning: {e}")
+        return False
 
 
 def is_animation_library_source(doc):
@@ -179,9 +198,49 @@ def is_animation_library_source(doc):
     )
 
 
+def merge_tags(existing, additions):
+    merged = []
+    seen = set()
+    for value in list(existing or []) + list(additions or []):
+        tag = str(value or "").strip().lower()
+        if tag and tag not in seen:
+            seen.add(tag)
+            merged.append(tag)
+    return merged
+
+
 def patch_model(app, model_id, **fields):
     with app.config["DB_ENGINE"].begin() as conn:
         conn.execute(update(models).where(models.c.id == str(model_id)).values(**fields))
+
+
+def _find_derived_file_by_hash(app, kind, digest):
+    engine = app.config["DB_ENGINE"]
+    metadata = asset_files.c.metadata
+    if engine.dialect.name == "sqlite":
+        metadata_text = cast(metadata, String)
+        where = and_(
+            metadata_text.like(f"%{digest}%"),
+            metadata_text.like(f"%{kind}%"),
+        )
+    else:
+        where = metadata.contains({"kind": kind, "content_hash": digest})
+    with engine.begin() as conn:
+        row = conn.execute(select(asset_files.c.id).where(where).limit(1)).first()
+    return str(row.id) if row else None
+
+
+def put_derived_file(app, data, *, filename, content_type, model_id, kind):
+    digest = hashlib.sha256(data).hexdigest()
+    existing_id = _find_derived_file_by_hash(app, kind, digest)
+    if existing_id:
+        return existing_id
+    return str(app.config["FILE_STORE"].put(
+        data,
+        filename=filename,
+        content_type=content_type,
+        metadata={"derived_for": str(model_id), "kind": kind, "content_hash": digest},
+    ))
 
 
 def process_model_doc(app, doc):
@@ -218,11 +277,13 @@ def process_model_doc(app, doc):
             )
             with open(vrma_path, "rb") as f:
                 vrma_bytes = f.read()
-            vrma_id = fs.put(
+            vrma_id = put_derived_file(
+                app,
                 vrma_bytes,
                 filename=f"clip_{model_id}.vrma",
                 content_type="application/octet-stream",
-                metadata={"derived_for": str(model_id), "kind": "vrma"},
+                model_id=model_id,
+                kind="vrma",
             )
             patch_model(
                 app, model_id,
@@ -244,11 +305,13 @@ def process_model_doc(app, doc):
                     fbx_to_vrma(paths["node"], paths["fbx2vrma_dir"], paths["fbx2gltf"], in_path, vrma_path)
                     with open(vrma_path, "rb") as f:
                         vrma_bytes = f.read()
-                    vrma_id = fs.put(
+                    vrma_id = put_derived_file(
+                        app,
                         vrma_bytes,
                         filename=f"clip_{model_id}.vrma",
                         content_type="application/octet-stream",
-                        metadata={"derived_for": str(model_id), "kind": "vrma"},
+                        model_id=model_id,
+                        kind="vrma",
                     )
                     patch_model(
                         app, model_id,
@@ -281,6 +344,7 @@ def process_model_doc(app, doc):
             "conversion_error": None,
         }
 
+        fbx_has_mesh = fmt == "fbx" and gltf_has_mesh(glb_path)
         fbx_is_humanoid = fmt == "fbx" and looks_humanoid(gltf_node_names(glb_path))
         fbx_is_animation_source = fmt == "fbx" and is_animation_library_source(doc)
 
@@ -290,12 +354,14 @@ def process_model_doc(app, doc):
                 fbx_to_vrma(paths["node"], paths["fbx2vrma_dir"], paths["fbx2gltf"], in_path, vrma_path)
                 with open(vrma_path, "rb") as f:
                     vrma_bytes = f.read()
-                fields["vrma_file_id"] = str(fs.put(
+                fields["vrma_file_id"] = put_derived_file(
+                    app,
                     vrma_bytes,
                     filename=f"clip_{model_id}.vrma",
                     content_type="application/octet-stream",
-                    metadata={"derived_for": str(model_id), "kind": "vrma"},
-                ))
+                    model_id=model_id,
+                    kind="vrma",
+                )
             except Exception as e:
                 print(f"VRMA generation failed for {model_id} (non-fatal): {e}")
 
@@ -303,7 +369,7 @@ def process_model_doc(app, doc):
             # mixamorig:* skeleton -- exactly what glb2vrm needs. Auto-produce a
             # VRM avatar variant so the model can play VRMA clips in the VRM
             # viewer. Non-fatal: a non-humanoid-enough GLB just won't get a VRM.
-        if fbx_is_humanoid:
+        if fbx_is_humanoid and fbx_has_mesh:
             try:
                 vrm_path = os.path.join(workdir, "avatar.vrm")
                 glb_to_vrm(
@@ -312,11 +378,13 @@ def process_model_doc(app, doc):
                 )
                 with open(vrm_path, "rb") as f:
                     vrm_bytes = f.read()
-                vrm_id = fs.put(
+                vrm_id = put_derived_file(
+                    app,
                     vrm_bytes,
                     filename=f"avatar_{model_id}.vrm",
                     content_type="model/gltf-binary",
-                    metadata={"derived_for": str(model_id), "kind": "vrm"},
+                    model_id=model_id,
+                    kind="vrm",
                 )
                 from app.models import ModelVariant, Model3D
                 _, old_vrm_id = ModelVariant.upsert(
@@ -328,6 +396,8 @@ def process_model_doc(app, doc):
                         fs.delete(old_vrm_id)
                     except Exception as e:
                         print(f"Old VRM blob {old_vrm_id} not deleted: {e}")
+                fields["tags"] = merge_tags(doc.get("tags"), ["avatar", "vrm"])
+                fields["asset_types"] = merge_tags(doc.get("asset_types"), ["avatar", "vrm"])
 
                 # Auto-produce the rig-safe optimized avatar. Best-effort:
                 # imported lazily to avoid an api<->conversion import cycle.

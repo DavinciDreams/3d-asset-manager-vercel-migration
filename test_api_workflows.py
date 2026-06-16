@@ -41,6 +41,38 @@ def _minimal_glb(gltf):
     return b"glTF" + struct.pack("<II", 2, length) + struct.pack("<II", len(json_chunk), 0x4E4F534A) + json_chunk
 
 
+def test_derived_conversion_files_are_reused_by_content_hash():
+    app = create_app()
+    with app.app_context():
+        first = conversion.put_derived_file(
+            app,
+            b"same derived avatar bytes",
+            filename="avatar_a.vrm",
+            content_type="model/gltf-binary",
+            model_id="source-a",
+            kind="vrm",
+        )
+        second = conversion.put_derived_file(
+            app,
+            b"same derived avatar bytes",
+            filename="avatar_b.vrm",
+            content_type="model/gltf-binary",
+            model_id="source-b",
+            kind="vrm",
+        )
+        third = conversion.put_derived_file(
+            app,
+            b"same derived avatar bytes",
+            filename="clip_a.vrma",
+            content_type="application/octet-stream",
+            model_id="source-a",
+            kind="vrma",
+        )
+
+    assert second == first
+    assert third != first
+
+
 def _attach_thumbnail(app, model_id):
     with app.app_context():
         model = Model3D.get_by_id(model_id)
@@ -539,6 +571,8 @@ def test_fbx_source_with_vrm_and_vrma_lives_in_avatar_animation_apis():
         source.viewable_format = "glb"
         source.vrma_file_id = str(vrma_id)
         source.conversion_status = "done"
+        source.tags = ["avatar", "vrm"]
+        source.asset_types = ["avatar", "vrm"]
         source.save()
         ModelVariant.upsert(
             model_id, "vrm", str(vrm_id),
@@ -547,11 +581,15 @@ def test_fbx_source_with_vrm_and_vrma_lives_in_avatar_animation_apis():
 
     browse = client.get("/api/models/browse?per_page=20")
     assert browse.status_code == 200, browse.get_json()
-    assert model_id not in {item["id"] for item in browse.get_json()["models"]}
+    assert model_id in {item["id"] for item in browse.get_json()["models"]}
+
+    avatar_browse = client.get("/api/models/browse?asset=vrm&per_page=20")
+    assert avatar_browse.status_code == 200, avatar_browse.get_json()
+    assert model_id in {item["id"] for item in avatar_browse.get_json()["models"]}
 
     public_models = client.get("/api/models")
     assert public_models.status_code == 200, public_models.get_json()
-    assert model_id not in {item["id"] for item in public_models.get_json()["models"]}
+    assert model_id in {item["id"] for item in public_models.get_json()["models"]}
 
     avatars = client.get("/api/vrm")
     assert avatars.status_code == 200, avatars.get_json()
@@ -766,6 +804,14 @@ def test_fbx_animation_source_without_vrma_is_animation_catalog_only():
     assert upload.status_code == 201, upload.get_json()
     model_id = upload.get_json()["model"]["id"]
     assert upload.get_json()["model"]["has_vrma"] is False
+    with app.app_context():
+        vrm_file_id = app.config["FILE_STORE"].put(
+            b"bad legacy avatar variant",
+            filename="pharoah_accidental.vrm",
+            content_type="model/gltf-binary",
+            metadata={"derived_for": model_id, "kind": "vrm"},
+        )
+        ModelVariant.upsert(model_id, "vrm", str(vrm_file_id), file_format="vrm", size=26, status="ready")
 
     browse = client.get("/api/models/browse?per_page=20")
     assert browse.status_code == 200, browse.get_json()
@@ -782,6 +828,10 @@ def test_fbx_animation_source_without_vrma_is_animation_catalog_only():
     animations_api = client.get("/api/vrma")
     assert animations_api.status_code == 200, animations_api.get_json()
     assert model_id not in {item["model_id"] for item in animations_api.get_json()["animations"]}
+
+    avatars_api = client.get("/api/vrm")
+    assert avatars_api.status_code == 200, avatars_api.get_json()
+    assert model_id not in {item["model_id"] for item in avatars_api.get_json()["avatars"]}
 
     animations_page = client.get("/animations")
     assert animations_page.status_code == 200

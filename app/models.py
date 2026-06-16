@@ -1090,6 +1090,7 @@ class Model3D:
         predicates = [
             model_variants.c.kind == "vrm",
             model_variants.c.file_id.is_not(None),
+            ~Model3D._animation_carrier_predicate(),
         ]
         if not include_private:
             if user_id:
