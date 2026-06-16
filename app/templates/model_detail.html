@@ -15,7 +15,27 @@
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
         <!-- Enhanced 3D Model Preview -->
         <div class="bg-white rounded-lg shadow-lg p-6">
-        {% if model.file_format == 'vrma' %}
+        {% if detail_animation_preview_url and model.vrma_file_id %}
+            <!-- Generated/native VRMA animation clip previewed on a reusable avatar. -->
+            <div id="animation-detail-preview-{{ model.id }}"
+                 class="model-viewer-large relative bg-gray-50"
+                 data-avatar-src="{{ detail_animation_preview_url }}"
+                 data-vrma-src="{{ url_for('api.export_model', model_id=model.id) }}?format=vrma">
+                <div class="absolute inset-0 flex items-center justify-center">
+                    <div class="text-center">
+                        <i class="fas fa-spinner fa-spin text-3xl text-indigo-400 mb-2"></i>
+                        <p class="text-gray-500 text-sm">Loading animation preview...</p>
+                    </div>
+                </div>
+            </div>
+            <div class="mt-4 flex flex-wrap items-center gap-3 bg-gray-50 rounded-lg p-3 text-sm text-gray-600">
+                <span><i class="fas fa-person-running mr-1 text-indigo-500"></i>Animation preview</span>
+                <a href="{{ url_for('api.export_model', model_id=model.id) }}?format=vrma"
+                   class="text-indigo-600 hover:text-indigo-800 font-medium">
+                    <i class="fas fa-download mr-1"></i>Download VRMA
+                </a>
+            </div>
+        {% elif model.file_format == 'vrma' %}
             <!-- VRMA is an animation clip, not a renderable model. -->
             <div class="model-viewer-large flex items-center justify-center bg-gray-50">
                 <div class="text-center p-6">
@@ -2534,7 +2554,41 @@ document.addEventListener('DOMContentLoaded', function() {
 {% include "_preview_capture.html" %}
 {% endif %}
 
-{% if model.file_format != 'vrma' %}
+{% if detail_animation_preview_url %}
+{% include "_vrm_viewer.html" %}
+<script>
+(function () {
+    const el = document.getElementById('animation-detail-preview-{{ model.id }}');
+    if (!el) return;
+
+    function waitForViewer() {
+        if (window.VRMViewer) return Promise.resolve();
+        return new Promise((resolve) => {
+            window.addEventListener('vrmviewer-ready', resolve, { once: true });
+        });
+    }
+
+    async function startAnimationPreview() {
+        try {
+            await waitForViewer();
+            const controller = await window.VRMViewer.init(el.id, el.dataset.avatarSrc, {
+                onError: () => { el.dataset.failed = 'avatar'; }
+            });
+            if (!controller) throw new Error('Could not load preview avatar.');
+            controller.setAutoRotate(false);
+            const animated = await controller.applyAnimation(el.dataset.vrmaSrc);
+            if (!animated) throw new Error('Could not apply this animation.');
+            el.dataset.ready = '1';
+        } catch (err) {
+            console.warn('Animation detail preview failed:', err);
+            el.innerHTML = '<div class="absolute inset-0 flex items-center justify-center bg-red-50 text-red-600 p-4 text-center text-sm">Could not preview this animation on the default avatar.</div>';
+        }
+    }
+
+    startAnimationPreview();
+})();
+</script>
+{% elif model.file_format != 'vrma' %}
 {% include "_vrm_viewer.html" %}
 <script>
 // Initialize the VRM avatar viewer and wire up the VRMA picker. Serves two

@@ -487,6 +487,19 @@ def model_detail(model_id):
         vrm_variant = ModelVariant.get(model.id, 'vrm')
         # Rigged variant (if any): owner-rigged GLB from the Rig Avatar editor.
         rigged_variant = ModelVariant.get(model.id, 'rigged')
+        model_tags = {str(tag or '').strip().lower() for tag in (model.tags or [])}
+        model_types = {str(tag or '').strip().lower() for tag in (model.asset_types or [])}
+        is_avatar_asset = (
+            (model.file_format or '').lower() == 'vrm'
+            or bool(vrm_variant and vrm_variant.file_id)
+            or bool((model_tags | model_types) & {'avatar', 'vrm'})
+        )
+        is_animation_clip_asset = bool(model.vrma_file_id) and not is_avatar_asset
+        detail_animation_preview_url = None
+        if is_animation_clip_asset:
+            user_id = current_user.id if current_user.is_authenticated else None
+            avatars = Model3D.list_vrm_for_user(user_id) + Model3D.list_with_vrm_variant_for_user(user_id)
+            detail_animation_preview_url = _preview_avatar_url(avatars)
 
         # Is the viewable GLB meshopt-compressed / quantized? assimp can't read
         # those, so the export menu hides the assimp-only formats (obj/fbx/...)
@@ -507,6 +520,7 @@ def model_detail(model_id):
                                fixed_eyes_variant=fixed_eyes_variant,
                                vrm_variant=vrm_variant,
                                rigged_variant=rigged_variant,
+                               detail_animation_preview_url=detail_animation_preview_url,
                                model_is_meshopt=model_is_meshopt,
                                can_manage_model=user_can_manage_model,
                                client_capture_enabled=_env_bool('CLIENT_MEDIA_CAPTURE_ENABLED', True),

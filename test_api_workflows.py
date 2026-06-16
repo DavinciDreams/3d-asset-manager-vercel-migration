@@ -709,6 +709,54 @@ def test_animations_page_renders_playable_clips_on_preview_avatar():
     assert "VRMA conversion needed" not in html
 
 
+def test_animation_clip_detail_uses_preview_avatar():
+    app = create_app()
+    client = app.test_client()
+    headers = {"Authorization": "Bearer test-token"}
+
+    avatar_upload = client.post("/api/upload", headers=headers, data={
+        "name": "Detail Preview Avatar",
+        "is_public": "true",
+        "file": (io.BytesIO(b"glTF avatar vrm" + b"\x0d" * 64), "detail_preview_avatar.vrm"),
+    }, content_type="multipart/form-data")
+    assert avatar_upload.status_code == 201, avatar_upload.get_json()
+    avatar_id = avatar_upload.get_json()["model"]["id"]
+
+    clip_upload = client.post("/api/upload", headers=headers, data={
+        "name": "Acknowledging",
+        "is_public": "true",
+        "asset_category": "animation",
+        "asset_types": "animation, avatar-animation",
+        "runtime_metadata": json.dumps({
+            "animations": [{"name": "Acknowledging"}],
+            "upload": {"source": "vrma-library-import"},
+        }),
+        "file": (io.BytesIO(b"Kaydara FBX Binary" + b"\x0e" * 64), "Animations_acknowledging.fbx"),
+    }, content_type="multipart/form-data")
+    assert clip_upload.status_code == 201, clip_upload.get_json()
+    clip_id = clip_upload.get_json()["model"]["id"]
+
+    with app.app_context():
+        model = Model3D.get_by_id(clip_id)
+        vrma_id = app.config["FILE_STORE"].put(
+            b"vrma",
+            filename="acknowledging.vrma",
+            content_type="application/octet-stream",
+            metadata={"derived_for": clip_id, "kind": "vrma"},
+        )
+        model.vrma_file_id = str(vrma_id)
+        model.conversion_status = "done"
+        model.save()
+
+    page = client.get(f"/model/{clip_id}")
+    assert page.status_code == 200
+    html = page.get_data(as_text=True)
+    assert f'id="animation-detail-preview-{clip_id}"' in html
+    assert f'data-avatar-src="/api/view/{avatar_id}"' in html
+    assert f'data-vrma-src="/api/export/{clip_id}?format=vrma"' in html
+    assert f"loadDetailModel('{clip_id}')" not in html
+
+
 def test_vrm_avatar_rows_do_not_show_as_animation_clips():
     app = create_app()
     client = app.test_client()

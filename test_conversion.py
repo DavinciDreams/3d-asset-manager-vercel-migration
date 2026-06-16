@@ -1,7 +1,9 @@
 import io
 import json
+import io
 import os
 import struct
+import base64
 
 os.environ.setdefault("SQLITE_PATH", ":memory:")
 os.environ.setdefault("ENABLE_CONVERSION", "0")
@@ -21,6 +23,51 @@ def make_glb_with_nodes(names):
         + struct.pack("<II", len(json_bytes), 0x4E4F534A)
         + json_bytes
     )
+
+
+def glb_json(glb_bytes):
+    offset = 12
+    while offset + 8 <= len(glb_bytes):
+        length, chunk_type = struct.unpack("<II", glb_bytes[offset:offset + 8])
+        body = glb_bytes[offset + 8:offset + 8 + length]
+        if chunk_type == 0x4E4F534A:
+            return json.loads(body.decode("utf-8").rstrip(" \t\r\n\0"))
+        offset += 8 + length
+    raise AssertionError("No JSON chunk")
+
+
+def test_pack_embedded_gltf_to_glb_embeds_images_and_buffers(tmp_path):
+    binary = b"\x00\x01\x02\x03"
+    image = b"fake-jpeg"
+    gltf = {
+        "asset": {"version": "2.0"},
+        "buffers": [{
+            "uri": "data:application/octet-stream;base64," + base64.b64encode(binary).decode("ascii"),
+            "byteLength": len(binary),
+        }],
+        "bufferViews": [{"buffer": 0, "byteOffset": 0, "byteLength": len(binary)}],
+        "images": [{
+            "uri": "data:image/jpeg;base64," + base64.b64encode(image).decode("ascii"),
+        }],
+        "textures": [{"source": 0}],
+        "nodes": [{"mesh": 0, "name": "Mesh"}],
+        "meshes": [{"primitives": []}],
+    }
+    source = tmp_path / "embedded.gltf"
+    output = tmp_path / "embedded.glb"
+    source.write_text(json.dumps(gltf), encoding="utf-8")
+
+    conversion.pack_embedded_gltf_to_glb(str(source), str(output))
+
+    packed = output.read_bytes()
+    assert b"Image_0.jpg" not in packed
+    doc = glb_json(packed)
+    assert doc["buffers"] == [{"byteLength": 13}]
+    assert "uri" not in doc["images"][0]
+    assert doc["images"][0]["mimeType"] == "image/jpeg"
+    assert doc["images"][0]["bufferView"] == 1
+    assert doc["bufferViews"][1]["byteOffset"] == 4
+    assert doc["bufferViews"][1]["byteLength"] == len(image)
 
 
 def _login(app, client, username="convtester"):

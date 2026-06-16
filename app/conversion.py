@@ -6,6 +6,7 @@ it works with either the local database fallback or MinIO/S3 in production.
 import json
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -70,18 +71,105 @@ def _run(cmd, timeout):
     return proc
 
 
+def _data_uri_bytes(uri):
+    match = re.match(r"^data:([^;,]+)?(;base64)?,(.*)$", uri or "", re.DOTALL)
+    if not match:
+        return None, None
+    mime = match.group(1) or "application/octet-stream"
+    payload = match.group(3) or ""
+    if match.group(2):
+        import base64
+        return mime, base64.b64decode(payload)
+    from urllib.parse import unquote_to_bytes
+    return mime, unquote_to_bytes(payload)
+
+
+def pack_embedded_gltf_to_glb(gltf_path, glb_path):
+    """Pack an embedded glTF into a single GLB.
+
+    FBX2glTF's `--embed` mode writes data URIs for buffers and images. The asset
+    store needs one self-contained viewable file, so this moves those data URIs
+    into the GLB BIN chunk and rewrites images to bufferViews.
+    """
+    with open(gltf_path, "r", encoding="utf-8") as f:
+        gltf = json.load(f)
+
+    bin_blob = bytearray()
+    buffer_offsets = {}
+    for index, buffer in enumerate(gltf.get("buffers") or []):
+        uri = buffer.get("uri")
+        if not uri:
+            buffer_offsets[index] = 0
+            continue
+        _mime, data = _data_uri_bytes(uri)
+        if data is None:
+            raise RuntimeError(f"Cannot embed external glTF buffer: {uri}")
+        while len(bin_blob) % 4:
+            bin_blob.append(0)
+        buffer_offsets[index] = len(bin_blob)
+        bin_blob.extend(data)
+        buffer.pop("uri", None)
+
+    for view in gltf.get("bufferViews") or []:
+        old_buffer = int(view.get("buffer", 0))
+        view["buffer"] = 0
+        view["byteOffset"] = int(view.get("byteOffset") or 0) + int(buffer_offsets.get(old_buffer, 0))
+
+    for image in gltf.get("images") or []:
+        uri = image.get("uri")
+        if not uri:
+            continue
+        mime, data = _data_uri_bytes(uri)
+        if data is None:
+            raise RuntimeError(f"Cannot embed external glTF image: {uri}")
+        while len(bin_blob) % 4:
+            bin_blob.append(0)
+        buffer_view_index = len(gltf.setdefault("bufferViews", []))
+        gltf["bufferViews"].append({
+            "buffer": 0,
+            "byteOffset": len(bin_blob),
+            "byteLength": len(data),
+        })
+        bin_blob.extend(data)
+        image.pop("uri", None)
+        image["bufferView"] = buffer_view_index
+        image["mimeType"] = image.get("mimeType") or mime
+
+    if bin_blob:
+        gltf["buffers"] = [{"byteLength": len(bin_blob)}]
+    else:
+        gltf.pop("buffers", None)
+
+    json_bytes = json.dumps(gltf, separators=(",", ":")).encode("utf-8")
+    json_chunk = json_bytes + (b" " * ((4 - len(json_bytes) % 4) % 4))
+    bin_chunk = bytes(bin_blob) + (b"\x00" * ((4 - len(bin_blob) % 4) % 4))
+    total_length = 12 + 8 + len(json_chunk) + (8 + len(bin_chunk) if bin_chunk else 0)
+    with open(glb_path, "wb") as f:
+        f.write(b"glTF")
+        f.write((2).to_bytes(4, "little"))
+        f.write(total_length.to_bytes(4, "little"))
+        f.write(len(json_chunk).to_bytes(4, "little"))
+        f.write((0x4E4F534A).to_bytes(4, "little"))
+        f.write(json_chunk)
+        if bin_chunk:
+            f.write(len(bin_chunk).to_bytes(4, "little"))
+            f.write((0x004E4942).to_bytes(4, "little"))
+            f.write(bin_chunk)
+    return glb_path
+
+
 def fbx2gltf_to_glb(fbx2gltf_bin, input_path, out_dir, timeout=120):
     out_base = os.path.join(out_dir, "viewable")
-    _run([fbx2gltf_bin, "-i", input_path, "-o", out_base, "-b"], timeout)
-    glb = out_base + ".glb"
-    if os.path.exists(glb):
-        return glb
+    _run([fbx2gltf_bin, "-i", input_path, "-o", out_base, "--embed"], timeout)
+    gltf = out_base + ".gltf"
+    if os.path.exists(gltf):
+        return pack_embedded_gltf_to_glb(gltf, out_base + ".glb")
     alt_dir = out_base + "_out"
     if os.path.isdir(alt_dir):
         for name in os.listdir(alt_dir):
-            if name.lower().endswith(".glb"):
-                return os.path.join(alt_dir, name)
-    raise RuntimeError("FBX2glTF produced no .glb output")
+            if name.lower().endswith(".gltf"):
+                return pack_embedded_gltf_to_glb(os.path.join(alt_dir, name), out_base + ".glb")
+    raise RuntimeError("FBX2glTF produced no embedded .gltf output")
 
 
 def assimp_export(assimp_bin, input_path, output_path, timeout=120):
