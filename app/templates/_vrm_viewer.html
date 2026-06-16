@@ -126,7 +126,10 @@ async function init(containerId, vrmUrl, options = {}) {
         if (options.onLoad) options.onLoad(vrm);
     } catch (err) {
         console.error('Failed to load VRM:', err);
-        container.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#dc2626;font-size:0.875rem;text-align:center;padding:1rem;">Failed to load VRM avatar.<br>The file may be invalid or an unsupported VRM version.</div>';
+        const detail = err && err.message ? String(err.message) : 'The file may be invalid or an unsupported VRM version.';
+        container.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#dc2626;font-size:0.875rem;text-align:center;padding:1rem;">Failed to load VRM avatar.<br><span style="font-size:0.75rem;color:#991b1b;">'
+            + detail.replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))
+            + '</span></div>';
         if (options.onError) options.onError(err);
         return null;
     }
