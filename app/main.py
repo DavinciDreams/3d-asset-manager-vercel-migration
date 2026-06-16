@@ -185,7 +185,8 @@ def dashboard():
                              sort=sort, tags=tags, all_tags=all_tags,
                              category=category, styles=styles,
                              asset_types=asset_types, facets=facets,
-                             page=page, has_next=has_next)
+                             page=page, has_next=has_next,
+                             asset_admin=is_asset_admin_user(current_user))
     except Exception as e:
         print(f"Dashboard error: {e}")
         import traceback
@@ -199,6 +200,7 @@ def dashboard():
                              category=None, styles=[], asset_types=[],
                              facets={'categories': [], 'styles': [], 'types': []},
                              page=1, has_next=False,
+                             asset_admin=is_asset_admin_user(current_user) if current_user.is_authenticated else False,
                              error=str(e))
 
 

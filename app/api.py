@@ -4334,7 +4334,7 @@ def admin_conversion_backfill():
     are replaced by self-contained embedded-texture GLBs and humanoid FBX rows
     are stamped as avatar/VRM assets.
     """
-    if not _admin_token_ok():
+    if not _admin_or_asset_admin_session_ok():
         return jsonify({'error': 'Unauthorized'}), 401
     force = request.args.get('force', 'false').lower() in {'1', 'true', 'yes'}
     sync = request.args.get('sync', 'false').lower() in {'1', 'true', 'yes'}
@@ -4375,7 +4375,7 @@ def admin_conversion_backfill():
 
 @api_bp.route('/admin/conversion-backfill/status', methods=['GET'])
 def admin_conversion_backfill_status():
-    if not _admin_token_ok():
+    if not _admin_or_asset_admin_session_ok():
         return jsonify({'error': 'Unauthorized'}), 401
     with _CONVERSION_BACKFILL_LOCK:
         return jsonify(dict(_conversion_backfill_state))

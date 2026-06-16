@@ -92,6 +92,40 @@
             <i class="fas fa-search mr-2"></i>Browse Models
         </a>
     </div>
+
+    {% if asset_admin %}
+    <div class="mb-8 bg-white rounded-xl card-shadow p-5 border border-teal-100">
+        <div class="flex flex-wrap items-center justify-between gap-4">
+            <div>
+                <h2 class="text-lg font-semibold text-gray-900">Admin Processing</h2>
+                <p class="text-sm text-gray-600 mt-1">
+                    Requeue FBX/BVH conversion so avatars, VRM variants, animation clips, and embedded-texture previews are regenerated.
+                </p>
+            </div>
+            <div class="flex flex-wrap items-center gap-2">
+                <button type="button" id="conversion-backfill-btn"
+                        class="bg-teal-600 text-white px-4 py-2 rounded-lg font-semibold hover:bg-teal-700 disabled:opacity-50 disabled:cursor-not-allowed">
+                    <i class="fas fa-tools mr-2"></i>Run conversion backfill
+                </button>
+                <button type="button" id="conversion-backfill-refresh"
+                        class="bg-gray-100 text-gray-700 px-3 py-2 rounded-lg hover:bg-gray-200">
+                    <i class="fas fa-sync mr-1"></i>Refresh
+                </button>
+            </div>
+        </div>
+        <div id="conversion-backfill-status" class="hidden mt-4" aria-live="polite">
+            <div class="flex justify-between text-sm text-gray-600 mb-2">
+                <span id="conversion-backfill-label">Idle</span>
+                <span id="conversion-backfill-counts"></span>
+            </div>
+            <div class="w-full bg-gray-200 rounded-full h-2.5 overflow-hidden">
+                <div id="conversion-backfill-bar" class="bg-teal-500 h-2.5 rounded-full transition-all" style="width:0%"></div>
+            </div>
+            <p id="conversion-backfill-current" class="text-xs text-gray-500 mt-2"></p>
+            <p id="conversion-backfill-error" class="text-xs text-red-600 mt-1"></p>
+        </div>
+    </div>
+    {% endif %}
     
     <!-- Your Models -->
     <div class="bg-white rounded-xl card-shadow">
@@ -591,6 +625,88 @@ async function pollOptimizeJob(statusUrl, modelId) {
     }
     throw new Error('Optimization is still running. Refresh in a few minutes to see the result.');
 }
+
+{% if asset_admin %}
+// Admin conversion backfill. This uses the current logged-in asset-admin
+// session, so no token has to be pasted into the dashboard.
+(function () {
+    const runBtn = document.getElementById('conversion-backfill-btn');
+    const refreshBtn = document.getElementById('conversion-backfill-refresh');
+    const wrap = document.getElementById('conversion-backfill-status');
+    const label = document.getElementById('conversion-backfill-label');
+    const counts = document.getElementById('conversion-backfill-counts');
+    const bar = document.getElementById('conversion-backfill-bar');
+    const current = document.getElementById('conversion-backfill-current');
+    const error = document.getElementById('conversion-backfill-error');
+    let pollTimer = null;
+
+    if (!runBtn || !refreshBtn) return;
+
+    function render(state) {
+        wrap.classList.remove('hidden');
+        const total = state.total || 0;
+        const processed = (state.queued || 0) + (state.failed || 0);
+        const pct = total ? Math.min(100, Math.round((processed / total) * 100)) : (state.running ? 0 : 100);
+        bar.style.width = `${pct}%`;
+        label.textContent = state.running ? 'Queueing conversions...' : (state.finished_at ? 'Finished' : 'Idle');
+        counts.textContent = total
+            ? `${processed}/${total} (${state.queued || 0} queued, ${state.failed || 0} failed, ${state.skipped || 0} skipped)`
+            : (state.running ? 'starting...' : '');
+        current.textContent = state.current ? `Current: ${state.current}` : '';
+        error.textContent = state.last_error ? `Last error: ${state.last_error}` : '';
+        runBtn.disabled = Boolean(state.running);
+        if (state.running && !pollTimer) startPolling();
+        if (!state.running && pollTimer) {
+            clearInterval(pollTimer);
+            pollTimer = null;
+        }
+    }
+
+    async function fetchStatus() {
+        const response = await fetch('/api/admin/conversion-backfill/status', {
+            headers: { 'Accept': 'application/json' },
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            throw new Error(data.error || `Status failed (HTTP ${response.status}).`);
+        }
+        render(data);
+    }
+
+    function startPolling() {
+        if (!pollTimer) {
+            pollTimer = setInterval(() => fetchStatus().catch(() => {}), 2000);
+        }
+    }
+
+    runBtn.addEventListener('click', async () => {
+        runBtn.disabled = true;
+        label.textContent = 'Starting...';
+        wrap.classList.remove('hidden');
+        try {
+            const response = await fetch('/api/admin/conversion-backfill?force=true', {
+                method: 'POST',
+                headers: { 'Accept': 'application/json' },
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                throw new Error(data.error || `Backfill failed (HTTP ${response.status}).`);
+            }
+            render(data);
+            startPolling();
+        } catch (err) {
+            runBtn.disabled = false;
+            error.textContent = err.message;
+        }
+    });
+
+    refreshBtn.addEventListener('click', () => fetchStatus().catch(err => {
+        wrap.classList.remove('hidden');
+        error.textContent = err.message;
+    }));
+    document.addEventListener('DOMContentLoaded', () => fetchStatus().catch(() => {}));
+})();
+{% endif %}
 
 // ---------------------------------------------------------------------------
 // Bulk selection + actions

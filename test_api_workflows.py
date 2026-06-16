@@ -109,6 +109,29 @@ def test_admin_conversion_backfill_force_requeues_done_fbx():
     assert model.conversion_error is None
 
 
+def test_asset_admin_dashboard_can_start_conversion_backfill(monkeypatch):
+    monkeypatch.setenv("ASSET_MANAGER_ADMIN_USERNAMES", "dashboard-admin")
+    app = create_app()
+    client = app.test_client()
+    with app.app_context():
+        _ensure_user("dashboard-admin")
+
+    login = client.post("/auth/login", data={
+        "login_field": "dashboard-admin",
+        "password": "pw123456",
+    }, follow_redirects=True)
+    assert login.status_code == 200
+    html = login.get_data(as_text=True)
+    assert "Run conversion backfill" in html
+    assert "/api/admin/conversion-backfill?force=true" in html
+
+    start = client.post("/api/admin/conversion-backfill?force=true&sync=true&limit=1")
+    assert start.status_code == 200, start.get_json()
+    status = start.get_json()
+    assert status.get("running") is False
+    assert "queued" in status
+
+
 def _attach_thumbnail(app, model_id):
     with app.app_context():
         model = Model3D.get_by_id(model_id)
