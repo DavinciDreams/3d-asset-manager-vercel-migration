@@ -141,6 +141,10 @@
                         class="bg-gray-100 text-gray-700 px-3 py-2 rounded-lg hover:bg-gray-200">
                     <i class="fas fa-sync mr-1"></i>Refresh
                 </button>
+                <button type="button" id="media-capture-refresh"
+                        class="bg-amber-100 text-amber-800 px-3 py-2 rounded-lg hover:bg-amber-200">
+                    <i class="fas fa-camera mr-1"></i>Check media queue
+                </button>
             </div>
         </div>
         <div id="conversion-backfill-status" class="hidden mt-4" aria-live="polite">
@@ -165,6 +169,15 @@
             <p id="fbx-avatar-import-current" class="text-xs text-gray-500 mt-2"></p>
             <p id="fbx-avatar-import-source" class="text-xs text-gray-500 mt-1"></p>
             <p id="fbx-avatar-import-error" class="text-xs text-red-600 mt-1"></p>
+        </div>
+        <div id="media-capture-status" class="hidden mt-4 pt-4 border-t border-gray-100" aria-live="polite">
+            <div class="flex flex-wrap justify-between gap-2 text-sm text-gray-600 mb-2">
+                <span id="media-capture-label">Checking media queue...</span>
+                <span id="media-capture-counts"></span>
+            </div>
+            <p id="media-capture-worker" class="text-xs text-gray-500"></p>
+            <p id="media-capture-next" class="text-xs text-gray-500 mt-1"></p>
+            <p id="media-capture-error" class="text-xs text-red-600 mt-1"></p>
         </div>
     </div>
     {% endif %}
@@ -747,6 +760,70 @@ async function pollOptimizeJob(statusUrl, modelId) {
         wrap.classList.remove('hidden');
         error.textContent = err.message;
     }));
+    document.addEventListener('DOMContentLoaded', () => fetchStatus().catch(() => {}));
+})();
+
+// Admin media capture status. Capture itself runs in the dedicated
+// Playwright/Chromium worker; this panel tells us whether uploads are queued
+// and whether that worker has checked in recently.
+(function () {
+    const refreshBtn = document.getElementById('media-capture-refresh');
+    const wrap = document.getElementById('media-capture-status');
+    const label = document.getElementById('media-capture-label');
+    const counts = document.getElementById('media-capture-counts');
+    const worker = document.getElementById('media-capture-worker');
+    const next = document.getElementById('media-capture-next');
+    const error = document.getElementById('media-capture-error');
+
+    if (!refreshBtn) return;
+
+    function render(data) {
+        wrap.classList.remove('hidden');
+        const count = data.count || 0;
+        const ready = data.ready_count || 0;
+        const notReady = data.not_ready_count || 0;
+        const skipped = data.skipped_not_ready || 0;
+        label.textContent = count
+            ? `${count} item${count === 1 ? '' : 's'} waiting for thumbnail/video capture`
+            : 'No queued media capture work found';
+        counts.textContent = count
+            ? `${ready} ready, ${notReady} not ready${skipped ? `, ${skipped} hidden` : ''}`
+            : '';
+        const state = data.worker || {};
+        if (state.last_seen) {
+            worker.textContent = state.active
+                ? `Worker active: ${state.last_status || 'running'} at ${state.last_seen}`
+                : `Worker last seen at ${state.last_seen}; it may be stopped.`;
+        } else {
+            worker.textContent = 'No media-capture worker heartbeat since this app process started.';
+        }
+        const first = Array.isArray(data.models) ? data.models.find((item) => item.capture_ready) : null;
+        next.innerHTML = first
+            ? `Next: <a class="text-indigo-600 hover:underline" href="${first.capture_url}">${escapeHtml(first.name || first.id)}</a>`
+            : '';
+        error.textContent = state.last_error ? `Worker error: ${state.last_error}` : '';
+    }
+
+    async function fetchStatus() {
+        refreshBtn.disabled = true;
+        try {
+            const response = await fetch('/api/admin/media-capture/status?limit=50&kind=all&include_not_ready=true', {
+                headers: { 'Accept': 'application/json' },
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                throw new Error(data.error || `Status failed (HTTP ${response.status}).`);
+            }
+            render(data);
+        } catch (err) {
+            wrap.classList.remove('hidden');
+            error.textContent = err.message;
+        } finally {
+            refreshBtn.disabled = false;
+        }
+    }
+
+    refreshBtn.addEventListener('click', fetchStatus);
     document.addEventListener('DOMContentLoaded', () => fetchStatus().catch(() => {}));
 })();
 

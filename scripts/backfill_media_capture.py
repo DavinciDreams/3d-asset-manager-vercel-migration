@@ -64,6 +64,24 @@ def _fetch_queue(context, base_url: str, limit: int, kind: str, recapture: bool)
     return list(data.get("models") or [])
 
 
+def _heartbeat(context, base_url: str, *, status: str, kind: str, count=None, captured=None, error=None) -> None:
+    payload = {
+        "status": status,
+        "kind": kind,
+        "count": count,
+        "captured": captured,
+        "error": str(error)[:300] if error else None,
+    }
+    try:
+        context.request.post(
+            _absolute(base_url, "/api/admin/media-capture/heartbeat"),
+            data=json.dumps(payload),
+            headers={"Content-Type": "application/json"},
+        )
+    except Exception as exc:
+        print(f"[heartbeat] failed: {exc}", file=sys.stderr)
+
+
 def _model_state(context, base_url: str, model_id: str) -> dict:
     data = _json_response(
         context.request.get(_absolute(base_url, f"/api/model/{model_id}")),
@@ -183,12 +201,27 @@ def main(argv: list[str] | None = None) -> int:
                     items = _fetch_queue(context, args.base_url, args.limit, args.kind, args.recapture)
                 except Exception as exc:
                     print(f"[queue] fetch failed: {exc}", file=sys.stderr)
+                    _heartbeat(
+                        context,
+                        args.base_url,
+                        status="queue_fetch_failed",
+                        kind=args.kind,
+                        error=exc,
+                    )
                     if not args.poll:
                         return 1
                     time.sleep(args.interval)
                     continue
                 if not items:
                     print("[queue] empty")
+                    _heartbeat(
+                        context,
+                        args.base_url,
+                        status="empty",
+                        kind=args.kind,
+                        count=0,
+                        captured=0,
+                    )
                     if not args.poll:
                         break
                     time.sleep(args.interval)
@@ -202,6 +235,14 @@ def main(argv: list[str] | None = None) -> int:
                     except Exception as exc:
                         print(f"  failed {item.get('id')}: {exc}")
                 print(f"[cycle] captured {ok_count}/{len(items)}")
+                _heartbeat(
+                    context,
+                    args.base_url,
+                    status="captured",
+                    kind=args.kind,
+                    count=len(items),
+                    captured=ok_count,
+                )
 
                 if not args.poll:
                     break

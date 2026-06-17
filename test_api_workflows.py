@@ -124,8 +124,10 @@ def test_asset_admin_dashboard_can_start_conversion_backfill(monkeypatch):
     html = login.get_data(as_text=True)
     assert "Run conversion backfill" in html
     assert "Import FBX avatars" in html
+    assert "Check media queue" in html
     assert "/api/admin/conversion-backfill?force=true" in html
     assert "/api/admin/fbx-avatar-import?tag=robot" in html
+    assert "/api/admin/media-capture/status" in html
 
     start = client.post("/api/admin/conversion-backfill?force=true&sync=true&limit=1")
     assert start.status_code == 200, start.get_json()
@@ -832,6 +834,47 @@ def test_admin_media_capture_queue_lists_only_renderable_missing_media():
     fbx_item = next(item for item in animation_queue.get_json()["models"] if item["id"] == fbx_id)
     assert fbx_item["capture_mode"] == "animation"
     assert fbx_item["capture_url"].endswith(f"/animations?capture_clip={fbx_id}:vrma")
+
+
+def test_admin_media_capture_status_and_heartbeat():
+    app = create_app()
+    client = app.test_client()
+    headers = {"Authorization": "Bearer test-token"}
+
+    upload = client.post("/api/upload", headers=headers, data={
+        "is_public": "true",
+        "file": (io.BytesIO(b"glTF" + b"\x0a" * 64), "needs_media.glb"),
+    }, content_type="multipart/form-data")
+    assert upload.status_code == 201, upload.get_json()
+    model_id = upload.get_json()["model"]["id"]
+
+    status = client.get(
+        "/api/admin/media-capture/status?limit=20&kind=all&include_not_ready=true",
+        headers=headers,
+    )
+    assert status.status_code == 200, status.get_json()
+    data = status.get_json()
+    assert data["count"] >= 1
+    assert data["ready_count"] >= 1
+    assert data["worker"]["last_seen"] is None
+    assert data["worker"]["active"] is False
+    assert model_id in {item["id"] for item in data["models"]}
+
+    heartbeat = client.post(
+        "/api/admin/media-capture/heartbeat",
+        headers={**headers, "Content-Type": "application/json"},
+        json={"status": "captured", "kind": "models", "count": 1, "captured": 1},
+    )
+    assert heartbeat.status_code == 200, heartbeat.get_json()
+    assert heartbeat.get_json()["worker"]["active"] is True
+
+    status_after = client.get("/api/admin/media-capture/status?limit=20", headers=headers)
+    assert status_after.status_code == 200, status_after.get_json()
+    worker = status_after.get_json()["worker"]
+    assert worker["active"] is True
+    assert worker["last_status"] == "captured"
+    assert worker["last_count"] == 1
+    assert worker["last_captured"] == 1
 
 
 def test_fbx_source_with_vrm_and_vrma_lives_in_avatar_animation_apis():

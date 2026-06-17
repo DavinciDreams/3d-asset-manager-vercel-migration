@@ -4230,6 +4230,15 @@ _fbx_avatar_import_state = {
     'tag': 'robot',
     'limit': None,
 }
+_MEDIA_CAPTURE_LOCK = threading.Lock()
+_media_capture_state = {
+    'last_seen': None,
+    'last_status': None,
+    'last_error': None,
+    'last_count': None,
+    'last_captured': None,
+    'last_kind': None,
+}
 
 
 def _admin_token_ok():
@@ -4458,23 +4467,11 @@ def admin_fbx_avatar_import_status():
         return jsonify(dict(_fbx_avatar_import_state))
 
 
-@api_bp.route('/admin/media-capture/queue', methods=['GET'])
-def admin_media_capture_queue():
-    """List renderable models that still need thumbnail/video capture.
-
-    The capture itself is browser-side WebGL work, so this endpoint feeds a
-    trusted browser runner. It is intentionally token/admin gated because it can
-    expose private model IDs and owner names.
-    """
-    if not _admin_or_asset_admin_session_ok():
-        return jsonify({'error': 'Unauthorized'}), 401
-
-    limit = max(1, min(request.args.get('limit', 50, type=int), 200))
-    kind = (request.args.get('kind') or 'all').strip().lower()
+def _media_capture_queue_snapshot(limit=50, kind='all', include_not_ready=False, recapture=False):
+    limit = max(1, min(int(limit or 50), 200))
+    kind = (kind or 'all').strip().lower()
     if kind not in {'all', 'models', 'animations'}:
         kind = 'all'
-    include_not_ready = request.args.get('include_not_ready', 'false').lower() == 'true'
-    recapture = request.args.get('recapture', 'false').lower() in {'1', 'true', 'yes'}
     items = []
     skipped_not_ready = 0
 
@@ -4520,14 +4517,86 @@ def admin_media_capture_queue():
         items.extend(item for item in animation_items if item.get('id') not in seen_ids)
         skipped_not_ready += animation_skipped
 
-    return jsonify({
+    return {
         'success': True,
         'kind': kind,
         'recapture': recapture,
         'count': len(items),
+        'ready_count': len([item for item in items if item.get('capture_ready')]),
+        'not_ready_count': len([item for item in items if not item.get('capture_ready')]),
         'skipped_not_ready': skipped_not_ready,
         'models': items,
+    }
+
+
+def _media_capture_worker_status():
+    with _MEDIA_CAPTURE_LOCK:
+        state = dict(_media_capture_state)
+    last_seen = state.get('last_seen')
+    active = False
+    if last_seen:
+        try:
+            seen_at = datetime.fromisoformat(last_seen)
+            active = (datetime.utcnow() - seen_at).total_seconds() <= 180
+        except Exception:
+            active = False
+    state['active'] = active
+    return state
+
+
+@api_bp.route('/admin/media-capture/queue', methods=['GET'])
+def admin_media_capture_queue():
+    """List renderable models that still need thumbnail/video capture.
+
+    The capture itself is browser-side WebGL work, so this endpoint feeds a
+    trusted browser runner. It is intentionally token/admin gated because it can
+    expose private model IDs and owner names.
+    """
+    if not _admin_or_asset_admin_session_ok():
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    data = _media_capture_queue_snapshot(
+        limit=request.args.get('limit', 50, type=int),
+        kind=request.args.get('kind') or 'all',
+        include_not_ready=request.args.get('include_not_ready', 'false').lower() == 'true',
+        recapture=request.args.get('recapture', 'false').lower() in {'1', 'true', 'yes'},
+    )
+    return jsonify(data)
+
+
+@api_bp.route('/admin/media-capture/status', methods=['GET'])
+def admin_media_capture_status():
+    if not _admin_or_asset_admin_session_ok():
+        return jsonify({'error': 'Unauthorized'}), 401
+    queue = _media_capture_queue_snapshot(
+        limit=request.args.get('limit', 50, type=int),
+        kind=request.args.get('kind') or 'all',
+        include_not_ready=request.args.get('include_not_ready', 'true').lower() == 'true',
+        recapture=request.args.get('recapture', 'false').lower() in {'1', 'true', 'yes'},
+    )
+    return jsonify({
+        **queue,
+        'worker': _media_capture_worker_status(),
     })
+
+
+@api_bp.route('/admin/media-capture/heartbeat', methods=['POST'])
+def admin_media_capture_heartbeat():
+    if not _admin_or_asset_admin_session_ok():
+        return jsonify({'error': 'Unauthorized'}), 401
+    payload = request.get_json(silent=True) or {}
+    with _MEDIA_CAPTURE_LOCK:
+        _media_capture_state.update({
+            'last_seen': datetime.utcnow().isoformat(),
+            'last_status': str(payload.get('status') or 'running')[:80],
+            'last_error': (str(payload.get('error'))[:300] if payload.get('error') else None),
+            'last_count': payload.get('count'),
+            'last_captured': payload.get('captured'),
+            'last_kind': str(payload.get('kind') or '')[:40] or None,
+        })
+        state = dict(_media_capture_state)
+    state['active'] = True
+    return jsonify({'success': True, 'worker': state})
 
 
 def _conversion_backfill_candidate(model, *, force=False):
