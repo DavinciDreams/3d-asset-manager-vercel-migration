@@ -58,24 +58,12 @@
                     {% endif %}
                 </div>
                 <div class="text-sm text-gray-500">{{ model.file_extension.upper() }}</div>
-                <div id="model-facets-{{ model.id }}" class="dashboard-chip-row mt-1 {% if not (model.asset_category or model.asset_styles or model.asset_types) %}hidden{% endif %}">
+                <div id="model-facets-{{ model.id }}" class="dashboard-chip-row mt-1 {% if not model.asset_category %}hidden{% endif %}">
                     {% if model.asset_category %}
                     <span class="dashboard-chip bg-gray-100 text-gray-700 text-xs px-2 py-0.5 rounded" title="{{ model.asset_category|title }}">{{ model.asset_category|title }}</span>
                     {% endif %}
-                    {% for s in model.asset_styles %}
-                    <span class="dashboard-chip bg-purple-50 text-purple-700 text-xs px-2 py-0.5 rounded" title="{{ s }}">{{ s }}</span>
-                    {% endfor %}
-                    {% for t in model.asset_types %}
-                    <span class="dashboard-chip bg-teal-50 text-teal-700 text-xs px-2 py-0.5 rounded" title="{{ t }}">{{ t }}</span>
-                    {% endfor %}
                 </div>
-                <div id="model-tags-{{ model.id }}" class="dashboard-chip-row mt-1 {% if not model.tags %}hidden{% endif %}">
-                    {% if model.tags %}
-                    {% for t in model.tags %}
-                    <span class="dashboard-chip bg-indigo-50 text-indigo-700 text-xs px-2 py-0.5 rounded" title="{{ t }}">{{ t }}</span>
-                    {% endfor %}
-                    {% endif %}
-                </div>
+                <div id="model-tags-{{ model.id }}" class="hidden"></div>
             </div>
         </div>
     </td>
@@ -102,7 +90,7 @@
     <td class="px-3 py-4 whitespace-nowrap text-sm text-gray-500 hidden lg:table-cell">
         {{ model.upload_date.strftime('%Y-%m-%d') }}
     </td>
-    <td class="px-3 py-4 whitespace-nowrap text-right">
+    <td class="dashboard-actions-col px-3 py-4 whitespace-nowrap text-right">
         <div class="inline-flex items-center gap-0.5">
             <a href="{{ url_for('main.model_detail', model_id=model.id) }}"
                class="row-action text-indigo-600 hover:text-indigo-900" title="View">

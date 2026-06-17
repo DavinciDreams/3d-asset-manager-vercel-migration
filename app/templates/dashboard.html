@@ -26,13 +26,13 @@
     }
     /* Constrain the Model/title column so long titles wrap instead of
        stretching the row; let the thumbnail column stay snug. */
-    .col-model { width: 36%; min-width: 420px; }
+    .col-model { width: 34%; min-width: 260px; }
     .col-model .model-title { overflow-wrap: anywhere; }
     .dashboard-chip-row {
         display: flex;
         flex-wrap: nowrap;
         gap: 0.25rem;
-        max-width: min(620px, 100%);
+        max-width: 100%;
         overflow: hidden;
         position: relative;
         white-space: nowrap;
@@ -49,11 +49,21 @@
     }
     .dashboard-chip {
         flex: 0 0 auto;
-        max-width: 10rem;
+        max-width: 9rem;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
     }
+    .dashboard-actions-col {
+        position: sticky;
+        right: 0;
+        z-index: 3;
+        background: #fff;
+        box-shadow: -8px 0 12px -12px rgba(15, 23, 42, 0.35);
+    }
+    thead .dashboard-actions-col { background: #f9fafb; }
+    tbody tr:hover .dashboard-actions-col { background: #f9fafb; }
+    tbody tr.bg-blue-50 .dashboard-actions-col { background: #eff6ff; }
     /* Compact icon action buttons in the table */
     .row-action {
         display: inline-flex;
@@ -296,7 +306,7 @@
                         <th class="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider hidden lg:table-cell">DLs</th>
                         <th class="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
                         <th class="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider hidden lg:table-cell">Uploaded</th>
-                        <th class="px-3 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                        <th class="dashboard-actions-col px-3 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
                     </tr>
                 </thead>
                 <tbody id="models-tbody" class="bg-white divide-y divide-gray-200">
@@ -410,30 +420,19 @@ function escapeHtml(value) {
 function renderTagBadges(modelId, tags) {
     const wrap = document.getElementById(`model-tags-${modelId}`);
     if (!wrap) return;
-    const clean = Array.isArray(tags) ? tags.filter(Boolean) : [];
-    wrap.innerHTML = clean.map((tag) =>
-        `<span class="dashboard-chip bg-indigo-50 text-indigo-700 text-xs px-2 py-0.5 rounded" title="${escapeHtml(tag)}">${escapeHtml(tag)}</span>`
-    ).join('');
-    wrap.classList.toggle('hidden', clean.length === 0);
+    wrap.innerHTML = '';
+    wrap.classList.add('hidden');
 }
 
 function renderFacetBadges(modelId, model) {
     const wrap = document.getElementById(`model-facets-${modelId}`);
     if (!wrap) return;
     const category = model.asset_category || '';
-    const styles = Array.isArray(model.asset_styles) ? model.asset_styles.filter(Boolean) : [];
-    const types = Array.isArray(model.asset_types) ? model.asset_types.filter(Boolean) : [];
     const badges = [];
     if (category) {
         const label = category.replace(/\b\w/g, c => c.toUpperCase());
         badges.push(`<span class="dashboard-chip bg-gray-100 text-gray-700 text-xs px-2 py-0.5 rounded" title="${escapeHtml(label)}">${escapeHtml(label)}</span>`);
     }
-    styles.forEach((style) => {
-        badges.push(`<span class="dashboard-chip bg-purple-50 text-purple-700 text-xs px-2 py-0.5 rounded" title="${escapeHtml(style)}">${escapeHtml(style)}</span>`);
-    });
-    types.forEach((type) => {
-        badges.push(`<span class="dashboard-chip bg-teal-50 text-teal-700 text-xs px-2 py-0.5 rounded" title="${escapeHtml(type)}">${escapeHtml(type)}</span>`);
-    });
     wrap.innerHTML = badges.join('');
     wrap.classList.toggle('hidden', badges.length === 0);
 }
