@@ -474,6 +474,21 @@ def test_upload_derives_rig_and_animation_metadata_from_glb():
             settings={
                 "mesh_stats": {"vertices": 24, "triangles": 12, "primitives": 1},
                 "physical": {"height": 1, "width": 1, "depth": 1, "radius": 0.866025, "suggested_scale": 1},
+                "runtime_cost": {
+                    "triangle_count": 12,
+                    "vertex_count": 24,
+                    "texture_count": 1,
+                    "largest_texture_bytes": 4096,
+                    "total_byte_size": 321,
+                    "ktx2": True,
+                    "ktx2_produced": True,
+                    "approx_vram_bytes": 8192,
+                    "preset": "balanced",
+                    "defaults_version": "2026-06-17",
+                },
+                "preset": "balanced",
+                "defaults_version": "2026-06-17",
+                "texture_compression": "KTX2/Basis",
             },
         )
 
@@ -482,6 +497,9 @@ def test_upload_derives_rig_and_animation_metadata_from_glb():
     fetched_model = fetched.get_json()["model"]
     assert fetched_model["effective_file_size"] == 321
     assert fetched_model["game_optimized"]["mesh_stats"] == {"vertices": 24, "triangles": 12, "primitives": 1}
+    assert fetched_model["game_optimized"]["runtime_cost"]["triangle_count"] == 12
+    assert fetched_model["game_optimized"]["runtime_cost"]["ktx2_produced"] is True
+    assert fetched_model["game_optimized"]["optimization"]["preset"] == "balanced"
     assert fetched_model["effective_mesh_stats"] == {"vertices": 24, "triangles": 12, "primitives": 1}
     assert fetched_model["game_optimized"]["physical"]["height"] == 1
     assert fetched_model["effective_physical_metadata"]["suggested_scale"] == 1
@@ -1609,9 +1627,13 @@ def test_openapi_documents_workflow_and_bearer_auth():
     spec = app.test_client().get("/api/openapi.json").get_json()
     assert "bearerAuth" in spec["components"]["securitySchemes"]
     assert "get" in spec["paths"]["/model/{model_id}"]
+    assert "/optimization/defaults" in spec["paths"]
     assert "/model/{model_id}/ai/autotag" in spec["paths"]
     assert "/model/{model_id}/approval" in spec["paths"]
     assert "/bundles" in spec["paths"]
+    optimize_props = spec["paths"]["/model/{model_id}/optimize-game"]["post"]["requestBody"]["content"]["application/json"]["schema"]["properties"]
+    assert optimize_props["preset"]["default"] == "balanced"
+    assert optimize_props["simplify_ratio"]["default"] == 0.85
     props = spec["paths"]["/model/{model_id}/ai/autotag"]["post"]["requestBody"]["content"]["application/json"]["schema"]["properties"]
     assert "include_title" in props
     assert "async" in props
@@ -1627,6 +1649,54 @@ def test_openapi_documents_workflow_and_bearer_auth():
     assert "runtime_metadata" in model_props
     assert "MeshStats" in spec["components"]["schemas"]
     assert "RuntimeMetadata" in spec["components"]["schemas"]
+    assert "RuntimeCost" in spec["components"]["schemas"]
+
+
+def test_game_optimization_defaults_are_public_tellus_contract():
+    app = create_app()
+    response = app.test_client().get("/api/optimization/defaults")
+    assert response.status_code == 200, response.get_json()
+    body = response.get_json()
+    assert body["success"] is True
+    assert body["default_preset"] == "balanced"
+    assert body["defaults"]["texture_limit"] == 1024
+    assert body["defaults"]["simplify_ratio"] == 0.85
+    assert body["presets"]["quality"]["texture_limit"] == 2048
+    assert body["supported"]["texture_compression"].startswith("KTX2/Basis")
+
+
+def test_gltf_runtime_cost_metadata_tracks_textures_meshopt_and_vram():
+    import app.api as api
+
+    glb = _minimal_glb({
+        "asset": {"version": "2.0"},
+        "extensionsUsed": ["EXT_meshopt_compression", "KHR_texture_basisu"],
+        "meshes": [{"primitives": [{"attributes": {"POSITION": 0}, "indices": 1}]}],
+        "accessors": [
+            {"bufferView": 0, "count": 24},
+            {"bufferView": 1, "count": 36},
+        ],
+        "bufferViews": [
+            {"buffer": 0, "byteOffset": 0, "byteLength": 288},
+            {"buffer": 0, "byteOffset": 288, "byteLength": 72},
+            {"buffer": 0, "byteOffset": 360, "byteLength": 4096},
+        ],
+        "images": [{"bufferView": 2, "mimeType": "image/ktx2"}],
+        "textures": [{"extensions": {"KHR_texture_basisu": {"source": 0}}}],
+    })
+
+    runtime = api._file_derived_metadata(glb, "glb")[1]
+    stats = api._gltf_runtime_cost_metadata(glb, "glb", runtime, len(glb))
+    assert stats["triangle_count"] == 12
+    assert stats["vertex_count"] == 24
+    assert stats["texture_count"] == 1
+    assert stats["largest_texture_bytes"] == 4096
+    assert stats["geometry_buffer_bytes"] == 360
+    assert stats["texture_vram_bytes"] == 4096
+    assert stats["approx_vram_bytes"] == 4456
+    assert stats["total_byte_size"] == len(glb)
+    assert stats["ktx2"] is True
+    assert stats["meshopt"] is True
 
 
 def test_async_enrichment_queues_and_model_status_endpoint(monkeypatch):

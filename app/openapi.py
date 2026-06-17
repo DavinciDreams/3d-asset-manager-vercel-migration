@@ -262,11 +262,36 @@ def get_openapi_spec(base_url=''):
                     'properties': {
                         'size': {'type': 'integer', 'description': 'Optimized GLB size in bytes', 'example': 248320},
                         'mesh_stats': {'$ref': '#/components/schemas/MeshStats'},
+                        'runtime_cost': {'$ref': '#/components/schemas/RuntimeCost'},
+                        'optimization': {'type': 'object'},
                         'status': {'type': 'string', 'example': 'ready'},
                         'settings': {'type': 'object', 'description': 'gltfpack settings + size/savings used to produce it'},
                         'updated_at': {'type': 'string', 'format': 'date-time', 'nullable': True},
                         'url': {'type': 'string', 'description': 'Inline GLB URL', 'example': '/api/model/abc/game-optimized'},
                         'download_url': {'type': 'string', 'example': '/api/model/abc/game-optimized?download=1'},
+                    },
+                },
+                'RuntimeCost': {
+                    'type': 'object',
+                    'nullable': True,
+                    'description': 'Post-optimize cost metadata for Tellus load priority, LOD and memory budgeting.',
+                    'properties': {
+                        'triangle_count': {'type': 'integer', 'nullable': True, 'example': 24000},
+                        'vertex_count': {'type': 'integer', 'nullable': True, 'example': 12000},
+                        'primitive_count': {'type': 'integer', 'nullable': True, 'example': 3},
+                        'texture_count': {'type': 'integer', 'example': 4},
+                        'image_count': {'type': 'integer', 'example': 4},
+                        'largest_texture_bytes': {'type': 'integer', 'example': 524288},
+                        'total_texture_bytes': {'type': 'integer', 'example': 1048576},
+                        'geometry_buffer_bytes': {'type': 'integer', 'example': 320000},
+                        'texture_vram_bytes': {'type': 'integer', 'example': 1048576},
+                        'approx_vram_bytes': {'type': 'integer', 'example': 1368576},
+                        'total_byte_size': {'type': 'integer', 'example': 248320},
+                        'ktx2': {'type': 'boolean', 'example': True},
+                        'ktx2_produced': {'type': 'boolean', 'example': True},
+                        'meshopt': {'type': 'boolean', 'example': True},
+                        'preset': {'type': 'string', 'example': 'balanced'},
+                        'defaults_version': {'type': 'string', 'example': '2026-06-17'},
                     },
                 },
                 'MediaSummary': {
@@ -1357,12 +1382,43 @@ def get_openapi_spec(base_url=''):
                     },
                 },
             },
+            '/optimization/defaults': {
+                'get': {
+                    'tags': ['Workflows'],
+                    'summary': 'Get game optimization defaults and presets',
+                    'description': (
+                        'Public Tellus-facing contract for the optimizer defaults. '
+                        'Use this to populate preset selectors and understand what '
+                        'metadata appears on game_optimized.runtime_cost.'
+                    ),
+                    'responses': {
+                        '200': {
+                            'description': 'Current optimizer defaults and presets',
+                            'content': {
+                                'application/json': {
+                                    'schema': {
+                                        'type': 'object',
+                                        'properties': {
+                                            'success': {'type': 'boolean'},
+                                            'defaults_version': {'type': 'string'},
+                                            'default_preset': {'type': 'string', 'example': 'balanced'},
+                                            'defaults': {'type': 'object'},
+                                            'presets': {'type': 'object'},
+                                            'supported': {'type': 'object'},
+                                        },
+                                    }
+                                }
+                            },
+                        },
+                    },
+                },
+            },
             '/model/{model_id}/optimize-game': {
                 'parameters': [{'name': 'model_id', 'in': 'path', 'required': True, 'schema': {'type': 'string'}}],
                 'post': {
                     'tags': ['Workflows'],
                     'summary': 'Queue a game-optimized GLB copy',
-                    'description': 'Queues gltfpack optimization in the background. Choose meshopt for the smallest file or fallback for a self-contained file without mesh compression. The source asset is not replaced.',
+                    'description': 'Queues gltfpack optimization in the background. Select a preset, then override individual fields when needed. Choose meshopt for the smallest file or fallback for a self-contained file without mesh compression. The source asset is not replaced.',
                     'security': [{'sessionCookie': []}, {'bearerAuth': []}],
                     'requestBody': {
                         'content': {
@@ -1370,6 +1426,11 @@ def get_openapi_spec(base_url=''):
                                 'schema': {
                                     'type': 'object',
                                     'properties': {
+                                        'preset': {
+                                            'type': 'string',
+                                            'default': 'balanced',
+                                            'enum': ['balanced', 'preview', 'quality', 'compatibility'],
+                                        },
                                         'texture_limit': {
                                             'type': 'integer',
                                             'default': 1024,
@@ -1377,7 +1438,7 @@ def get_openapi_spec(base_url=''):
                                         },
                                         'simplify_ratio': {
                                             'type': 'number',
-                                            'default': 0.75,
+                                            'default': 0.85,
                                             'minimum': 0.01,
                                             'maximum': 1,
                                         },

@@ -212,6 +212,88 @@ def _gltf_json_from_bytes(file_content, file_extension):
     return None
 
 
+def _gltf_runtime_cost_metadata(file_content, file_extension, runtime=None, file_size=None):
+    """Post-optimization cost hints for Tellus loaders and LOD decisions."""
+    gltf = _gltf_json_from_bytes(file_content, file_extension)
+    if not isinstance(gltf, dict):
+        return {}
+
+    runtime = runtime if isinstance(runtime, dict) else {}
+    mesh_stats = runtime.get('mesh_stats') if isinstance(runtime.get('mesh_stats'), dict) else _gltf_mesh_stats(gltf)
+    buffer_views = gltf.get('bufferViews') if isinstance(gltf.get('bufferViews'), list) else []
+    accessors = gltf.get('accessors') if isinstance(gltf.get('accessors'), list) else []
+    images = gltf.get('images') if isinstance(gltf.get('images'), list) else []
+    textures = gltf.get('textures') if isinstance(gltf.get('textures'), list) else []
+    extensions_used = set(gltf.get('extensionsUsed') or [])
+    extensions_required = set(gltf.get('extensionsRequired') or [])
+
+    def _buffer_view_size(index):
+        try:
+            view = buffer_views[int(index)]
+        except (TypeError, ValueError, IndexError):
+            return 0
+        if not isinstance(view, dict):
+            return 0
+        try:
+            return max(0, int(view.get('byteLength') or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    geometry_views = set()
+    for accessor in accessors:
+        if isinstance(accessor, dict) and accessor.get('bufferView') is not None:
+            try:
+                geometry_views.add(int(accessor.get('bufferView')))
+            except (TypeError, ValueError):
+                continue
+    geometry_buffer_bytes = sum(_buffer_view_size(index) for index in geometry_views)
+
+    image_bytes = []
+    ktx2 = 'KHR_texture_basisu' in extensions_used or 'KHR_texture_basisu' in extensions_required
+    for image in images:
+        if not isinstance(image, dict):
+            continue
+        mime_type = str(image.get('mimeType') or '').lower()
+        uri = str(image.get('uri') or '')
+        if 'ktx2' in mime_type or uri.lower().endswith('.ktx2'):
+            ktx2 = True
+        byte_size = _buffer_view_size(image.get('bufferView'))
+        if not byte_size and uri.startswith('data:'):
+            try:
+                _header, encoded = uri.split(',', 1)
+                byte_size = len(base64.b64decode(encoded))
+            except Exception:
+                byte_size = 0
+        image_bytes.append(byte_size)
+    for texture in textures:
+        if isinstance(texture, dict) and isinstance(texture.get('extensions'), dict):
+            if 'KHR_texture_basisu' in texture['extensions']:
+                ktx2 = True
+
+    total_texture_bytes = sum(image_bytes)
+    largest_texture_bytes = max(image_bytes) if image_bytes else 0
+    texture_vram_bytes = total_texture_bytes if ktx2 else total_texture_bytes * 4
+    approx_vram_bytes = geometry_buffer_bytes + texture_vram_bytes
+    meshopt = 'EXT_meshopt_compression' in extensions_used or 'EXT_meshopt_compression' in extensions_required
+
+    stats = {
+        'triangle_count': mesh_stats.get('triangles') if isinstance(mesh_stats, dict) else None,
+        'vertex_count': mesh_stats.get('vertices') if isinstance(mesh_stats, dict) else None,
+        'primitive_count': mesh_stats.get('primitives') if isinstance(mesh_stats, dict) else None,
+        'texture_count': len(textures) or len(images),
+        'image_count': len(images),
+        'largest_texture_bytes': largest_texture_bytes,
+        'total_texture_bytes': total_texture_bytes,
+        'geometry_buffer_bytes': geometry_buffer_bytes,
+        'texture_vram_bytes': texture_vram_bytes,
+        'approx_vram_bytes': approx_vram_bytes,
+        'total_byte_size': int(file_size if file_size is not None else len(file_content or b'')),
+        'ktx2': bool(ktx2),
+        'meshopt': bool(meshopt),
+    }
+    return {key: value for key, value in stats.items() if value is not None}
+
+
 def _file_derived_metadata(file_content, file_extension):
     gltf = _gltf_json_from_bytes(file_content, file_extension)
     if not isinstance(gltf, dict):
@@ -3020,6 +3102,7 @@ def _game_optimized_fields(model):
     variant = ModelVariant.get(model.id, 'game')
     if not variant or not variant.file_id:
         return {'has_game_optimized': False, 'game_optimized': None}
+    runtime_cost = _variant_runtime_cost_metadata(variant)
     return {
         'has_game_optimized': True,
         'game_optimized': {
@@ -3027,6 +3110,13 @@ def _game_optimized_fields(model):
             'settings': variant.settings,
             'mesh_stats': _variant_mesh_stats(variant),
             'physical': _variant_physical_metadata(variant),
+            'runtime_cost': runtime_cost,
+            'optimization': {
+                'preset': (variant.settings or {}).get('preset'),
+                'defaults_version': (variant.settings or {}).get('defaults_version'),
+                'texture_compression': (variant.settings or {}).get('texture_compression'),
+                'ktx2_produced': runtime_cost.get('ktx2_produced') if isinstance(runtime_cost, dict) else None,
+            },
             'status': variant.status,
             'updated_at': variant.updated_at.isoformat() if variant.updated_at else None,
             'url': url_for('api.get_game_optimized', model_id=model.id),
@@ -3071,6 +3161,19 @@ def _variant_physical_metadata(variant):
     _asset_types, runtime = _file_derived_metadata(data, variant.file_format or 'glb')
     physical = runtime.get('physical') if isinstance(runtime, dict) else None
     return physical if isinstance(physical, dict) and physical else None
+
+
+def _variant_runtime_cost_metadata(variant):
+    settings = variant.settings or {}
+    stats = settings.get('runtime_cost') if isinstance(settings, dict) else None
+    if isinstance(stats, dict) and stats:
+        return stats
+    data = variant.read_data()
+    if not data:
+        return None
+    _asset_types, runtime = _file_derived_metadata(data, variant.file_format or 'glb')
+    stats = _gltf_runtime_cost_metadata(data, variant.file_format or 'glb', runtime, variant.size)
+    return stats if isinstance(stats, dict) and stats else None
 
 
 def _effective_file_size(model, game_fields=None):
@@ -3902,6 +4005,7 @@ def _run_game_optimizer(model, owner_id, settings):
     # does not need it, so we check inside the gltfpack branch instead.
     gltfpack_bin = shutil.which('gltfpack')
 
+    settings = _normalize_game_optimization_settings(settings)
     texture_limit = settings['texture_limit']
     simplify_ratio = settings['simplify_ratio']
     compression_mode = settings['compression_mode']
@@ -4023,6 +4127,15 @@ def _run_game_optimizer(model, owner_id, settings):
         optimized_mesh_stats = optimized_runtime.get('mesh_stats')
         source_physical = source_runtime.get('physical')
         optimized_physical = optimized_runtime.get('physical')
+        source_runtime_cost = _gltf_runtime_cost_metadata(src_bytes, src_fmt, source_runtime, original_size)
+        runtime_cost = _gltf_runtime_cost_metadata(out_bytes, 'glb', optimized_runtime, optimized_size)
+        if runtime_cost:
+            runtime_cost['ktx2_produced'] = bool(
+                runtime_cost.get('ktx2')
+                and not (source_runtime_cost or {}).get('ktx2')
+            )
+            runtime_cost['preset'] = settings.get('preset')
+            runtime_cost['defaults_version'] = settings.get('defaults_version')
         # gltfpack + meshopt/KTX2 can leave accessor min/max values in a
         # quantized integer domain when inspected statically. That is useful for
         # low-level diagnostics but wrong for world/avatar scale. The optimized
@@ -4034,6 +4147,8 @@ def _run_game_optimizer(model, owner_id, settings):
         # (no separate Model3D). Re-optimizing replaces the existing variant;
         # the old blob is removed once the pointer is swapped.
         variant_settings = {
+            'preset': settings.get('preset'),
+            'defaults_version': settings.get('defaults_version'),
             'texture_limit': texture_limit,
             'simplify_ratio': simplify_ratio,
             'compression_mode': compression_mode,
@@ -4046,6 +4161,8 @@ def _run_game_optimizer(model, owner_id, settings):
             'source_physical': source_physical,
             'optimized_physical_raw': optimized_physical,
             'physical': variant_physical,
+            'source_runtime_cost': source_runtime_cost,
+            'runtime_cost': runtime_cost,
             'source_is_fixed_eyes': used_fixed_eyes,
             'report': report,
         }
@@ -4073,9 +4190,12 @@ def _run_game_optimizer(model, owner_id, settings):
             'settings': {
                 'texture_limit': texture_limit,
                 'simplify_ratio': simplify_ratio,
+                'preset': settings.get('preset'),
+                'defaults_version': settings.get('defaults_version'),
                 'compression': 'gltfpack -cc' if compression_mode == 'meshopt' else 'gltfpack without mesh compression',
                 'texture_compression': texture_note,
             },
+            'runtime_cost': runtime_cost,
             'report': report,
         }
     finally:
@@ -4133,6 +4253,66 @@ GAME_OPTIMIZE_DEFAULTS = {
     'simplify_ratio': 0.85,
     'compression_mode': 'meshopt',
 }
+GAME_OPTIMIZE_DEFAULT_PRESET = 'balanced'
+GAME_OPTIMIZE_DEFAULTS_VERSION = '2026-06-17'
+GAME_OPTIMIZE_PRESETS = {
+    'balanced': dict(GAME_OPTIMIZE_DEFAULTS),
+    'preview': {
+        'texture_limit': 1024,
+        'simplify_ratio': 0.75,
+        'compression_mode': 'meshopt',
+    },
+    'quality': {
+        'texture_limit': 2048,
+        'simplify_ratio': 0.95,
+        'compression_mode': 'meshopt',
+    },
+    'compatibility': {
+        'texture_limit': 1024,
+        'simplify_ratio': 0.85,
+        'compression_mode': 'fallback',
+    },
+}
+
+
+def _game_optimization_defaults_payload():
+    return {
+        'defaults_version': GAME_OPTIMIZE_DEFAULTS_VERSION,
+        'default_preset': GAME_OPTIMIZE_DEFAULT_PRESET,
+        'defaults': dict(GAME_OPTIMIZE_DEFAULTS),
+        'presets': {key: dict(value) for key, value in GAME_OPTIMIZE_PRESETS.items()},
+        'supported': {
+            'texture_limits': [0, 1024, 2048, 4096],
+            'compression_modes': ['meshopt', 'fallback'],
+            'mesh_compression': 'EXT_meshopt_compression via gltfpack -cc when compression_mode=meshopt',
+            'texture_compression': 'KTX2/Basis via gltfpack -tc when texture_limit is non-zero',
+            'endpoint': '/api/model/{model_id}/game-optimized',
+        },
+    }
+
+
+def _normalize_game_optimization_settings(data):
+    data = data or {}
+    preset = str(data.get('preset') or GAME_OPTIMIZE_DEFAULT_PRESET).strip().lower()
+    if preset in ('default', ''):
+        preset = GAME_OPTIMIZE_DEFAULT_PRESET
+    if preset not in GAME_OPTIMIZE_PRESETS:
+        allowed = ', '.join(sorted(GAME_OPTIMIZE_PRESETS))
+        raise ValueError(f'preset must be one of: {allowed}.')
+
+    base = dict(GAME_OPTIMIZE_PRESETS[preset])
+    settings = {
+        'preset': preset,
+        'texture_limit': _optimize_game_int(data, 'texture_limit', base['texture_limit'], allowed=(0, 1024, 2048, 4096)),
+        'simplify_ratio': _optimize_game_float(data, 'simplify_ratio', base['simplify_ratio']),
+        'compression_mode': (data.get('compression_mode') or base['compression_mode']).strip().lower(),
+        'defaults_version': GAME_OPTIMIZE_DEFAULTS_VERSION,
+    }
+    if settings['compression_mode'] not in ('meshopt', 'fallback'):
+        raise ValueError('compression_mode must be meshopt or fallback.')
+    if data.get('name'):
+        settings['name'] = str(data.get('name')).strip()
+    return settings
 
 
 def _enqueue_game_optimization(model_id, owner_id, settings):
@@ -4810,6 +4990,12 @@ def admin_optimize_all_status():
         return jsonify(dict(_backfill_state))
 
 
+@api_bp.route('/optimization/defaults', methods=['GET'])
+def game_optimization_defaults():
+    """Public optimizer contract for Tellus and admin UI preset selectors."""
+    return jsonify({'success': True, **_game_optimization_defaults_payload()})
+
+
 @api_bp.route('/model/<model_id>/optimize-game', methods=['POST'])
 def optimize_model_for_game(model_id):
     """Queue a game-optimized GLB copy without replacing the source asset."""
@@ -4826,15 +5012,7 @@ def optimize_model_for_game(model_id):
 
         data = _payload()
         try:
-            settings = {
-                'texture_limit': _optimize_game_int(data, 'texture_limit', 1024, allowed=(0, 1024, 2048, 4096)),
-                'simplify_ratio': _optimize_game_float(data, 'simplify_ratio', 0.75),
-                'compression_mode': (data.get('compression_mode') or 'meshopt').strip().lower(),
-            }
-            if settings['compression_mode'] not in ('meshopt', 'fallback'):
-                return jsonify({'error': 'compression_mode must be meshopt or fallback.'}), 400
-            if data.get('name'):
-                settings['name'] = str(data.get('name')).strip()
+            settings = _normalize_game_optimization_settings(data)
         except ValueError as e:
             return jsonify({'error': str(e)}), 400
 
