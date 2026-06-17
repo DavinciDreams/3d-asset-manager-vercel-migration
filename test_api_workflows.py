@@ -178,6 +178,12 @@ def test_asset_admin_can_import_fbx_avatar_batch(monkeypatch, tmp_path):
     assert "robot" in model.tags
     assert model.file_format == "fbx"
 
+    again = client.post("/api/admin/fbx-avatar-import?tag=robot&sync=true")
+    assert again.status_code == 200, again.get_json()
+    again_status = again.get_json()
+    assert again_status["imported"] == 0
+    assert again_status["skipped"] == 1
+
 
 def test_uncategorized_gltf_upload_appears_in_browse():
     app = create_app()
@@ -205,6 +211,44 @@ def test_uncategorized_gltf_upload_appears_in_browse():
     browse = client.get("/browse")
     assert browse.status_code == 200
     assert "Uncategorized GLTF Probe" in browse.get_data(as_text=True)
+
+
+def test_fbx_with_vrm_variant_stays_in_model_browse():
+    app = create_app()
+    client = app.test_client()
+    headers = {"Authorization": "Bearer test-token"}
+
+    upload = client.post("/api/upload", headers=headers, data={
+        "name": "Converted Avatar Shell",
+        "is_public": "true",
+        "file": (io.BytesIO(b"Kaydara FBX Binary avatar shell" + b"\x20" * 64), "avatar_shell.fbx"),
+    }, content_type="multipart/form-data")
+    assert upload.status_code == 201, upload.get_json()
+    model_id = upload.get_json()["model"]["id"]
+
+    with app.app_context():
+        model = Model3D.get_by_id(model_id)
+        model.vrma_file_id = app.config["FILE_STORE"].put(
+            b"vrma bytes",
+            filename="clip.vrma",
+            content_type="application/octet-stream",
+            metadata={"kind": "vrma"},
+        )
+        model.tags = ["mythology"]
+        model.asset_types = ["character"]
+        model.asset_category = "material"
+        model.save()
+        vrm_id = app.config["FILE_STORE"].put(
+            b"glTF" + b"\x00" * 32,
+            filename="avatar.vrm",
+            content_type="model/gltf-binary",
+            metadata={"kind": "vrm"},
+        )
+        ModelVariant.upsert(model_id, "vrm", str(vrm_id), file_format="vrm", size=36, status="ready")
+
+        browse_items, total = Model3D.get_public_models(exclude_formats=["vrma", "bvh"])
+    assert total >= 1
+    assert any(item.id == model_id for item in browse_items)
 
 
 def test_dashboard_shows_game_optimized_size():

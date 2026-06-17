@@ -2360,6 +2360,8 @@ def _serialize_browse_card(model):
     # Live preview is possible for renderable mesh formats (the Three.js viewer
     # handles GLB/GLTF incl. Draco/meshopt). VRM/VRMA use other viewers, so we
     # leave those to their thumbnail/icon on browse.
+    vrm_variant = ModelVariant.get(model.id, 'vrm')
+    optimized_vrm_variant = ModelVariant.get(model.id, 'vrm_optimized')
     viewable = bool(model.viewable_file_id) or (model.file_format or '').lower() in ('glb', 'gltf')
     # Preview source priority: fixed-sourced game variant -> fixed-eyes/mouth ->
     # original. A stale game variant from before a bake must not hide the fixed
@@ -2403,6 +2405,8 @@ def _serialize_browse_card(model):
         'view_url': view_url,
         'has_game_optimized': current_game,
         'has_fixed_eyes': bool(fixed_variant and fixed_variant.file_id),
+        'has_vrm_variant': bool(vrm_variant and vrm_variant.file_id),
+        'has_optimized_vrm_variant': bool(optimized_vrm_variant and optimized_vrm_variant.file_id),
         'game_uses_fixed': game_uses_fixed,
         'camera_orbit': model.camera_orbit or None,
         'default_animation': model.default_animation or None,
@@ -2778,6 +2782,8 @@ def _store_one_upload(file, base_name, description, is_public, tags, allowed_ext
 
 
 def _serialize_model(model):
+    vrm_variant = ModelVariant.get(model.id, 'vrm')
+    optimized_vrm_variant = ModelVariant.get(model.id, 'vrm_optimized')
     return {
         'id': model.id,
         'name': model.name,
@@ -2791,6 +2797,8 @@ def _serialize_model(model):
         'conversion_status': model.conversion_status,
         'has_viewable': bool(model.viewable_file_id),
         'has_vrma': bool(model.vrma_file_id),
+        'has_vrm_variant': bool(vrm_variant and vrm_variant.file_id),
+        'has_optimized_vrm_variant': bool(optimized_vrm_variant and optimized_vrm_variant.file_id),
         'tags': model.tags,
         'asset_category': model.asset_category,
         'asset_styles': model.asset_styles,
@@ -3314,6 +3322,7 @@ def _upload_provenance(world_id, content_hash=None, generation_id=None):
 
 _PROVENANCE_TAGS = {'tellus'}
 _STRUCTURAL_ASSET_TYPES = {'rigged', 'animated'}
+_AVATAR_ASSET_TYPES = {'avatar', 'vrm', 'humanoid'}
 
 
 def _preserved_provenance_tags(existing):
@@ -3326,8 +3335,26 @@ def _preserved_provenance_tags(existing):
 def _preserved_structural_asset_types(existing):
     return [
         value for value in Model3D.normalize_tags(existing or [])
-        if value in _STRUCTURAL_ASSET_TYPES
+        if value in _STRUCTURAL_ASSET_TYPES or value in _AVATAR_ASSET_TYPES
     ]
+
+
+def _model_has_vrm_variant(model):
+    try:
+        variant = ModelVariant.get(model.id, 'vrm')
+        return bool(variant and variant.file_id)
+    except Exception:
+        return False
+
+
+def _model_is_avatar_like(model):
+    tags = {str(tag or '').strip().lower() for tag in (model.tags or [])}
+    asset_types = {str(tag or '').strip().lower() for tag in (model.asset_types or [])}
+    return (
+        (model.file_format or '').lower() == 'vrm'
+        or bool((tags | asset_types) & {'avatar', 'vrm'})
+        or _model_has_vrm_variant(model)
+    )
 
 
 def _preserved_structural_runtime_metadata(existing):
@@ -3374,15 +3401,22 @@ def _run_ai_enrichment(model, data=None):
         'vision_mcp_error': enriched.get('vision_mcp_error'),
         'updated_at': datetime.utcnow().isoformat(),
     }
+    avatar_like = _model_is_avatar_like(model)
     if overwrite:
         model.tags = _merge_tags(_preserved_provenance_tags(model.tags), model.ai_tags)
-        model.asset_category = enriched.get('asset_category') or model.asset_category
+        if avatar_like:
+            model.tags = _merge_tags(model.tags, ['avatar', 'vrm'])
+            model.asset_category = 'person'
+        else:
+            model.asset_category = enriched.get('asset_category') or model.asset_category
         model.asset_styles = Model3D.normalize_tags(enriched.get('asset_styles', []))
         ai_asset_types = [
             value for value in Model3D.normalize_tags(enriched.get('asset_types', []))
             if value not in {'static', 'static-mesh', *_STRUCTURAL_ASSET_TYPES, 'light-emitter', 'emissive', 'glowing', 'vrm', 'optimized'}
         ]
         model.asset_types = _merge_tags(_preserved_structural_asset_types(model.asset_types), ai_asset_types)
+        if avatar_like:
+            model.asset_types = _merge_tags(model.asset_types, ['avatar', 'vrm', 'humanoid'])
         model.runtime_metadata = Model3D.normalize_runtime_metadata(model.runtime_metadata)
         if include_title and enriched.get('title'):
             model.name = enriched['title']
@@ -3390,7 +3424,10 @@ def _run_ai_enrichment(model, data=None):
             model.description = model.ai_description
     else:
         model.tags = _merge_tags(model.tags, model.ai_tags)
-        if enriched.get('asset_category') and not model.asset_category:
+        if avatar_like:
+            model.tags = _merge_tags(model.tags, ['avatar', 'vrm'])
+            model.asset_category = 'person'
+        elif enriched.get('asset_category') and not model.asset_category:
             model.asset_category = enriched.get('asset_category')
         model.asset_styles = _merge_tags(model.asset_styles, enriched.get('asset_styles', []))
         ai_asset_types = [
@@ -3398,6 +3435,8 @@ def _run_ai_enrichment(model, data=None):
             if value not in {'static', 'static-mesh', *_STRUCTURAL_ASSET_TYPES, 'light-emitter', 'emissive', 'glowing', 'vrm', 'optimized'}
         ]
         model.asset_types = _merge_tags(model.asset_types, ai_asset_types)
+        if avatar_like:
+            model.asset_types = _merge_tags(model.asset_types, ['avatar', 'vrm', 'humanoid'])
         if include_title and (not model.name or _generic_title(model.name)) and enriched.get('title'):
             model.name = enriched['title']
         if include_description and (not model.description or _generic_description(model.description)) and model.ai_description:
@@ -4239,6 +4278,16 @@ def _scan_fbx_avatar_files(sources, pattern):
     return paths, missing
 
 
+def _fbx_avatar_import_duplicate(path):
+    with current_app.config['DB_ENGINE'].begin() as conn:
+        row = conn.execute(
+            select(model_rows.c.id, model_rows.c.name)
+            .where(model_rows.c.original_filename == path.name)
+            .limit(1)
+        ).mappings().first()
+    return row
+
+
 def _run_fbx_avatar_import(app, *, owner_id=None, source=None, pattern='*Character_output.fbx', tag='robot', limit=None):
     with app.app_context():
         try:
@@ -4262,6 +4311,14 @@ def _run_fbx_avatar_import(app, *, owner_id=None, source=None, pattern='*Charact
                 with _FBX_AVATAR_IMPORT_LOCK:
                     _fbx_avatar_import_state['current'] = path.name
                 try:
+                    duplicate = _fbx_avatar_import_duplicate(path)
+                    if duplicate:
+                        with _FBX_AVATAR_IMPORT_LOCK:
+                            _fbx_avatar_import_state['skipped'] += 1
+                            _fbx_avatar_import_state['last_error'] = (
+                                f"{path.name}: already imported as {duplicate.name or duplicate.id}"
+                            )
+                        continue
                     data = path.read_bytes()
                     digest = hashlib.sha256(data).hexdigest()
                     runtime_metadata = {

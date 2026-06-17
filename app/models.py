@@ -727,22 +727,32 @@ class Model3D:
         browse.
         """
         runtime_text = func.lower(func.coalesce(cast(models.c.runtime_metadata, String), ""))
+        has_vrm_variant = models.c.id.in_(select(model_variants.c.model_id).where(and_(
+            model_variants.c.kind == "vrm",
+            model_variants.c.file_id.is_not(None),
+        )))
+        explicit_animation_source = or_(
+            models.c.file_format.in_(["vrma", "bvh"]),
+            func.coalesce(models.c.asset_category, "") == "animation",
+            Model3D._json_list_contains(models.c.tags, "animation-source"),
+            Model3D._json_list_contains(models.c.tags, "animation-library"),
+            Model3D._json_list_contains(models.c.tags, "vrma-library"),
+            Model3D._json_list_contains(models.c.asset_types, "animation"),
+            Model3D._json_list_contains(models.c.asset_types, "avatar-animation"),
+            runtime_text.like("%vrma-library-import%"),
+        )
         return and_(
             models.c.file_format != "vrm",
-            ~Model3D._json_list_contains(models.c.tags, "avatar"),
-            ~Model3D._json_list_contains(models.c.tags, "vrm"),
-            ~Model3D._json_list_contains(models.c.asset_types, "avatar"),
-            ~Model3D._json_list_contains(models.c.asset_types, "vrm"),
             or_(
-                models.c.vrma_file_id.is_not(None),
-                models.c.file_format.in_(["vrma", "bvh"]),
-                func.coalesce(models.c.asset_category, "") == "animation",
-                Model3D._json_list_contains(models.c.tags, "animation-source"),
-                Model3D._json_list_contains(models.c.tags, "animation-library"),
-                Model3D._json_list_contains(models.c.tags, "vrma-library"),
-                Model3D._json_list_contains(models.c.asset_types, "animation"),
-                Model3D._json_list_contains(models.c.asset_types, "avatar-animation"),
-                runtime_text.like("%vrma-library-import%"),
+                explicit_animation_source,
+                and_(
+                    models.c.vrma_file_id.is_not(None),
+                    ~has_vrm_variant,
+                    ~Model3D._json_list_contains(models.c.tags, "avatar"),
+                    ~Model3D._json_list_contains(models.c.tags, "vrm"),
+                    ~Model3D._json_list_contains(models.c.asset_types, "avatar"),
+                    ~Model3D._json_list_contains(models.c.asset_types, "vrm"),
+                ),
             ),
         )
 
