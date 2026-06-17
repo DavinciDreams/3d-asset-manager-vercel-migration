@@ -389,6 +389,11 @@
                             Profile
                         </button>
                     </div>
+                    <button type="button" id="rig-profile-flip"
+                            class="mt-2 w-full border border-slate-300 bg-white px-2 py-2 rounded text-sm hover:bg-slate-50 disabled:opacity-50"
+                            disabled>
+                        <i class="fas fa-arrows-left-right mr-1"></i>Flip profile side
+                    </button>
                     <p id="rig-view-help" class="mt-2 text-xs text-slate-500">
                         Place all front landmarks, then use Profile to adjust depth on the same dots.
                     </p>
@@ -1662,6 +1667,7 @@ document.addEventListener('DOMContentLoaded', function() {
     const flipBtn = document.getElementById('rig-flip');
     const frontViewBtn = document.getElementById('rig-front-view');
     const profileViewBtn = document.getElementById('rig-profile-view');
+    const profileFlipBtn = document.getElementById('rig-profile-flip');
     const viewHelpEl = document.getElementById('rig-view-help');
     const kneesFlipBtn = document.getElementById('rig-knees-flip');
     const elbowsFlipBtn = document.getElementById('rig-elbows-flip');
@@ -1705,6 +1711,7 @@ document.addEventListener('DOMContentLoaded', function() {
         buildBtn.disabled = !p.complete;
         if (previewBtn) previewBtn.disabled = !p.complete;
         if (profileViewBtn) profileViewBtn.disabled = !p.complete;
+        if (profileFlipBtn) profileFlipBtn.disabled = !p.complete || p.viewMode !== 'profile';
         if (aiProfileBtn) aiProfileBtn.disabled = !p.complete;
         if (frontViewBtn && profileViewBtn) {
             const inProfile = p.viewMode === 'profile';
@@ -1824,7 +1831,14 @@ document.addEventListener('DOMContentLoaded', function() {
         const r = rig();
         if (r && r.resetProfile) {
             r.resetProfile();
-            setStatus('Profile view: adjust depth for the existing dots, starting with chest depth.');
+            setStatus('Profile view: adjust depth with the face looking right. Use Flip profile side if it is looking left.');
+        }
+    });
+    if (profileFlipBtn) profileFlipBtn.addEventListener('click', () => {
+        const r = rig();
+        if (r && r.flipProfileSide) {
+            r.flipProfileSide();
+            setStatus('Profile side flipped. Use this if the side view was facing left or depth bends looked twisted.');
         }
     });
     if (kneesFlipBtn) kneesFlipBtn.addEventListener('click', () => {

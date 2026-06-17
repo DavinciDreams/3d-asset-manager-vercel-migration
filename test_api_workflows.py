@@ -757,6 +757,7 @@ def test_model_detail_escapes_metadata_in_viewer_script():
     assert 'name="asset_category"' in html
     assert 'id="edit-asset-styles"' in html
     assert 'id="edit-asset-types"' in html
+    assert 'id="rig-profile-flip"' in html
 
 
 def test_admin_media_capture_queue_lists_only_renderable_missing_media():
