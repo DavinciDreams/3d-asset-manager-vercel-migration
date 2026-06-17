@@ -617,6 +617,96 @@ def test_humanoid_glb_upload_auto_creates_vrm_variant(monkeypatch):
     assert variant.status == "ready"
 
 
+def test_asset_admin_can_overwrite_rigged_variant(monkeypatch):
+    monkeypatch.setenv("ASSET_MANAGER_ADMIN_USERNAMES", "rig-admin")
+    app = create_app()
+    client = app.test_client()
+    with app.app_context():
+        owner = _ensure_user("rig-owner")
+        _ensure_user("rig-admin")
+        model = Model3D(
+            name="Admin Rig Target",
+            file_format="glb",
+            file_size=8,
+            user_id=owner.id,
+            is_public=False,
+            gridfs_file_id=app.config["FILE_STORE"].put(
+                _minimal_glb({"asset": {"version": "2.0"}}),
+                filename="target.glb",
+                content_type="model/gltf-binary",
+                metadata={},
+            ),
+        ).save()
+
+    login = client.post("/auth/login", data={
+        "login_field": "rig-admin",
+        "password": "pw123456",
+    }, follow_redirects=True)
+    assert login.status_code == 200
+
+    rigged = _minimal_glb({"asset": {"version": "2.0"}, "nodes": []})
+    response = client.post(f"/api/model/{model.id}/rig", data={
+        "file": (io.BytesIO(rigged), "rerigged.glb"),
+        "overwrite": "1",
+    }, content_type="multipart/form-data")
+    assert response.status_code == 200, response.get_json()
+    assert response.get_json()["success"] is True
+    with app.app_context():
+        variant = ModelVariant.get(model.id, "rigged")
+    assert variant is not None
+    assert variant.status == "ready"
+
+
+def test_replacing_vrm_drops_stale_optimized_variant(monkeypatch):
+    app = create_app()
+    client = app.test_client()
+    with app.app_context():
+        owner = _ensure_user("vrm-replace-owner")
+
+    login = client.post("/auth/login", data={
+        "login_field": "vrm-replace-owner",
+        "password": "pw123456",
+    }, follow_redirects=True)
+    assert login.status_code == 200
+
+    source_glb = _minimal_glb({"asset": {"version": "2.0"}, "nodes": []})
+    upload = client.post("/api/upload", data={
+        "name": "VRM Replace Probe",
+        "is_public": "false",
+        "file": (io.BytesIO(source_glb), "vrm_replace_probe.glb"),
+    }, content_type="multipart/form-data")
+    assert upload.status_code == 201, upload.get_json()
+    model_id = upload.get_json()["model"]["id"]
+
+    with app.app_context():
+        old_opt = app.config["FILE_STORE"].put(
+            b"old optimized vrm",
+            filename="old-opt.vrm",
+            content_type="model/gltf-binary",
+            metadata={"kind": "vrm_optimized"},
+        )
+        ModelVariant.upsert(model_id, "vrm_optimized", str(old_opt), file_format="vrm", size=17, status="ready")
+
+    import app.conversion as conversion_module
+    import app.api as api
+
+    def fake_glb_to_vrm(_node, _converter_dir, _input_path, output_path, name=None, author=None, timeout=120):
+        Path(output_path).write_bytes(b"glTF" + b"new vrm bytes")
+        return output_path
+
+    def fail_optimize(_model, texture_limit=2048):
+        raise RuntimeError("optimizer unavailable")
+
+    monkeypatch.setattr(conversion_module, "glb_to_vrm", fake_glb_to_vrm)
+    monkeypatch.setattr(api, "_optimize_vrm_variant", fail_optimize)
+
+    response = client.post(f"/api/model/{model_id}/to-vrm")
+    assert response.status_code == 200, response.get_json()
+    with app.app_context():
+        assert ModelVariant.get(model_id, "vrm") is not None
+        assert ModelVariant.get(model_id, "vrm_optimized") is None
+
+
 def test_vrm_viewer_supports_compressed_vrm_assets():
     viewer = Path("app/templates/_vrm_viewer.html").read_text(encoding="utf-8")
     assert "KTX2Loader" in viewer

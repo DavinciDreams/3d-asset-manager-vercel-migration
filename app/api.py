@@ -1266,6 +1266,11 @@ def _convert_glb_bytes_to_vrm(model, data, author=None):
         except Exception as e:
             print(f"Old VRM blob {old_file_id} not deleted: {e}")
 
+    # The raw VRM has just been replaced. Do not leave a stale optimized VRM
+    # around if the new optimization fails; the old optimized avatar may have
+    # been generated from the bad rig the user is trying to replace.
+    _delete_model_variant_file(model.id, 'vrm_optimized')
+
     # Auto-produce the rig-safe optimized avatar too. Best-effort.
     optimized = False
     try:
@@ -1275,6 +1280,20 @@ def _convert_glb_bytes_to_vrm(model, data, author=None):
         print(f"Auto VRM optimization skipped for {model.id}: {e}")
 
     return variant, optimized
+
+
+def _delete_model_variant_file(model_id, kind):
+    variant = ModelVariant.get(model_id, kind)
+    if not variant:
+        return False
+    file_id = variant.file_id
+    ModelVariant.delete_for(model_id, kind)
+    if file_id:
+        try:
+            current_app.config['FILE_STORE'].delete(file_id)
+        except Exception as e:
+            print(f"Variant blob {file_id} for {kind} not deleted: {e}")
+    return True
 
 
 @api_bp.route('/model/<model_id>/to-vrm', methods=['POST'])
@@ -1289,7 +1308,7 @@ def post_to_vrm(model_id):
         model = Model3D.get_by_id(model_id)
         if not model:
             return jsonify({'error': 'Model not found'}), 404
-        if not (current_user.is_authenticated and model.user_id == current_user.id):
+        if not _can_write_model(model):
             return jsonify({'error': 'Only the owner can convert this model to VRM.'}), 403
 
         # Prefer the rigged variant (from the in-app rigger) as the source.
@@ -1333,7 +1352,7 @@ def post_rig(model_id):
         model = Model3D.get_by_id(model_id)
         if not model:
             return jsonify({'error': 'Model not found'}), 404
-        if not (current_user.is_authenticated and model.user_id == current_user.id):
+        if not _can_write_model(model):
             return jsonify({'error': 'Only the owner can rig this model.'}), 403
 
         upload = request.files.get('file')

@@ -1931,7 +1931,11 @@ document.addEventListener('DOMContentLoaded', function() {
             const fd = new FormData();
             fd.append('file', blob, 'rigged.glb');
             if (r.metadata) fd.append('markers', JSON.stringify(r.metadata()));
-            if (toVrmEl.checked) fd.append('to_vrm', '1');
+            fd.append('overwrite', '1');
+            if (toVrmEl.checked) {
+                fd.append('to_vrm', '1');
+                fd.append('overwrite_vrm', '1');
+            }
             setStatus('Uploading rigged model…');
             const resp = await fetch('/api/model/' + MODEL_ID + '/rig', { method: 'POST', body: fd });
             const data = await resp.json().catch(() => ({}));
