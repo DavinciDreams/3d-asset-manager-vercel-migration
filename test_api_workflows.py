@@ -2789,12 +2789,84 @@ def test_ai_enrichment_uses_signpost_vision_over_no_thumbnail_fallback(monkeypat
     enriched = ai_enrichment.enrich_model(FakeModel())
 
     assert enriched["title"] == "Stylized Wooden Signpost"
-    assert enriched["asset_category"] == "prop"
+    assert enriched["asset_category"] == "environment"
     assert enriched["description"].startswith("A stylized wooden signpost prop")
     assert {"signpost", "wooden-sign", "signboard"}.issubset(set(enriched["tags"]))
     assert {"stylized", "fantasy", "low-poly"}.issubset(set(enriched["asset_styles"]))
     assert {"decorative-prop", "low-poly"}.issubset(set(enriched["asset_types"]))
     assert "flora" not in enriched["asset_types"]
+
+
+def test_ai_enrichment_enforces_subject_category_taxonomy(monkeypatch):
+    from app import ai_enrichment
+
+    class FakeModel:
+        name = "category_probe.glb"
+        description = ""
+        original_filename = "category_probe.glb"
+        file_format = "glb"
+        file_size = 1710000
+        tags = []
+        asset_category = None
+        asset_styles = []
+        asset_types = []
+        runtime_metadata = {}
+        approve_game_ready = False
+        approve_asset_store = False
+        conversion_status = None
+        thumbnail_file_id = "thumb-1"
+
+    cases = [
+        (
+            "Stylized Mouse Character",
+            "person",
+            "A cute stylized mouse animal character with large ears, whiskers, paws, and fur.",
+            "fauna",
+        ),
+        (
+            "Stone Bridge",
+            "building",
+            "A small arched stone bridge for an outdoor garden path scene.",
+            "environment",
+        ),
+        (
+            "Fantasy Lantern",
+            "material",
+            "A metal and glass hanging lantern prop for outdoor fantasy village scenes.",
+            "environment",
+        ),
+        (
+            "Silk Robe Avatar",
+            "material",
+            "A humanoid female avatar wearing a blue silk robe with fabric folds and ornate trim.",
+            "person",
+        ),
+        (
+            "Seamless Moss Texture",
+            "flora",
+            "A seamless tileable moss texture material with albedo, roughness, and normal map detail.",
+            "material",
+        ),
+    ]
+
+    for title, category, description, expected in cases:
+        def fake_ai_metadata(model, extra_context=None, *, title=title, category=category, description=description):
+            return {
+                "title": title,
+                "asset_category": category,
+                "asset_styles": [],
+                "asset_types": ["decorative-prop"],
+                "runtime_metadata": {},
+                "tags": title.lower().split(),
+                "description": description,
+                "summary": description,
+                "categories": [],
+                "quality_notes": [],
+            }
+
+        monkeypatch.setattr(ai_enrichment, "_ai_metadata", fake_ai_metadata)
+        enriched = ai_enrichment.enrich_model(FakeModel())
+        assert enriched["asset_category"] == expected, title
 
 
 def test_ai_enrichment_prompt_uses_fab_listing_copy(monkeypatch):
@@ -2870,7 +2942,10 @@ def test_ai_enrichment_prompt_uses_fab_listing_copy(monkeypatch):
     assert "polished buyer-facing prose" in user_text
     assert "Keep the title under 80 characters" in user_text
     assert "Return up to 10 discoverability tags" in user_text
+    assert "Animals and creatures are always fauna" in system_text
+    assert "Use material only for actual texture" in user_text
     assert schema["properties"]["tags"]["maxItems"] == 10
     assert "Fab listing title under 80 characters" in schema["properties"]["title"]["description"]
     assert "Buyer-facing Fab product description" in schema["properties"]["description"]["description"]
+    assert "furniture for furniture" in schema["properties"]["asset_category"]["description"]
     assert enriched["title"] == "Classical Stone Fountain"

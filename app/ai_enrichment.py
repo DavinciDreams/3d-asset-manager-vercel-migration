@@ -39,6 +39,16 @@ FAB_LISTING_GUIDANCE = (
     "would use to search for this type of item, including appropriate keywords and tags. "
     "Keep the title under 80 characters. Return up to 10 discoverability tags."
 )
+CATEGORY_TAXONOMY_GUIDANCE = (
+    "Use exactly one asset_category subject bucket. Animals and creatures are always fauna. "
+    "Plants, trees, flowers, bushes, grass, vines, leaves, and mushrooms are flora. "
+    "Buildings and architectural structures are building. Furniture is furniture. "
+    "People, humanoids, avatars, and human characters are person. Vehicles are vehicle. "
+    "Outdoor non-living scene objects such as bridges, fountains, lanterns, signs, paths, rocks, "
+    "terrain pieces, and water features are environment. Use material only for actual texture, "
+    "shader, tileable surface, or material-map assets, never merely because a model is made of "
+    "wood, stone, metal, fabric, or glass. Use prop only when no specific bucket applies."
+)
 TAGGER_SYSTEM_PROMPT = (
     "You are a specialist in 3D assets, 3D modeling, game design, and rigging. "
     "You are writing marketing copy to enrich 3D asset store records. Return concise JSON only, "
@@ -50,7 +60,8 @@ TAGGER_SYSTEM_PROMPT = (
     "pipeline labels, or generic tags like pixal3d, generated, image-to-3d, ai-generated, glb, "
     "or 3d-model. Do not invent formats, file sizes, vertex counts, texture resolution, rigging, "
     "animation, emissive/light behavior, static/dynamic state, or optimization details; those are "
-    "filled from file metadata or explicit runtime metadata."
+    "filled from file metadata or explicit runtime metadata. "
+    + CATEGORY_TAXONOMY_GUIDANCE
 )
 
 
@@ -211,7 +222,7 @@ def _vision_subject_metadata(text):
             tags.extend(["grass-base", "rocks"])
         return {
             "title": "Stylized Wooden Signpost",
-            "asset_category": "prop",
+            "asset_category": "environment",
             "tags": tags,
             "asset_styles": ["stylized", "fantasy", "low-poly"],
             "asset_types": ["decorative-prop", "low-poly"],
@@ -273,7 +284,7 @@ def _resolve_type_conflicts(asset_types, category, text):
 
     category_terms = {
         "building", "flora", "fauna", "person", "people", "vehicle", "environment", "material",
-        "animation", "other", "prop", "props", "3d-model", "3d-models",
+        "furniture", "animation", "other", "prop", "props", "3d-model", "3d-models",
     }
     normalized = [item for item in normalized if item not in category_terms and item != category]
 
@@ -309,26 +320,38 @@ def _infer_missing_facets(enriched):
 
     category = Model3D.normalize_category(enriched.get("asset_category"))
     generic_categories = {None, "", "other", "prop", "props", "3d model", "3d models", "uncategorized"}
-    category_rules = [
-        ("building", ("building", "house", "cottage", "tower", "castle", "temple", "hut", "cabin", "wall", "roof", "architecture", "timber-framed", "half-timbered", "tudor", "cupola", "balcony")),
-        ("flora", ("flower", "flowers", "floral", "bouquet", "bloom", "blooms", "leaf", "leaves", "stem", "stems", "plant", "plants", "tree", "trees", "grass", "moss", "vine", "vines")),
-        ("fauna", ("animal", "creature", "bird", "fish", "insect", "horse", "cat", "dog", "wolf", "dragon")),
-        ("person", ("person", "human", "character", "humanoid", "man", "woman", "figure")),
-        ("vehicle", ("vehicle", "car", "truck", "ship", "boat", "aircraft", "spaceship", "wagon")),
-        ("environment", ("terrain", "landscape", "scene", "environment", "diorama", "level")),
-        ("material", ("material", "texture", "tileable", "surface", "fabric", "shader")),
+    subject_category_rules = [
+        ("building", ("building", "house", "cottage", "tower", "castle", "temple", "hut", "cabin", "wall", "roof", "architecture", "timber-framed", "half-timbered", "tudor", "cupola", "balcony", "gazebo", "pavilion", "shed", "shop")),
+        ("flora", ("flower", "flowers", "floral", "bouquet", "bloom", "blooms", "leaf", "leaves", "stem", "stems", "plant", "plants", "tree", "trees", "grass", "moss", "vine", "vines", "bush", "shrub", "fern", "mushroom", "berries", "foliage")),
+        ("fauna", ("animal", "creature", "bird", "fish", "insect", "horse", "cat", "dog", "wolf", "dragon", "cow", "cattle", "deer", "butterfly", "bee", "bear", "fox", "rabbit", "mouse", "turtle", "frog", "snake", "lizard", "crab", "bird", "eagle")),
+        ("person", ("person", "people", "human", "humanoid", "avatar", "vrm", "man", "woman", "girl", "boy", "male", "female", "warrior", "mage", "knight", "soldier", "villager")),
+        ("furniture", ("furniture", "chair", "table", "desk", "bench", "sofa", "couch", "bed", "stool", "shelf", "cabinet", "dresser", "bookcase")),
+        ("vehicle", ("vehicle", "car", "truck", "ship", "boat", "aircraft", "spaceship", "wagon", "cart", "rowboat", "canoe", "bicycle", "motorcycle")),
+        ("environment", ("terrain", "landscape", "scene", "environment", "diorama", "level", "bridge", "fountain", "lantern", "lamp", "torch", "signpost", "sign", "path", "road", "rock", "rocks", "boulder", "water-feature", "water feature", "well", "fence", "gate", "arch", "ruin", "statue")),
     ]
-    category_scores = [(candidate, _keyword_score(text, words)) for candidate, words in category_rules]
+    material_words = ("texture", "tileable", "seamless", "material map", "material asset", "shader", "pbr material", "surface texture", "fabric texture", "wood texture", "stone texture", "metal texture", "normal map", "roughness map")
+    category_scores = [(candidate, _keyword_score(text, words)) for candidate, words in subject_category_rules]
     best_category, best_score = max(category_scores, key=lambda item: item[1])
     current_score = next((score for candidate, score in category_scores if candidate == category), 0)
+    material_score = _keyword_score(text, material_words)
+    if material_score >= 2 or (best_score <= 0 and material_score > 0):
+        best_category = "material"
+        best_score = material_score
+        current_score = material_score if category == "material" else 0
     protected_category = Model3D.normalize_category(vision_subject.get("asset_category")) if vision_subject else None
     if protected_category:
         enriched["asset_category"] = protected_category
         category = protected_category
+    elif best_score > 0 and best_category != category and best_category in {"building", "flora", "fauna", "person", "furniture", "vehicle", "environment"}:
+        enriched["asset_category"] = best_category
+        category = best_category
     elif best_score > 0 and (
         category in generic_categories
         or (best_category != category and best_score >= max(2, current_score + 2))
     ):
+        enriched["asset_category"] = best_category
+        category = best_category
+    elif category == "material" and material_score <= 0 and best_score > 0:
         enriched["asset_category"] = best_category
         category = best_category
     styles = Model3D.normalize_tags(enriched.get("asset_styles", []))
@@ -1503,7 +1526,7 @@ def _ai_metadata(model, extra_context=None):
             },
             "asset_category": {
                 "type": "string",
-                "description": "One broad what-it-is bucket for filtering. Prefer the subject bucket over generic prop: flora for flowers/plants/trees/leaves, fauna for animals/creatures, building for architecture, person for characters, vehicle, environment, material, animation, prop, or other. Use prop only for objects that do not fit a more specific broad bucket.",
+                "description": "One broad what-it-is bucket for filtering. Use this taxonomy: fauna for all animals/creatures; flora for all plants/trees/flowers/bushes/grass/mushrooms; building for all buildings/architecture; furniture for furniture; person for people/humanoids/avatars; vehicle for vehicles; environment for outdoor non-living scene objects such as bridges, fountains, lanterns, signs, rocks, terrain, paths, and water features; material only for texture/shader/tileable surface/material-map assets; prop only when no specific bucket applies.",
             },
             "asset_styles": {
                 "type": "array",
@@ -1574,6 +1597,10 @@ def _ai_metadata(model, extra_context=None):
             "Always fill asset_category and asset_styles from the visual analysis, and fill asset_types only for "
             "non-structural traits. For example, "
             "flowers/plants/leaves should use asset_category flora even when the object is also decorative; "
+            "animals should use fauna; buildings should use building; furniture should use furniture; "
+            "human or humanoid avatars should use person; bridges, fountains, lanterns, signs, terrain pieces, "
+            "and other outdoor non-living scene objects should use environment; material is only for texture, "
+            "shader, tileable surface, or material-map assets, not because a mesh has wood/stone/metal/fabric materials. "
             "watercolor or hand-painted looks belong in asset_styles; do not report static, rigged, or animated "
             "or emissive/light behavior from vision because those are derived outside auto-tagging. "
             "The title should name the visible asset, for example Watercolor "
@@ -1588,6 +1615,7 @@ def _ai_metadata(model, extra_context=None):
     user_text = (
         "Create marketplace metadata for this 3D asset. Return only JSON that matches the schema. "
         + FAB_LISTING_GUIDANCE + " "
+        + CATEGORY_TAXONOMY_GUIDANCE + " "
         "Prefer concrete visible or file-derived details over generic filler. "
         "Write the title as a concise product/catalog name for the visible subject and style. "
             "Do not leave asset_category or asset_styles empty when visual analysis provides evidence. "
