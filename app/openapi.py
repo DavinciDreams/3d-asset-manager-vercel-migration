@@ -69,6 +69,18 @@ def _model_summary_schema():
             'approve_asset_store': {'type': 'boolean'},
             'ready_for_tellus': {'type': 'boolean'},
             'catalog_ready': {'type': 'boolean'},
+            'world_ready': {'type': 'boolean'},
+            'storefront_ready': {'type': 'boolean'},
+            'media_capture': {
+                'type': 'object',
+                'properties': {
+                    'needs_thumbnail': {'type': 'boolean'},
+                    'needs_preview': {'type': 'boolean'},
+                    'status': {'type': 'string', 'enum': ['queued', 'processing', 'captured', 'failed', 'blocked', 'idle']},
+                    'attempt_count': {'type': 'integer'},
+                    'last_error': {'type': 'string', 'nullable': True},
+                },
+            },
             'processing_state': {'type': 'object'},
             'owner': {
                 'type': 'object',
@@ -1442,6 +1454,37 @@ def get_openapi_spec(base_url=''):
                     'responses': {
                         '200': {'description': 'Reconciliation result', 'content': {'application/json': {'schema': {'type': 'object'}}}},
                         '401': _error_response('Unauthorized'),
+                    },
+                },
+            },
+            '/admin/media-capture/report': {
+                'post': {
+                    'tags': ['Workflows'],
+                    'summary': 'Report per-asset media capture progress',
+                    'description': 'Browser media-capture workers call this to persist processing, captured, failed, or blocked state for an individual model.',
+                    'security': [{'sessionCookie': []}, {'bearerAuth': []}],
+                    'requestBody': {
+                        'content': {
+                            'application/json': {
+                                'schema': {
+                                    'type': 'object',
+                                    'required': ['model_id', 'status'],
+                                    'properties': {
+                                        'model_id': {'type': 'string'},
+                                        'status': {'type': 'string', 'enum': ['processing', 'captured', 'failed', 'blocked']},
+                                        'kind': {'type': 'string', 'nullable': True},
+                                        'capture_url': {'type': 'string', 'nullable': True},
+                                        'error': {'type': 'string', 'nullable': True},
+                                    },
+                                },
+                            },
+                        },
+                    },
+                    'responses': {
+                        '200': {'description': 'Capture state stored', 'content': {'application/json': {'schema': {'type': 'object'}}}},
+                        '400': _error_response('Invalid report'),
+                        '401': _error_response('Unauthorized'),
+                        '404': _error_response('Model not found'),
                     },
                 },
             },

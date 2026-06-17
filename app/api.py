@@ -2129,6 +2129,7 @@ def upload_thumbnail(model_id):
             metadata={'model_id': model_id, 'kind': 'thumbnail'}
         )
         model.thumbnail_file_id = str(new_id)
+        _set_media_capture_state(model, status='captured', kind='thumbnail')
         model.save()
         enrichment_queued = _maybe_enqueue_autotag_after_thumbnail(
             model,
@@ -2376,6 +2377,7 @@ def upload_preview(model_id):
             metadata={'model_id': model_id, 'kind': 'preview'}
         )
         model.preview_file_id = str(new_id)
+        _set_media_capture_state(model, status='captured', kind='preview')
         model.save()
 
         return jsonify({'success': True, 'preview_file_id': model.preview_file_id})
@@ -2490,6 +2492,7 @@ def _serialize_browse_card(model):
         view_url = url_for('api.view_model', model_id=model.id) + '?viewer=2'
     else:
         view_url = None
+    processing_state = _model_processing_state(model)
     return {
         'id': model.id,
         'name': model.name or 'Untitled',
@@ -2506,6 +2509,16 @@ def _serialize_browse_card(model):
         'has_thumbnail': bool(model.thumbnail_file_id),
         'preview_url': url_for('api.get_preview', model_id=model.id) if model.preview_file_id else None,
         'thumbnail_url': url_for('api.get_thumbnail', model_id=model.id) if model.thumbnail_file_id else None,
+        'media_capture': {
+            'needs_thumbnail': not bool(model.thumbnail_file_id),
+            'needs_preview': not bool(model.preview_file_id),
+            **_media_capture_state_for_model(model),
+        },
+        'processing_state': processing_state,
+        'ready_for_tellus': processing_state['ready_for_tellus'],
+        'catalog_ready': processing_state['catalog_ready'],
+        'world_ready': processing_state['world_ready'],
+        'storefront_ready': processing_state['storefront_ready'],
         'detail_url': url_for('main.model_detail', model_id=model.id),
         # For browse live-3D fallback when there's no cached preview yet.
         'is_owner': bool(is_owner),
@@ -2931,6 +2944,7 @@ def _serialize_model(model):
 def _media_presence_fields(model):
     game = _game_optimized_fields(model)
     processing_state = _model_processing_state(model, game)
+    capture_state = _media_capture_state_for_model(model)
     return {
         'has_thumbnail': bool(model.thumbnail_file_id),
         'thumbnail_url': url_for('api.get_thumbnail', model_id=model.id) if model.thumbnail_file_id else None,
@@ -2948,10 +2962,13 @@ def _media_presence_fields(model):
             'thumbnail_file_id': model.thumbnail_file_id,
             'preview_file_id': model.preview_file_id,
             'capture_url': url_for('main.model_detail', model_id=model.id, capture=1),
+            **capture_state,
         },
         'processing_state': processing_state,
         'ready_for_tellus': processing_state['ready_for_tellus'],
         'catalog_ready': processing_state['catalog_ready'],
+        'world_ready': processing_state['world_ready'],
+        'storefront_ready': processing_state['storefront_ready'],
         **game,
     }
 
@@ -2965,14 +2982,30 @@ def _model_processing_state(model, game_fields=None):
     needs_preview = not bool(model.preview_file_id)
     needs_ai = _ai_enrichment_needs_visual_retry(model)
     media_ready = _media_capture_ready(model)
+    blocked_by = []
+    if needs_thumbnail:
+        blocked_by.append('thumbnail')
+    if needs_game:
+        blocked_by.append('game_optimized')
+    if not media_ready and (needs_thumbnail or needs_preview):
+        blocked_by.append('media_capture_not_ready')
+    if needs_ai and not model.thumbnail_file_id:
+        blocked_by.append('ai_waiting_for_thumbnail')
+    capture_state = _media_capture_state_for_model(model)
+    ready_for_tellus = not needs_thumbnail and not needs_game
+    catalog_ready = ready_for_tellus and not needs_ai
     return {
         'needs_thumbnail': needs_thumbnail,
         'needs_preview': needs_preview,
         'needs_game_optimized': needs_game,
         'needs_ai_enrichment': needs_ai,
         'media_capture_ready': media_ready,
-        'ready_for_tellus': not needs_thumbnail and not needs_game,
-        'catalog_ready': not needs_thumbnail and not needs_game and not needs_ai,
+        'media_capture_status': capture_state.get('status'),
+        'ready_for_tellus': ready_for_tellus,
+        'catalog_ready': catalog_ready,
+        'world_ready': ready_for_tellus,
+        'storefront_ready': catalog_ready,
+        'blocked_by': blocked_by,
         'queue': {
             'media': needs_thumbnail or needs_preview,
             'optimization': needs_game,
@@ -2986,6 +3019,55 @@ def _filter_ready_for_tellus(models):
         model for model in models
         if _model_processing_state(model).get('ready_for_tellus')
     ]
+
+
+def _media_capture_state_for_model(model):
+    state = Model3D.normalize_media_capture(getattr(model, 'media_capture', None))
+    status = state.get('status')
+    if not status:
+        if model.thumbnail_file_id and model.preview_file_id:
+            status = 'captured'
+        elif _media_capture_ready(model) and (not model.thumbnail_file_id or not model.preview_file_id):
+            status = 'queued'
+        elif not _media_capture_ready(model) and (not model.thumbnail_file_id or not model.preview_file_id):
+            status = 'blocked'
+        else:
+            status = 'idle'
+    return {
+        'status': status,
+        'attempt_count': int(state.get('attempt_count') or 0),
+        'last_error': state.get('last_error'),
+        'last_kind': state.get('last_kind'),
+        'last_attempt_at': state.get('last_attempt_at'),
+        'last_success_at': state.get('last_success_at'),
+        'last_failed_at': state.get('last_failed_at'),
+        'last_capture_url': state.get('last_capture_url'),
+    }
+
+
+def _set_media_capture_state(model, *, status, kind=None, error=None, capture_url=None):
+    current = Model3D.normalize_media_capture(getattr(model, 'media_capture', None))
+    now = datetime.utcnow().isoformat()
+    attempts = int(current.get('attempt_count') or 0)
+    if status in {'processing', 'failed', 'captured'}:
+        attempts += 1
+        current['attempt_count'] = attempts
+        current['last_attempt_at'] = now
+    current['status'] = status
+    if kind:
+        current['last_kind'] = str(kind)[:80]
+    if capture_url:
+        current['last_capture_url'] = str(capture_url)[:500]
+    if status == 'captured':
+        current['last_success_at'] = now
+        current.pop('last_error', None)
+    elif status == 'failed':
+        current['last_failed_at'] = now
+        current['last_error'] = str(error or 'media capture failed')[:500]
+    elif error:
+        current['last_error'] = str(error)[:500]
+    model.media_capture = Model3D.normalize_media_capture(current)
+    return model.media_capture
 
 
 def _media_capture_ready(model):
@@ -3026,6 +3108,7 @@ def _media_capture_queue_item(model, *, force_capture=False):
     needs_thumbnail = force_capture or not bool(model.thumbnail_file_id)
     needs_preview = force_capture or not bool(model.preview_file_id)
     needs_enrichment = model.ai_status not in ('done', 'processing', 'pending')
+    capture_state = _media_capture_state_for_model(model)
     return {
         'id': model.id,
         'name': model.name,
@@ -3047,6 +3130,12 @@ def _media_capture_queue_item(model, *, force_capture=False):
         'force_capture': force_capture,
         'needs_enrichment': needs_enrichment,
         'capture_ready': _media_capture_ready(model),
+        'capture_status': capture_state.get('status'),
+        'capture_attempt_count': capture_state.get('attempt_count', 0),
+        'capture_last_error': capture_state.get('last_error'),
+        'capture_last_attempt_at': capture_state.get('last_attempt_at'),
+        'capture_last_success_at': capture_state.get('last_success_at'),
+        'capture_last_failed_at': capture_state.get('last_failed_at'),
         'detail_url': url_for('main.model_detail', model_id=model.id, capture=1),
         'capture_url': (
             url_for('main.model_detail', model_id=model.id, capture=1, regen=1)
@@ -3080,6 +3169,7 @@ def _animation_media_capture_queue_item(model, *, generated=False, capture_ready
     clip_id = (model.id + ':vrma') if generated else model.id
     needs_thumbnail = force_capture or not bool(model.thumbnail_file_id)
     needs_preview = force_capture or not bool(model.preview_file_id)
+    capture_state = _media_capture_state_for_model(model)
     return {
         'id': model.id,
         'clip_id': clip_id,
@@ -3102,6 +3192,12 @@ def _animation_media_capture_queue_item(model, *, generated=False, capture_ready
         'force_capture': force_capture,
         'needs_enrichment': False,
         'capture_ready': capture_ready,
+        'capture_status': capture_state.get('status'),
+        'capture_attempt_count': capture_state.get('attempt_count', 0),
+        'capture_last_error': capture_state.get('last_error'),
+        'capture_last_attempt_at': capture_state.get('last_attempt_at'),
+        'capture_last_success_at': capture_state.get('last_success_at'),
+        'capture_last_failed_at': capture_state.get('last_failed_at'),
         'detail_url': url_for('main.animations'),
         'capture_url': url_for('main.animations', capture_clip=clip_id),
         'capture_mode': 'animation',
@@ -4834,6 +4930,37 @@ def admin_media_capture_heartbeat():
         state = dict(_media_capture_state)
     state['active'] = True
     return jsonify({'success': True, 'worker': state})
+
+
+@api_bp.route('/admin/media-capture/report', methods=['POST'])
+def admin_media_capture_report():
+    if not _admin_or_asset_admin_session_ok():
+        return jsonify({'error': 'Unauthorized'}), 401
+    payload = request.get_json(silent=True) or {}
+    model_id = str(payload.get('model_id') or payload.get('id') or '').strip()
+    if not model_id:
+        return jsonify({'error': 'model_id is required'}), 400
+    model = Model3D.get_by_id(model_id)
+    if not model:
+        return jsonify({'error': 'Model not found'}), 404
+    status = str(payload.get('status') or '').strip().lower()
+    if status not in {'processing', 'captured', 'failed', 'blocked'}:
+        return jsonify({'error': 'status must be processing, captured, failed, or blocked'}), 400
+    capture_url = payload.get('capture_url') or payload.get('url')
+    state = _set_media_capture_state(
+        model,
+        status=status,
+        kind=payload.get('kind') or payload.get('capture_mode') or 'models',
+        error=payload.get('error'),
+        capture_url=capture_url,
+    )
+    model.save()
+    return jsonify({
+        'success': True,
+        'model_id': model.id,
+        'media_capture': _media_capture_state_for_model(model),
+        'processing_state': _model_processing_state(model),
+    })
 
 
 def _pipeline_reconciler_status():

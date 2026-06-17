@@ -218,6 +218,7 @@ class Model3D:
                  camera_orbit=None, thumbnail_file_id=None, tags=None,
                  asset_category=None, asset_styles=None, asset_types=None,
                  runtime_metadata=None,
+                 media_capture=None,
                  preview_file_id=None, default_animation=None, default_vrma_id=None,
                  viewable_file_id=None, viewable_format=None,
                  conversion_status=None, conversion_error=None,
@@ -245,6 +246,7 @@ class Model3D:
         self.asset_styles = asset_styles or []
         self.asset_types = asset_types or []
         self.runtime_metadata = self.normalize_runtime_metadata(runtime_metadata)
+        self.media_capture = self.normalize_media_capture(media_capture)
         self.preview_file_id = preview_file_id
         self.default_animation = default_animation
         self.default_vrma_id = default_vrma_id
@@ -285,6 +287,7 @@ class Model3D:
             "asset_styles": self.asset_styles or [],
             "asset_types": self.asset_types or [],
             "runtime_metadata": self.runtime_metadata or {},
+            "media_capture": self.media_capture or {},
             "preview_file_id": self.preview_file_id,
             "default_animation": self.default_animation,
             "default_vrma_id": self.default_vrma_id,
@@ -471,6 +474,7 @@ class Model3D:
             asset_styles=model_data.get("asset_styles") or [],
             asset_types=model_data.get("asset_types") or [],
             runtime_metadata=model_data.get("runtime_metadata") or {},
+            media_capture=model_data.get("media_capture") or {},
             preview_file_id=model_data.get("preview_file_id"),
             default_animation=model_data.get("default_animation"),
             default_vrma_id=model_data.get("default_vrma_id"),
@@ -512,6 +516,35 @@ class Model3D:
         value = str(raw or "").strip().lower()
         value = " ".join(token for token in value.replace("_", " ").replace("-", " ").split())
         return value or None
+
+    @staticmethod
+    def normalize_media_capture(raw):
+        if raw is None or raw == "":
+            return {}
+        if isinstance(raw, str):
+            import json
+            try:
+                raw = json.loads(raw)
+            except (TypeError, ValueError):
+                return {}
+        if not isinstance(raw, dict):
+            return {}
+        normalized = {}
+        for key in ("status", "last_error", "last_kind", "last_capture_url"):
+            value = raw.get(key)
+            if value:
+                normalized[key] = str(value)[:500]
+        for key in ("last_attempt_at", "last_success_at", "last_failed_at"):
+            value = raw.get(key)
+            if value:
+                normalized[key] = str(value)[:80]
+        try:
+            attempts = int(raw.get("attempt_count") or 0)
+        except (TypeError, ValueError):
+            attempts = 0
+        if attempts > 0:
+            normalized["attempt_count"] = min(attempts, 999999)
+        return normalized
 
     @staticmethod
     def normalize_runtime_metadata(raw):

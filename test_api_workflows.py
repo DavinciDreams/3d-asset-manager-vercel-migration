@@ -824,6 +824,8 @@ def test_admin_media_capture_queue_lists_only_renderable_missing_media():
     assert native_item["needs_thumbnail"] is True
     assert native_item["needs_preview"] is True
     assert native_item["capture_ready"] is True
+    assert native_item["capture_status"] == "queued"
+    assert native_item["capture_attempt_count"] == 0
     assert native_item["capture_url"].endswith(f"/model/{native_id}?capture=1")
 
     with app.app_context():
@@ -900,6 +902,22 @@ def test_admin_media_capture_status_and_heartbeat():
     assert worker["last_status"] == "captured"
     assert worker["last_count"] == 1
     assert worker["last_captured"] == 1
+
+    report = client.post(
+        "/api/admin/media-capture/report",
+        headers={**headers, "Content-Type": "application/json"},
+        json={"model_id": model_id, "status": "failed", "kind": "models", "error": "viewer timed out"},
+    )
+    assert report.status_code == 200, report.get_json()
+    reported = report.get_json()["media_capture"]
+    assert reported["status"] == "failed"
+    assert reported["attempt_count"] == 1
+    assert reported["last_error"] == "viewer timed out"
+
+    status_failed = client.get("/api/admin/media-capture/status?limit=20", headers=headers)
+    failed_item = next(item for item in status_failed.get_json()["models"] if item["id"] == model_id)
+    assert failed_item["capture_status"] == "failed"
+    assert failed_item["capture_last_error"] == "viewer timed out"
 
 
 def test_fbx_source_with_vrm_and_vrma_lives_in_avatar_animation_apis():
@@ -1685,7 +1703,12 @@ def test_ready_for_tellus_filter_requires_thumbnail_and_game_variant(monkeypatch
     }, content_type="multipart/form-data")
     assert upload.status_code == 201, upload.get_json()
     model_id = upload.get_json()["model"]["id"]
-    assert upload.get_json()["model"]["processing_state"]["ready_for_tellus"] is False
+    uploaded_model = upload.get_json()["model"]
+    assert uploaded_model["processing_state"]["ready_for_tellus"] is False
+    assert uploaded_model["world_ready"] is False
+    assert uploaded_model["storefront_ready"] is False
+    assert "thumbnail" in uploaded_model["processing_state"]["blocked_by"]
+    assert uploaded_model["media_capture"]["status"] == "queued"
 
     ready = client.get("/api/models?ready_for_tellus=true&per_page=20")
     assert ready.status_code == 200, ready.get_json()
@@ -1707,6 +1730,7 @@ def test_ready_for_tellus_filter_requires_thumbnail_and_game_variant(monkeypatch
     item = next(model for model in models if model["id"] == model_id)
     assert item["processing_state"]["ready_for_tellus"] is True
     assert item["ready_for_tellus"] is True
+    assert item["world_ready"] is True
 
 
 def test_gltf_runtime_cost_metadata_tracks_textures_meshopt_and_vram():

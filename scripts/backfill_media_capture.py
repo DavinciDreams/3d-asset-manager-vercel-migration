@@ -82,6 +82,24 @@ def _heartbeat(context, base_url: str, *, status: str, kind: str, count=None, ca
         print(f"[heartbeat] failed: {exc}", file=sys.stderr)
 
 
+def _report_item(context, base_url: str, item: dict, *, status: str, error=None) -> None:
+    payload = {
+        "model_id": item.get("id"),
+        "status": status,
+        "kind": item.get("capture_mode") or item.get("file_format") or "models",
+        "capture_url": item.get("capture_url"),
+        "error": str(error)[:500] if error else None,
+    }
+    try:
+        context.request.post(
+            _absolute(base_url, "/api/admin/media-capture/report"),
+            data=json.dumps(payload),
+            headers={"Content-Type": "application/json"},
+        )
+    except Exception as exc:
+        print(f"[report] failed for {item.get('id')}: {exc}", file=sys.stderr)
+
+
 def _model_state(context, base_url: str, model_id: str) -> dict:
     data = _json_response(
         context.request.get(_absolute(base_url, f"/api/model/{model_id}")),
@@ -135,14 +153,23 @@ def _enqueue_enrichment(context, base_url: str, model_id: str, overwrite: bool) 
 def _process_item(page, context, base_url: str, item: dict, args) -> bool:
     model_id = item["id"]
     print(f"[capture] {model_id} {item.get('name')!r}")
-    page.goto(_absolute(base_url, item["capture_url"]), wait_until="networkidle")
-    ok, model = _wait_for_media(context, base_url, item, args.capture_timeout)
+    _report_item(context, base_url, item, status="processing")
+    try:
+        page.goto(_absolute(base_url, item["capture_url"]), wait_until="networkidle")
+        ok, model = _wait_for_media(context, base_url, item, args.capture_timeout)
+    except Exception as exc:
+        print(f"  capture page failed: {exc}")
+        _report_item(context, base_url, item, status="failed", error=exc)
+        return False
     if not ok:
-        print(
-            "  timed out waiting for media: "
+        error = (
+            "timed out waiting for media: "
             f"thumbnail={model.get('has_thumbnail')} preview={model.get('has_preview')}"
         )
+        print(f"  {error}")
+        _report_item(context, base_url, item, status="failed", error=error)
         return False
+    _report_item(context, base_url, item, status="captured")
     print("  media captured")
     if args.enrich and model.get("has_thumbnail"):
         ai_status = model.get("ai_status")
