@@ -7,12 +7,15 @@ from app.db import asset_files, model_variants, models as model_rows, optimizati
 from app.models import ApiKey, AssetBundle, Model3D, ModelVariant, User, WorldState
 from app.openapi import get_openapi_spec
 from app.permissions import asset_admin_configured, can_manage_model, is_asset_admin_user
+from pathlib import Path
+from werkzeug.datastructures import FileStorage
 import base64
 import hashlib
 import hmac
 import io
 import json
 import os
+import re
 import struct
 import threading
 import uuid
@@ -4153,6 +4156,22 @@ _conversion_backfill_state = {
     'finished_at': None,
     'last_error': None,
 }
+_FBX_AVATAR_IMPORT_LOCK = threading.Lock()
+_fbx_avatar_import_state = {
+    'running': False,
+    'total': 0,
+    'imported': 0,
+    'skipped': 0,
+    'failed': 0,
+    'current': None,
+    'started_at': None,
+    'finished_at': None,
+    'last_error': None,
+    'source': None,
+    'pattern': None,
+    'tag': 'robot',
+    'limit': None,
+}
 
 
 def _admin_token_ok():
@@ -4175,6 +4194,192 @@ def _admin_or_asset_admin_session_ok():
     return _admin_token_ok() or (
         current_user.is_authenticated and is_asset_admin_user(current_user)
     )
+
+
+def _fbx_avatar_source_paths(source=None):
+    configured = source or os.environ.get('FBX_AVATAR_IMPORT_SOURCE') or os.environ.get('FBX_AVATAR_IMPORT_SOURCES')
+    if configured:
+        parts = [part.strip() for part in re.split(r'[;\n]', configured) if part.strip()]
+        return [Path(part) for part in parts]
+    return [Path(r'Z:\3d\assets\legacy\3d\fbx')]
+
+
+def _clean_fbx_avatar_title(path):
+    stem = path.stem
+    stem = re.sub(r'_?Meshy_AI_?', ' ', stem, flags=re.IGNORECASE)
+    stem = re.sub(r'_?biped(?:\s*\(\d+\))?_?', ' ', stem, flags=re.IGNORECASE)
+    stem = re.sub(r'_?Character_output$', ' ', stem, flags=re.IGNORECASE)
+    stem = re.sub(r'_?texture_fbx(?:_\d+)?$', ' ', stem, flags=re.IGNORECASE)
+    stem = stem.replace('_', ' ').replace('-', ' ')
+    stem = re.sub(r'(?<=[a-z0-9])(?=[A-Z])', ' ', stem)
+    stem = re.sub(r'\s+', ' ', stem).strip() or 'Legacy Character'
+    title = stem.title()
+    if 'Avatar' not in title:
+        title = f'{title} Avatar'
+    return title[:80].strip()
+
+
+def _scan_fbx_avatar_files(sources, pattern):
+    paths = []
+    missing = []
+    seen = set()
+    for source in sources:
+        if not source.exists():
+            missing.append(str(source))
+            continue
+        candidates = source.rglob(pattern) if source.is_dir() else [source]
+        for path in candidates:
+            if not path.is_file() or path.suffix.lower() != '.fbx':
+                continue
+            resolved = path.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            paths.append(path)
+    return paths, missing
+
+
+def _run_fbx_avatar_import(app, *, owner_id=None, source=None, pattern='*Character_output.fbx', tag='robot', limit=None):
+    with app.app_context():
+        try:
+            sources = _fbx_avatar_source_paths(source)
+            paths, missing = _scan_fbx_avatar_files(sources, pattern)
+            if limit:
+                paths = paths[:int(limit)]
+            with _FBX_AVATAR_IMPORT_LOCK:
+                _fbx_avatar_import_state['total'] = len(paths)
+                if missing:
+                    _fbx_avatar_import_state['last_error'] = f"Missing source: {', '.join(missing)[:220]}"
+
+            allowed_extensions = app.config['ALLOWED_EXTENSIONS']
+            max_bytes = app.config['MAX_FILE_BYTES']
+            fs = app.config['FILE_STORE']
+            base_tags = ['avatar', 'humanoid', 'rigged']
+            if tag:
+                base_tags.append(tag)
+
+            for path in paths:
+                with _FBX_AVATAR_IMPORT_LOCK:
+                    _fbx_avatar_import_state['current'] = path.name
+                try:
+                    data = path.read_bytes()
+                    digest = hashlib.sha256(data).hexdigest()
+                    runtime_metadata = {
+                        'rig': {'type': 'humanoid', 'source': 'mixamo-compatible-fbx'},
+                        'upload': {
+                            'source': 'fbx-avatar-import',
+                            'content_hash': digest,
+                            'original_path': str(path),
+                        },
+                    }
+                    file = FileStorage(
+                        stream=io.BytesIO(data),
+                        filename=path.name,
+                        content_type='application/octet-stream',
+                    )
+                    with app.test_request_context('/api/admin/fbx-avatar-import', method='POST'):
+                        model, error = _store_one_upload(
+                            file,
+                            _clean_fbx_avatar_title(path),
+                            (
+                                'Rigged humanoid avatar FBX imported from the legacy character library. '
+                                'The asset store generates viewable GLB and VRM variants during conversion.'
+                            ),
+                            True,
+                            Model3D.normalize_tags(base_tags),
+                            allowed_extensions,
+                            fs,
+                            max_bytes,
+                            owner_id=owner_id,
+                            asset_category=Model3D.normalize_category('person'),
+                            asset_styles=Model3D.normalize_tags(['stylized']),
+                            asset_types=Model3D.normalize_tags(['avatar', 'humanoid', 'rigged', 'fbx']),
+                            runtime_metadata=runtime_metadata,
+                        )
+                    with _FBX_AVATAR_IMPORT_LOCK:
+                        if model:
+                            _fbx_avatar_import_state['imported'] += 1
+                        elif error and 'duplicate' in error.lower():
+                            _fbx_avatar_import_state['skipped'] += 1
+                        else:
+                            _fbx_avatar_import_state['failed'] += 1
+                            _fbx_avatar_import_state['last_error'] = f"{path.name}: {error}"
+                except Exception as e:
+                    print(f"FBX avatar import failed for {path}: {e}", flush=True)
+                    with _FBX_AVATAR_IMPORT_LOCK:
+                        _fbx_avatar_import_state['failed'] += 1
+                        _fbx_avatar_import_state['last_error'] = f"{path.name}: {str(e)[:200]}"
+        except Exception as e:
+            print(f"FBX avatar import runner crashed: {e}", flush=True)
+            with _FBX_AVATAR_IMPORT_LOCK:
+                _fbx_avatar_import_state['last_error'] = str(e)[:300]
+        finally:
+            with _FBX_AVATAR_IMPORT_LOCK:
+                _fbx_avatar_import_state['running'] = False
+                _fbx_avatar_import_state['current'] = None
+                _fbx_avatar_import_state['finished_at'] = datetime.utcnow().isoformat()
+
+
+@api_bp.route('/admin/fbx-avatar-import', methods=['POST'])
+def admin_fbx_avatar_import():
+    if not _admin_or_asset_admin_session_ok():
+        return jsonify({'error': 'Unauthorized'}), 401
+    source = (request.args.get('source') or '').strip() or None
+    pattern = (request.args.get('pattern') or '*Character_output.fbx').strip() or '*Character_output.fbx'
+    tag = (request.args.get('tag') or 'robot').strip().lower()
+    sync = request.args.get('sync', 'false').lower() in {'1', 'true', 'yes'}
+    limit = request.args.get('limit', type=int)
+    if limit is not None:
+        limit = max(1, min(limit, 500))
+    owner_id = current_user.id if current_user.is_authenticated else None
+    sources = _fbx_avatar_source_paths(source)
+    with _FBX_AVATAR_IMPORT_LOCK:
+        if _fbx_avatar_import_state['running']:
+            return jsonify({'status': 'already_running', **_fbx_avatar_import_state})
+        _fbx_avatar_import_state.update({
+            'running': True,
+            'total': 0,
+            'imported': 0,
+            'skipped': 0,
+            'failed': 0,
+            'current': None,
+            'started_at': datetime.utcnow().isoformat(),
+            'finished_at': None,
+            'last_error': None,
+            'source': ';'.join(str(path) for path in sources),
+            'pattern': pattern,
+            'tag': tag,
+            'limit': limit,
+            'sync': sync,
+        })
+    if sync:
+        _run_fbx_avatar_import(
+            current_app._get_current_object(),
+            owner_id=owner_id,
+            source=source,
+            pattern=pattern,
+            tag=tag,
+            limit=limit,
+        )
+        with _FBX_AVATAR_IMPORT_LOCK:
+            return jsonify({'status': 'finished', **_fbx_avatar_import_state})
+    thread = threading.Thread(
+        target=_run_fbx_avatar_import,
+        args=(current_app._get_current_object(),),
+        kwargs={'owner_id': owner_id, 'source': source, 'pattern': pattern, 'tag': tag, 'limit': limit},
+        name='fbx-avatar-import',
+        daemon=True,
+    )
+    thread.start()
+    return jsonify({'status': 'started', **_fbx_avatar_import_state})
+
+
+@api_bp.route('/admin/fbx-avatar-import/status', methods=['GET'])
+def admin_fbx_avatar_import_status():
+    if not _admin_or_asset_admin_session_ok():
+        return jsonify({'error': 'Unauthorized'}), 401
+    with _FBX_AVATAR_IMPORT_LOCK:
+        return jsonify(dict(_fbx_avatar_import_state))
 
 
 @api_bp.route('/admin/media-capture/queue', methods=['GET'])

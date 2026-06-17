@@ -123,13 +123,60 @@ def test_asset_admin_dashboard_can_start_conversion_backfill(monkeypatch):
     assert login.status_code == 200
     html = login.get_data(as_text=True)
     assert "Run conversion backfill" in html
+    assert "Import FBX avatars" in html
     assert "/api/admin/conversion-backfill?force=true" in html
+    assert "/api/admin/fbx-avatar-import?tag=robot" in html
 
     start = client.post("/api/admin/conversion-backfill?force=true&sync=true&limit=1")
     assert start.status_code == 200, start.get_json()
     status = start.get_json()
     assert status.get("running") is False
     assert "queued" in status
+
+
+def test_asset_admin_can_import_fbx_avatar_batch(monkeypatch, tmp_path):
+    monkeypatch.setenv("ASSET_MANAGER_ADMIN_USERNAMES", "fbx-admin")
+    source = tmp_path / "fbx"
+    source.mkdir()
+    (source / "blueMeshy_AI_biped_Meshy_AI_Character_output.fbx").write_bytes(
+        b"Kaydara FBX Binary avatar" + b"\x20" * 64
+    )
+    monkeypatch.setenv("FBX_AVATAR_IMPORT_SOURCE", str(source))
+    app = create_app()
+    client = app.test_client()
+    with app.app_context():
+        owner = _ensure_user("fbx-admin")
+
+    login = client.post("/auth/login", data={
+        "login_field": "fbx-admin",
+        "password": "pw123456",
+    }, follow_redirects=True)
+    assert login.status_code == 200
+
+    start = client.post("/api/admin/fbx-avatar-import?tag=robot&sync=true")
+    assert start.status_code == 200, start.get_json()
+
+    import time
+    status = {}
+    for _ in range(50):
+        status = client.get("/api/admin/fbx-avatar-import/status").get_json()
+        if not status.get("running"):
+            break
+        time.sleep(0.05)
+
+    assert status.get("running") is False
+    assert status["total"] == 1
+    assert status["imported"] == 1
+    with app.app_context():
+        models, total = Model3D.get_user_models(owner.id)
+    assert total == 1
+    assert len(models) == 1
+    model = models[0]
+    assert model.name == "Blue Avatar"
+    assert model.asset_category == "person"
+    assert "avatar" in model.asset_types
+    assert "robot" in model.tags
+    assert model.file_format == "fbx"
 
 
 def test_uncategorized_gltf_upload_appears_in_browse():

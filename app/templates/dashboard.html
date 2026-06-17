@@ -125,10 +125,14 @@
             <div>
                 <h2 class="text-lg font-semibold text-gray-900">Admin Processing</h2>
                 <p class="text-sm text-gray-600 mt-1">
-                    Requeue FBX/BVH conversion so avatars, VRM variants, animation clips, and embedded-texture previews are regenerated.
+                    Import legacy FBX avatars and requeue conversion so avatars, VRM variants, animation clips, and embedded-texture previews are regenerated.
                 </p>
             </div>
             <div class="flex flex-wrap items-center gap-2">
+                <button type="button" id="fbx-avatar-import-btn"
+                        class="bg-purple-600 text-white px-4 py-2 rounded-lg font-semibold hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed">
+                    <i class="fas fa-robot mr-2"></i>Import FBX avatars
+                </button>
                 <button type="button" id="conversion-backfill-btn"
                         class="bg-teal-600 text-white px-4 py-2 rounded-lg font-semibold hover:bg-teal-700 disabled:opacity-50 disabled:cursor-not-allowed">
                     <i class="fas fa-tools mr-2"></i>Run conversion backfill
@@ -149,6 +153,18 @@
             </div>
             <p id="conversion-backfill-current" class="text-xs text-gray-500 mt-2"></p>
             <p id="conversion-backfill-error" class="text-xs text-red-600 mt-1"></p>
+        </div>
+        <div id="fbx-avatar-import-status" class="hidden mt-4 pt-4 border-t border-gray-100" aria-live="polite">
+            <div class="flex justify-between text-sm text-gray-600 mb-2">
+                <span id="fbx-avatar-import-label">Idle</span>
+                <span id="fbx-avatar-import-counts"></span>
+            </div>
+            <div class="w-full bg-gray-200 rounded-full h-2.5 overflow-hidden">
+                <div id="fbx-avatar-import-bar" class="bg-purple-500 h-2.5 rounded-full transition-all" style="width:0%"></div>
+            </div>
+            <p id="fbx-avatar-import-current" class="text-xs text-gray-500 mt-2"></p>
+            <p id="fbx-avatar-import-source" class="text-xs text-gray-500 mt-1"></p>
+            <p id="fbx-avatar-import-error" class="text-xs text-red-600 mt-1"></p>
         </div>
     </div>
     {% endif %}
@@ -731,6 +747,85 @@ async function pollOptimizeJob(statusUrl, modelId) {
         wrap.classList.remove('hidden');
         error.textContent = err.message;
     }));
+    document.addEventListener('DOMContentLoaded', () => fetchStatus().catch(() => {}));
+})();
+
+// Admin FBX avatar import. Imports legacy *Character_output.fbx files as
+// normal avatar/person assets, then the existing conversion worker makes GLB
+// and VRM variants.
+(function () {
+    const runBtn = document.getElementById('fbx-avatar-import-btn');
+    const wrap = document.getElementById('fbx-avatar-import-status');
+    const label = document.getElementById('fbx-avatar-import-label');
+    const counts = document.getElementById('fbx-avatar-import-counts');
+    const bar = document.getElementById('fbx-avatar-import-bar');
+    const current = document.getElementById('fbx-avatar-import-current');
+    const source = document.getElementById('fbx-avatar-import-source');
+    const error = document.getElementById('fbx-avatar-import-error');
+    let pollTimer = null;
+
+    if (!runBtn) return;
+
+    function render(state) {
+        wrap.classList.remove('hidden');
+        const total = state.total || 0;
+        const processed = (state.imported || 0) + (state.skipped || 0) + (state.failed || 0);
+        const pct = total ? Math.min(100, Math.round((processed / total) * 100)) : (state.running ? 0 : 100);
+        bar.style.width = `${pct}%`;
+        label.textContent = state.running ? 'Importing FBX avatars...' : (state.finished_at ? 'Finished' : 'Idle');
+        counts.textContent = total
+            ? `${processed}/${total} (${state.imported || 0} imported, ${state.skipped || 0} duplicates, ${state.failed || 0} failed)`
+            : (state.running ? 'starting...' : '');
+        current.textContent = state.current ? `Current: ${state.current}` : '';
+        source.textContent = state.source ? `Source: ${state.source}` : '';
+        error.textContent = state.last_error ? `Last note: ${state.last_error}` : '';
+        runBtn.disabled = Boolean(state.running);
+        if (state.running && !pollTimer) startPolling();
+        if (!state.running && pollTimer) {
+            clearInterval(pollTimer);
+            pollTimer = null;
+        }
+    }
+
+    async function fetchStatus() {
+        const response = await fetch('/api/admin/fbx-avatar-import/status', {
+            headers: { 'Accept': 'application/json' },
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            throw new Error(data.error || `Status failed (HTTP ${response.status}).`);
+        }
+        render(data);
+    }
+
+    function startPolling() {
+        if (!pollTimer) {
+            pollTimer = setInterval(() => fetchStatus().catch(() => {}), 2000);
+        }
+    }
+
+    runBtn.addEventListener('click', async () => {
+        runBtn.disabled = true;
+        label.textContent = 'Starting...';
+        error.textContent = '';
+        wrap.classList.remove('hidden');
+        try {
+            const response = await fetch('/api/admin/fbx-avatar-import?tag=robot', {
+                method: 'POST',
+                headers: { 'Accept': 'application/json' },
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                throw new Error(data.error || `Import failed (HTTP ${response.status}).`);
+            }
+            render(data);
+            startPolling();
+        } catch (err) {
+            runBtn.disabled = false;
+            error.textContent = err.message;
+        }
+    });
+
     document.addEventListener('DOMContentLoaded', () => fetchStatus().catch(() => {}));
 })();
 {% endif %}
