@@ -60,7 +60,7 @@ def create_app():
 
     from app.auth import auth_bp
     from app.main import main_bp
-    from app.api import api_bp, start_ai_enrichment_worker
+    from app.api import api_bp, start_ai_enrichment_worker, start_pipeline_reconciler_worker
 
     app.register_blueprint(auth_bp, url_prefix="/auth")
     app.register_blueprint(main_bp)
@@ -72,6 +72,16 @@ def create_app():
             print("AI enrichment worker started")
         except Exception as e:
             print(f"AI enrichment worker failed to start: {e}")
+
+    pipeline_reconciler_enabled = os.environ.get("PIPELINE_RECONCILER_WORKER")
+    if pipeline_reconciler_enabled is None:
+        pipeline_reconciler_enabled = "1" if has_configured_database else "0"
+    if pipeline_reconciler_enabled.lower() not in {"0", "false", "no", "off"}:
+        try:
+            start_pipeline_reconciler_worker(app)
+            print("Asset pipeline reconciler started")
+        except Exception as e:
+            print(f"Asset pipeline reconciler failed to start: {e}")
 
     if app.config["ENABLE_CONVERSION"]:
         try:

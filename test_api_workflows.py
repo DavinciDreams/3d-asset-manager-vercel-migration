@@ -123,17 +123,23 @@ def test_asset_admin_dashboard_can_start_conversion_backfill(monkeypatch):
     assert login.status_code == 200
     html = login.get_data(as_text=True)
     assert "Run conversion backfill" in html
+    assert "Repair pipeline" in html
     assert "Import FBX avatars" in html
     assert "Check media queue" in html
     assert "/api/admin/conversion-backfill?force=true" in html
     assert "/api/admin/fbx-avatar-import?tag=robot" in html
-    assert "/api/admin/media-capture/status" in html
+    assert "/api/admin/pipeline/status" in html
 
     start = client.post("/api/admin/conversion-backfill?force=true&sync=true&limit=1")
     assert start.status_code == 200, start.get_json()
     status = start.get_json()
     assert status.get("running") is False
     assert "queued" in status
+
+    pipeline = client.get("/api/admin/pipeline/status")
+    assert pipeline.status_code == 200, pipeline.get_json()
+    assert "pipeline" in pipeline.get_json()
+    assert "media_queue" in pipeline.get_json()
 
 
 def test_asset_admin_can_import_fbx_avatar_batch(monkeypatch, tmp_path):
@@ -1663,6 +1669,44 @@ def test_game_optimization_defaults_are_public_tellus_contract():
     assert body["defaults"]["simplify_ratio"] == 0.85
     assert body["presets"]["quality"]["texture_limit"] == 2048
     assert body["supported"]["texture_compression"].startswith("KTX2/Basis")
+
+
+def test_ready_for_tellus_filter_requires_thumbnail_and_game_variant(monkeypatch):
+    monkeypatch.setenv("AUTO_GAME_OPTIMIZE", "0")
+    app = create_app()
+    client = app.test_client()
+    headers = {"Authorization": "Bearer test-token"}
+    glb = _minimal_glb({"asset": {"version": "2.0"}, "nodes": [], "meshes": []})
+
+    upload = client.post("/api/upload", headers=headers, data={
+        "name": "Queued Tellus Asset",
+        "is_public": "true",
+        "file": (io.BytesIO(glb), "queued_tellus_asset.glb"),
+    }, content_type="multipart/form-data")
+    assert upload.status_code == 201, upload.get_json()
+    model_id = upload.get_json()["model"]["id"]
+    assert upload.get_json()["model"]["processing_state"]["ready_for_tellus"] is False
+
+    ready = client.get("/api/models?ready_for_tellus=true&per_page=20")
+    assert ready.status_code == 200, ready.get_json()
+    assert model_id not in {item["id"] for item in ready.get_json()["models"]}
+
+    with app.app_context():
+        _attach_thumbnail(app, model_id)
+        file_id = app.config["FILE_STORE"].put(
+            glb,
+            filename="queued_tellus_asset-game.glb",
+            content_type="model/gltf-binary",
+            metadata={"kind": "game", "source_model_id": model_id},
+        )
+        ModelVariant.upsert(model_id, "game", str(file_id), file_format="glb", size=len(glb), status="ready")
+
+    ready = client.get("/api/models?ready_for_tellus=true&per_page=20")
+    assert ready.status_code == 200, ready.get_json()
+    models = ready.get_json()["models"]
+    item = next(model for model in models if model["id"] == model_id)
+    assert item["processing_state"]["ready_for_tellus"] is True
+    assert item["ready_for_tellus"] is True
 
 
 def test_gltf_runtime_cost_metadata_tracks_textures_meshopt_and_vram():

@@ -67,6 +67,9 @@ def _model_summary_schema():
             'ai_tags': {'type': 'array', 'items': {'type': 'string'}},
             'approve_game_ready': {'type': 'boolean'},
             'approve_asset_store': {'type': 'boolean'},
+            'ready_for_tellus': {'type': 'boolean'},
+            'catalog_ready': {'type': 'boolean'},
+            'processing_state': {'type': 'object'},
             'owner': {
                 'type': 'object',
                 'properties': {
@@ -449,6 +452,11 @@ def get_openapi_spec(base_url=''):
                         {
                             'name': 'include_private', 'in': 'query',
                             'description': 'Trusted service tokens only. Include private assets across all owners.',
+                            'schema': {'type': 'boolean', 'default': False},
+                        },
+                        {
+                            'name': 'ready_for_tellus', 'in': 'query',
+                            'description': 'When true, only return assets with a thumbnail and required game-optimized variant.',
                             'schema': {'type': 'boolean', 'default': False},
                         },
                         {
@@ -1410,6 +1418,30 @@ def get_openapi_spec(base_url=''):
                                 }
                             },
                         },
+                    },
+                },
+            },
+            '/admin/pipeline/status': {
+                'get': {
+                    'tags': ['Workflows'],
+                    'summary': 'Get asset processing pipeline status',
+                    'description': 'Admin status for the self-healing asset pipeline: optimizer reconciler, media-capture worker, and pending media queue counts.',
+                    'security': [{'sessionCookie': []}, {'bearerAuth': []}],
+                    'responses': {
+                        '200': {'description': 'Pipeline status', 'content': {'application/json': {'schema': {'type': 'object'}}}},
+                        '401': _error_response('Unauthorized'),
+                    },
+                },
+            },
+            '/admin/pipeline/reconcile': {
+                'post': {
+                    'tags': ['Workflows'],
+                    'summary': 'Run one asset processing reconciliation pass',
+                    'description': 'Admin repair pass that optimizes missing GLB/GLTF game variants, requeues missing FBX/BVH conversions, queues thumbnail-ready AI enrichment, and reports media still waiting for capture.',
+                    'security': [{'sessionCookie': []}, {'bearerAuth': []}],
+                    'responses': {
+                        '200': {'description': 'Reconciliation result', 'content': {'application/json': {'schema': {'type': 'object'}}}},
+                        '401': _error_response('Unauthorized'),
                     },
                 },
             },

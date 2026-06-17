@@ -147,6 +147,10 @@
                         class="bg-teal-600 text-white px-4 py-2 rounded-lg font-semibold hover:bg-teal-700 disabled:opacity-50 disabled:cursor-not-allowed">
                     <i class="fas fa-tools mr-2"></i>Run conversion backfill
                 </button>
+                <button type="button" id="pipeline-reconcile-btn"
+                        class="bg-slate-900 text-white px-4 py-2 rounded-lg font-semibold hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed">
+                    <i class="fas fa-heartbeat mr-2"></i>Repair pipeline
+                </button>
                 <button type="button" id="conversion-backfill-refresh"
                         class="bg-gray-100 text-gray-700 px-3 py-2 rounded-lg hover:bg-gray-200">
                     <i class="fas fa-sync mr-1"></i>Refresh
@@ -186,6 +190,7 @@
                 <span id="media-capture-counts"></span>
             </div>
             <p id="media-capture-worker" class="text-xs text-gray-500"></p>
+            <p id="pipeline-reconcile-worker" class="text-xs text-gray-500 mt-1"></p>
             <p id="media-capture-next" class="text-xs text-gray-500 mt-1"></p>
             <p id="media-capture-error" class="text-xs text-red-600 mt-1"></p>
         </div>
@@ -771,6 +776,7 @@ async function pollOptimizeJob(statusUrl, modelId) {
     const label = document.getElementById('media-capture-label');
     const counts = document.getElementById('media-capture-counts');
     const worker = document.getElementById('media-capture-worker');
+    const pipelineWorker = document.getElementById('pipeline-reconcile-worker');
     const next = document.getElementById('media-capture-next');
     const error = document.getElementById('media-capture-error');
 
@@ -796,6 +802,16 @@ async function pollOptimizeJob(statusUrl, modelId) {
         } else {
             worker.textContent = 'No media-capture worker heartbeat since this app process started.';
         }
+        const pipeline = data.pipeline || {};
+        if (pipelineWorker) {
+            if (pipeline.last_seen) {
+                pipelineWorker.textContent = pipeline.active
+                    ? `Pipeline reconciler active: ${pipeline.last_status || 'ok'} at ${pipeline.last_seen}`
+                    : `Pipeline reconciler last ran at ${pipeline.last_seen}; check worker settings if new uploads are stalling.`;
+            } else {
+                pipelineWorker.textContent = 'No pipeline reconciler heartbeat since this app process started.';
+            }
+        }
         const first = Array.isArray(data.models) ? data.models.find((item) => item.capture_ready) : null;
         next.innerHTML = first
             ? `Next: <a class="text-indigo-600 hover:underline" href="${first.capture_url}">${escapeHtml(first.name || first.id)}</a>`
@@ -806,12 +822,19 @@ async function pollOptimizeJob(statusUrl, modelId) {
     async function fetchStatus() {
         refreshBtn.disabled = true;
         try {
-            const response = await fetch('/api/admin/media-capture/status?limit=50&kind=all&include_not_ready=true', {
+            const response = await fetch('/api/admin/pipeline/status?limit=50&kind=all', {
                 headers: { 'Accept': 'application/json' },
             });
             const data = await response.json().catch(() => ({}));
             if (!response.ok) {
                 throw new Error(data.error || `Status failed (HTTP ${response.status}).`);
+            }
+            if (data.media_queue && !data.models) {
+                data.count = data.media_queue.count;
+                data.ready_count = data.media_queue.ready_count;
+                data.not_ready_count = data.media_queue.not_ready_count;
+                data.skipped_not_ready = data.media_queue.skipped_not_ready;
+                data.worker = data.media_worker;
             }
             render(data);
         } catch (err) {
@@ -824,6 +847,51 @@ async function pollOptimizeJob(statusUrl, modelId) {
 
     refreshBtn.addEventListener('click', fetchStatus);
     document.addEventListener('DOMContentLoaded', () => fetchStatus().catch(() => {}));
+})();
+
+// Admin pipeline reconciler. This is the self-healing pass that makes upload
+// automation restart-safe: optimize missing GLBs, requeue conversions, enqueue
+// thumbnail-ready enrichment, and report media still waiting for capture.
+(function () {
+    const runBtn = document.getElementById('pipeline-reconcile-btn');
+    const mediaRefreshBtn = document.getElementById('media-capture-refresh');
+    const wrap = document.getElementById('media-capture-status');
+    const label = document.getElementById('media-capture-label');
+    const counts = document.getElementById('media-capture-counts');
+    const error = document.getElementById('media-capture-error');
+    if (!runBtn) return;
+
+    function renderRepair(data) {
+        wrap.classList.remove('hidden');
+        const optimized = data.optimized || {};
+        const media = data.media_queue || {};
+        label.textContent = `Pipeline repaired: ${optimized.optimized || 0} optimized, ${data.conversion_queued || 0} conversions queued, ${data.enrichment_queued || 0} enrichments queued`;
+        counts.textContent = `${media.count || 0} media items waiting`;
+        error.textContent = data.error || optimized.last_error || '';
+    }
+
+    runBtn.addEventListener('click', async () => {
+        runBtn.disabled = true;
+        wrap.classList.remove('hidden');
+        label.textContent = 'Repairing pipeline...';
+        error.textContent = '';
+        try {
+            const response = await fetch('/api/admin/pipeline/reconcile?sync=true', {
+                method: 'POST',
+                headers: { 'Accept': 'application/json' },
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok || data.success === false) {
+                throw new Error(data.error || `Pipeline repair failed (HTTP ${response.status}).`);
+            }
+            renderRepair(data);
+            if (mediaRefreshBtn) mediaRefreshBtn.click();
+        } catch (err) {
+            error.textContent = err.message;
+        } finally {
+            runBtn.disabled = false;
+        }
+    });
 })();
 
 // Admin FBX avatar import. Imports legacy *Character_output.fbx files as

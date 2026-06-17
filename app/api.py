@@ -25,6 +25,8 @@ api_bp = Blueprint('api', __name__)
 AI_ENRICHMENT_WORKER = None
 AI_ENRICHMENT_KICK_THREAD = None
 AI_ENRICHMENT_KICK_LOCK = threading.Lock()
+PIPELINE_RECONCILER_WORKER = None
+PIPELINE_RECONCILER_LOCK = threading.Lock()
 
 MIME_TYPES = {
     'glb': 'model/gltf-binary',
@@ -753,6 +755,7 @@ def list_models():
         styles = Model3D.normalize_tags(request.args.getlist('style'))
         asset_types = Model3D.normalize_tags(request.args.getlist('type'))
         asset_kinds = Model3D.normalize_tags(request.args.getlist('asset'))
+        ready_for_tellus = request.args.get('ready_for_tellus', 'false').lower() in {'1', 'true', 'yes'}
         
         principal, service = _api_principal()
         if user_only and principal:
@@ -774,6 +777,10 @@ def list_models():
                 page=page, per_page=per_page, search=search if search else None,
                 category=category, style=styles or None, asset_type=asset_types or None,
                 exclude_animation_carriers=True, asset_kind=asset_kinds or None)
+
+        if ready_for_tellus:
+            models = _filter_ready_for_tellus(models)
+            total = len(models)
         
         # Convert models to JSON-serializable format
         models_data = []
@@ -2533,6 +2540,7 @@ def list_public_models():
         styles = Model3D.normalize_tags(request.args.getlist('style'))
         asset_types = Model3D.normalize_tags(request.args.getlist('type'))
         asset_kinds = Model3D.normalize_tags(request.args.getlist('asset'))
+        ready_for_tellus = request.args.get('ready_for_tellus', 'false').lower() in {'1', 'true', 'yes'}
 
         models_list, total = Model3D.get_public_models(
             page=page, per_page=per_page,
@@ -2546,6 +2554,10 @@ def list_public_models():
         for model in models_list:
             user = User.get_by_id(model.user_id)
             model.owner_username = user.username if user else 'Unknown'
+
+        if ready_for_tellus:
+            models_list = _filter_ready_for_tellus(models_list)
+            total = len(models_list)
 
         pages = (total + per_page - 1) // per_page if per_page else 0
         return jsonify({
@@ -2918,6 +2930,7 @@ def _serialize_model(model):
 
 def _media_presence_fields(model):
     game = _game_optimized_fields(model)
+    processing_state = _model_processing_state(model, game)
     return {
         'has_thumbnail': bool(model.thumbnail_file_id),
         'thumbnail_url': url_for('api.get_thumbnail', model_id=model.id) if model.thumbnail_file_id else None,
@@ -2936,8 +2949,43 @@ def _media_presence_fields(model):
             'preview_file_id': model.preview_file_id,
             'capture_url': url_for('main.model_detail', model_id=model.id, capture=1),
         },
+        'processing_state': processing_state,
+        'ready_for_tellus': processing_state['ready_for_tellus'],
+        'catalog_ready': processing_state['catalog_ready'],
         **game,
     }
+
+
+def _model_processing_state(model, game_fields=None):
+    fmt = (model.file_format or '').lower()
+    game_fields = game_fields or _game_optimized_fields(model)
+    game = game_fields.get('game_optimized') if isinstance(game_fields, dict) else None
+    needs_game = fmt in ('glb', 'gltf') and not bool(game)
+    needs_thumbnail = not bool(model.thumbnail_file_id)
+    needs_preview = not bool(model.preview_file_id)
+    needs_ai = _ai_enrichment_needs_visual_retry(model)
+    media_ready = _media_capture_ready(model)
+    return {
+        'needs_thumbnail': needs_thumbnail,
+        'needs_preview': needs_preview,
+        'needs_game_optimized': needs_game,
+        'needs_ai_enrichment': needs_ai,
+        'media_capture_ready': media_ready,
+        'ready_for_tellus': not needs_thumbnail and not needs_game,
+        'catalog_ready': not needs_thumbnail and not needs_game and not needs_ai,
+        'queue': {
+            'media': needs_thumbnail or needs_preview,
+            'optimization': needs_game,
+            'enrichment': needs_ai,
+        },
+    }
+
+
+def _filter_ready_for_tellus(models):
+    return [
+        model for model in models
+        if _model_processing_state(model).get('ready_for_tellus')
+    ]
 
 
 def _media_capture_ready(model):
@@ -4419,6 +4467,15 @@ _media_capture_state = {
     'last_captured': None,
     'last_kind': None,
 }
+_PIPELINE_RECONCILE_LOCK = threading.Lock()
+_pipeline_reconcile_state = {
+    'running': False,
+    'last_seen': None,
+    'last_status': None,
+    'last_error': None,
+    'last_result': None,
+    'last_duration_seconds': None,
+}
 
 
 def _admin_token_ok():
@@ -4777,6 +4834,243 @@ def admin_media_capture_heartbeat():
         state = dict(_media_capture_state)
     state['active'] = True
     return jsonify({'success': True, 'worker': state})
+
+
+def _pipeline_reconciler_status():
+    state = dict(_pipeline_reconcile_state)
+    last_seen = state.get('last_seen')
+    active = False
+    if last_seen:
+        try:
+            seen_at = datetime.fromisoformat(last_seen)
+            interval = int(os.environ.get('PIPELINE_RECONCILE_INTERVAL', '120'))
+            active = (datetime.utcnow() - seen_at).total_seconds() <= max(180, interval * 2)
+        except Exception:
+            active = False
+    state['active'] = active
+    return state
+
+
+def _queue_thumbnail_ready_enrichment(limit=25):
+    if os.environ.get('AUTO_ENRICH_AFTER_THUMBNAIL', '1').lower() in {'0', 'false', 'no', 'off'}:
+        return 0
+    limit = max(1, min(int(limit or 25), 200))
+    queued = 0
+    with current_app.config['DB_ENGINE'].begin() as conn:
+        rows = conn.execute(
+            select(model_rows)
+            .where(model_rows.c.thumbnail_file_id.is_not(None))
+            .where(or_(
+                model_rows.c.ai_status.is_(None),
+                model_rows.c.ai_status == '',
+                model_rows.c.ai_status == 'failed',
+                model_rows.c.ai_status == 'done',
+            ))
+            .order_by(model_rows.c.upload_date.asc())
+            .limit(limit * 3)
+        ).mappings().all()
+    for row in rows:
+        if queued >= limit:
+            break
+        model = Model3D.from_doc(row)
+        if _maybe_enqueue_autotag_after_thumbnail(model, context={'source': 'pipeline_reconciler'}):
+            queued += 1
+    if queued:
+        _kick_ai_enrichment_worker(current_app._get_current_object())
+    return queued
+
+
+def _optimize_missing_game_variants(limit=5):
+    if os.environ.get('AUTO_GAME_OPTIMIZE', '1').lower() in {'0', 'false', 'no', 'off'}:
+        return {'optimized': 0, 'failed': 0, 'skipped': 0}
+    import shutil
+    if not shutil.which('gltfpack'):
+        return {'optimized': 0, 'failed': 0, 'skipped': 0, 'error': 'gltfpack is not installed'}
+    ids = Model3D.optimizable_ids()
+    have = ModelVariant.model_ids_with_kind('game', ids)
+    todo = [mid for mid in ids if mid not in have]
+    limit = max(1, min(int(limit or 5), 50))
+    result = {'optimized': 0, 'failed': 0, 'skipped': max(0, len(ids) - len(todo)), 'remaining': max(0, len(todo) - limit)}
+    for mid in todo[:limit]:
+        model = Model3D.get_by_id(mid)
+        if not model:
+            result['failed'] += 1
+            continue
+        try:
+            _run_game_optimizer(model, model.user_id, dict(GAME_OPTIMIZE_DEFAULTS))
+            result['optimized'] += 1
+        except Exception as e:
+            print(f"Pipeline optimize failed for {mid}: {str(e)[:200]}", flush=True)
+            result['failed'] += 1
+            result['last_error'] = f"{model.name or mid}: {str(e)[:200]}"
+    return result
+
+
+def _requeue_missing_conversions(limit=25):
+    if not current_app.config.get('ENABLE_CONVERSION', True):
+        return 0
+    from app.conversion import enqueue
+    limit = max(1, min(int(limit or 25), 200))
+    with current_app.config['DB_ENGINE'].begin() as conn:
+        rows = conn.execute(
+            select(model_rows)
+            .where(model_rows.c.file_format.in_(['fbx', 'bvh']))
+            .order_by(model_rows.c.upload_date.asc())
+            .limit(limit * 3)
+        ).mappings().all()
+    queued = 0
+    for row in rows:
+        if queued >= limit:
+            break
+        model = Model3D.from_doc(row)
+        if not _conversion_backfill_candidate(model, force=False):
+            continue
+        try:
+            enqueue(model, enabled=True)
+            queued += 1
+        except Exception as e:
+            print(f"Pipeline conversion enqueue failed for {model.id}: {e}", flush=True)
+    return queued
+
+
+def _reconcile_asset_pipeline_once(app, *, optimize_limit=None, enrich_limit=None, conversion_limit=None):
+    with app.app_context():
+        started = datetime.utcnow()
+        if not _PIPELINE_RECONCILE_LOCK.acquire(blocking=False):
+            return {'success': False, 'status': 'already_running'}
+        try:
+            _pipeline_reconcile_state.update({
+                'running': True,
+                'last_seen': started.isoformat(),
+                'last_status': 'running',
+                'last_error': None,
+            })
+            optimize = _optimize_missing_game_variants(
+                optimize_limit or int(os.environ.get('PIPELINE_OPTIMIZE_LIMIT', '3'))
+            )
+            conversions = _requeue_missing_conversions(
+                conversion_limit or int(os.environ.get('PIPELINE_CONVERSION_LIMIT', '20'))
+            )
+            enrichment = _queue_thumbnail_ready_enrichment(
+                enrich_limit or int(os.environ.get('PIPELINE_ENRICH_LIMIT', '25'))
+            )
+            media = _media_capture_queue_snapshot(limit=50, kind='all', include_not_ready=True)
+            result = {
+                'success': True,
+                'status': 'ok',
+                'optimized': optimize,
+                'conversion_queued': conversions,
+                'enrichment_queued': enrichment,
+                'media_queue': {
+                    'count': media.get('count', 0),
+                    'ready_count': media.get('ready_count', 0),
+                    'not_ready_count': media.get('not_ready_count', 0),
+                },
+            }
+            duration = round((datetime.utcnow() - started).total_seconds(), 3)
+            _pipeline_reconcile_state.update({
+                'running': False,
+                'last_seen': datetime.utcnow().isoformat(),
+                'last_status': 'ok',
+                'last_result': result,
+                'last_duration_seconds': duration,
+            })
+            return result
+        except Exception as e:
+            msg = str(e)[:500]
+            _pipeline_reconcile_state.update({
+                'running': False,
+                'last_seen': datetime.utcnow().isoformat(),
+                'last_status': 'failed',
+                'last_error': msg,
+            })
+            print(f"Pipeline reconciler failed: {msg}", flush=True)
+            return {'success': False, 'status': 'failed', 'error': msg}
+        finally:
+            if _PIPELINE_RECONCILE_LOCK.locked():
+                _PIPELINE_RECONCILE_LOCK.release()
+
+
+class PipelineReconcilerWorker:
+    def __init__(self, app, poll_interval=120):
+        self.app = app
+        self.poll_interval = max(15, int(poll_interval or 120))
+        self._stop = threading.Event()
+        self._thread = None
+
+    def start(self):
+        if self._thread and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(target=self._loop, name='asset-pipeline-reconciler', daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+
+    def _loop(self):
+        while not self._stop.is_set():
+            try:
+                _reconcile_asset_pipeline_once(self.app)
+            except Exception as e:
+                print(f"Pipeline reconciler loop error: {e}", flush=True)
+            self._stop.wait(self.poll_interval)
+
+
+def start_pipeline_reconciler_worker(app):
+    global PIPELINE_RECONCILER_WORKER
+    if PIPELINE_RECONCILER_WORKER is None:
+        interval = int(os.environ.get('PIPELINE_RECONCILE_INTERVAL', '120'))
+        PIPELINE_RECONCILER_WORKER = PipelineReconcilerWorker(app, interval)
+        PIPELINE_RECONCILER_WORKER.start()
+    return PIPELINE_RECONCILER_WORKER
+
+
+@api_bp.route('/admin/pipeline/reconcile', methods=['POST'])
+def admin_pipeline_reconcile():
+    if not _admin_or_asset_admin_session_ok():
+        return jsonify({'error': 'Unauthorized'}), 401
+    sync = request.args.get('sync', 'true').lower() in {'1', 'true', 'yes'}
+    if sync:
+        result = _reconcile_asset_pipeline_once(
+            current_app._get_current_object(),
+            optimize_limit=request.args.get('optimize_limit', type=int),
+            enrich_limit=request.args.get('enrich_limit', type=int),
+            conversion_limit=request.args.get('conversion_limit', type=int),
+        )
+        return jsonify({**result, 'pipeline': _pipeline_reconciler_status(), 'media_worker': _media_capture_worker_status()})
+
+    app = current_app._get_current_object()
+    thread = threading.Thread(
+        target=_reconcile_asset_pipeline_once,
+        args=(app,),
+        name='pipeline-reconcile-manual',
+        daemon=True,
+    )
+    thread.start()
+    return jsonify({'success': True, 'status': 'started', 'pipeline': _pipeline_reconciler_status()})
+
+
+@api_bp.route('/admin/pipeline/status', methods=['GET'])
+def admin_pipeline_status():
+    if not _admin_or_asset_admin_session_ok():
+        return jsonify({'error': 'Unauthorized'}), 401
+    media = _media_capture_queue_snapshot(
+        limit=request.args.get('limit', 50, type=int),
+        kind=request.args.get('kind') or 'all',
+        include_not_ready=True,
+    )
+    return jsonify({
+        'success': True,
+        'pipeline': _pipeline_reconciler_status(),
+        'media_worker': _media_capture_worker_status(),
+        'media_queue': {
+            'count': media.get('count', 0),
+            'ready_count': media.get('ready_count', 0),
+            'not_ready_count': media.get('not_ready_count', 0),
+            'skipped_not_ready': media.get('skipped_not_ready', 0),
+        },
+        'models': media.get('models', []),
+    })
 
 
 def _conversion_backfill_candidate(model, *, force=False):
