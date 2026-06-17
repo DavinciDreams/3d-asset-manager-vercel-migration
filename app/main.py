@@ -65,12 +65,29 @@ def _attach_preview_variant_flags(models):
         model.has_game_optimized = bool(game and (not fixed or _variant_uses_fixed_source(game)))
         model.has_fixed_eyes = bool(fixed)
         model.game_uses_fixed = _variant_uses_fixed_source(game)
+        model.dashboard_game_size = game.size if model.has_game_optimized and game else None
+
+
+def _format_bytes(size):
+    if not size:
+        return "Unknown"
+    value = float(size)
+    for unit in ["bytes", "KB", "MB", "GB"]:
+        if value < 1024.0:
+            return f"{value:.1f} {unit}"
+        value /= 1024.0
+    return f"{value:.1f} TB"
 
 
 def _enrich_dashboard_models(user_models):
     """Attach preview variant flags so stale optimized files do not hide a newer
     fixed-eyes/mouth bake."""
     _attach_preview_variant_flags(user_models)
+    for model in user_models:
+        optimized_size = getattr(model, 'dashboard_game_size', None)
+        model.dashboard_size_is_optimized = bool(optimized_size)
+        model.dashboard_size_label = _format_bytes(optimized_size or model.file_size)
+        model.dashboard_original_size_label = _format_bytes(model.file_size)
 
 
 class Pagination:

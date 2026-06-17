@@ -58,21 +58,21 @@
                     {% endif %}
                 </div>
                 <div class="text-sm text-gray-500">{{ model.file_extension.upper() }}</div>
-                <div id="model-facets-{{ model.id }}" class="flex flex-wrap gap-1 mt-1 {% if not (model.asset_category or model.asset_styles or model.asset_types) %}hidden{% endif %}">
+                <div id="model-facets-{{ model.id }}" class="dashboard-chip-row mt-1 {% if not (model.asset_category or model.asset_styles or model.asset_types) %}hidden{% endif %}">
                     {% if model.asset_category %}
-                    <span class="bg-gray-100 text-gray-700 text-xs px-2 py-0.5 rounded">{{ model.asset_category|title }}</span>
+                    <span class="dashboard-chip bg-gray-100 text-gray-700 text-xs px-2 py-0.5 rounded" title="{{ model.asset_category|title }}">{{ model.asset_category|title }}</span>
                     {% endif %}
                     {% for s in model.asset_styles %}
-                    <span class="bg-purple-50 text-purple-700 text-xs px-2 py-0.5 rounded">{{ s }}</span>
+                    <span class="dashboard-chip bg-purple-50 text-purple-700 text-xs px-2 py-0.5 rounded" title="{{ s }}">{{ s }}</span>
                     {% endfor %}
                     {% for t in model.asset_types %}
-                    <span class="bg-teal-50 text-teal-700 text-xs px-2 py-0.5 rounded">{{ t }}</span>
+                    <span class="dashboard-chip bg-teal-50 text-teal-700 text-xs px-2 py-0.5 rounded" title="{{ t }}">{{ t }}</span>
                     {% endfor %}
                 </div>
-                <div id="model-tags-{{ model.id }}" class="flex flex-wrap gap-1 mt-1 {% if not model.tags %}hidden{% endif %}">
+                <div id="model-tags-{{ model.id }}" class="dashboard-chip-row mt-1 {% if not model.tags %}hidden{% endif %}">
                     {% if model.tags %}
                     {% for t in model.tags %}
-                    <span class="bg-indigo-50 text-indigo-700 text-xs px-2 py-0.5 rounded">{{ t }}</span>
+                    <span class="dashboard-chip bg-indigo-50 text-indigo-700 text-xs px-2 py-0.5 rounded" title="{{ t }}">{{ t }}</span>
                     {% endfor %}
                     {% endif %}
                 </div>
@@ -80,7 +80,10 @@
         </div>
     </td>
     <td class="px-3 py-4 whitespace-nowrap text-sm text-gray-900">
-        {{ model.get_file_size_formatted() }}
+        <div>{{ model.dashboard_size_label or model.get_file_size_formatted() }}</div>
+        {% if model.dashboard_size_is_optimized %}
+        <div class="text-xs text-teal-600" title="Original: {{ model.dashboard_original_size_label }}">optimized</div>
+        {% endif %}
     </td>
     <td class="px-3 py-4 whitespace-nowrap text-sm text-gray-900 hidden lg:table-cell">
         {{ model.download_count }}

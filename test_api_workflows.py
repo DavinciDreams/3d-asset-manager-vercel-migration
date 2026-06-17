@@ -160,6 +160,44 @@ def test_uncategorized_gltf_upload_appears_in_browse():
     assert "Uncategorized GLTF Probe" in browse.get_data(as_text=True)
 
 
+def test_dashboard_shows_game_optimized_size():
+    app = create_app()
+    client = app.test_client()
+    with app.app_context():
+        owner = _ensure_user("dashboard-size-owner")
+
+    login = client.post("/auth/login", data={
+        "login_field": "dashboard-size-owner",
+        "password": "pw123456",
+    }, follow_redirects=True)
+    assert login.status_code == 200
+
+    upload = client.post("/api/upload", data={
+        "name": "Optimized Size Probe",
+        "is_public": "true",
+        "file": (io.BytesIO(b"glTF" + b"\x00" * 8192), "optimized_size_probe.glb"),
+    }, content_type="multipart/form-data")
+    assert upload.status_code == 201, upload.get_json()
+    model_id = upload.get_json()["model"]["id"]
+
+    with app.app_context():
+        file_id = app.config["FILE_STORE"].put(
+            b"optimized" * 256,
+            filename="optimized_size_probe.game.glb",
+            content_type="model/gltf-binary",
+            metadata={"derived_for": model_id, "kind": "game"},
+        )
+        ModelVariant.upsert(model_id, "game", str(file_id), file_format="glb", size=2048, status="ready")
+
+    dashboard = client.get("/dashboard")
+    assert dashboard.status_code == 200
+    html = dashboard.get_data(as_text=True)
+    assert "Optimized Size Probe" in html
+    assert "2.0 KB" in html
+    assert "optimized" in html
+    assert "Original: 8.0 KB" in html
+
+
 def _attach_thumbnail(app, model_id):
     with app.app_context():
         model = Model3D.get_by_id(model_id)

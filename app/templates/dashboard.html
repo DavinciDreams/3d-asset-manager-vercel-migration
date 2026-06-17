@@ -6,8 +6,8 @@
 {% include "_live_previews.html" %}
 <style>
     .dashboard-thumb {
-        width: 96px;
-        height: 96px;
+        width: 128px;
+        height: 128px;
         border-radius: 8px;
         background: linear-gradient(135deg, #f3f4f6 0%, #e5e7eb 100%);
         border: 1px solid #e5e7eb;
@@ -15,8 +15,8 @@
         position: relative;  /* host for the absolute-positioned live viewer */
     }
     .dashboard-thumb-fallback {
-        width: 96px;
-        height: 96px;
+        width: 128px;
+        height: 128px;
         border-radius: 8px;
         background: linear-gradient(135deg, #f3f4f6 0%, #e5e7eb 100%);
         border: 1px solid #e5e7eb;
@@ -26,8 +26,34 @@
     }
     /* Constrain the Model/title column so long titles wrap instead of
        stretching the row; let the thumbnail column stay snug. */
-    .col-model { width: 22%; }
+    .col-model { width: 36%; min-width: 420px; }
     .col-model .model-title { overflow-wrap: anywhere; }
+    .dashboard-chip-row {
+        display: flex;
+        flex-wrap: nowrap;
+        gap: 0.25rem;
+        max-width: min(620px, 100%);
+        overflow: hidden;
+        position: relative;
+        white-space: nowrap;
+    }
+    .dashboard-chip-row::after {
+        content: "";
+        position: absolute;
+        top: 0;
+        right: 0;
+        width: 2.5rem;
+        height: 100%;
+        pointer-events: none;
+        background: linear-gradient(90deg, rgba(255,255,255,0), #fff);
+    }
+    .dashboard-chip {
+        flex: 0 0 auto;
+        max-width: 10rem;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
     /* Compact icon action buttons in the table */
     .row-action {
         display: inline-flex;
@@ -357,7 +383,7 @@ function renderTagBadges(modelId, tags) {
     if (!wrap) return;
     const clean = Array.isArray(tags) ? tags.filter(Boolean) : [];
     wrap.innerHTML = clean.map((tag) =>
-        `<span class="bg-indigo-50 text-indigo-700 text-xs px-2 py-0.5 rounded">${escapeHtml(tag)}</span>`
+        `<span class="dashboard-chip bg-indigo-50 text-indigo-700 text-xs px-2 py-0.5 rounded" title="${escapeHtml(tag)}">${escapeHtml(tag)}</span>`
     ).join('');
     wrap.classList.toggle('hidden', clean.length === 0);
 }
@@ -370,13 +396,14 @@ function renderFacetBadges(modelId, model) {
     const types = Array.isArray(model.asset_types) ? model.asset_types.filter(Boolean) : [];
     const badges = [];
     if (category) {
-        badges.push(`<span class="bg-gray-100 text-gray-700 text-xs px-2 py-0.5 rounded">${escapeHtml(category.replace(/\b\w/g, c => c.toUpperCase()))}</span>`);
+        const label = category.replace(/\b\w/g, c => c.toUpperCase());
+        badges.push(`<span class="dashboard-chip bg-gray-100 text-gray-700 text-xs px-2 py-0.5 rounded" title="${escapeHtml(label)}">${escapeHtml(label)}</span>`);
     }
     styles.forEach((style) => {
-        badges.push(`<span class="bg-purple-50 text-purple-700 text-xs px-2 py-0.5 rounded">${escapeHtml(style)}</span>`);
+        badges.push(`<span class="dashboard-chip bg-purple-50 text-purple-700 text-xs px-2 py-0.5 rounded" title="${escapeHtml(style)}">${escapeHtml(style)}</span>`);
     });
     types.forEach((type) => {
-        badges.push(`<span class="bg-teal-50 text-teal-700 text-xs px-2 py-0.5 rounded">${escapeHtml(type)}</span>`);
+        badges.push(`<span class="dashboard-chip bg-teal-50 text-teal-700 text-xs px-2 py-0.5 rounded" title="${escapeHtml(type)}">${escapeHtml(type)}</span>`);
     });
     wrap.innerHTML = badges.join('');
     wrap.classList.toggle('hidden', badges.length === 0);
