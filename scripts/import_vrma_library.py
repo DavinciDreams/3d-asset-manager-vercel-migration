@@ -7,9 +7,10 @@ Examples:
     python scripts/import_vrma_library.py --dry-run
     python scripts/import_vrma_library.py --owner-username lisa
     python scripts/import_vrma_library.py --source "Z:\\3d\\assets\\animation-rigs\\legacy\\animations"
-    python scripts/import_vrma_library.py --api-base https://3d.flobots.xyz --format fbx --source "Z:\\3d\\assets\\legacy\\3d\\fbx"
+    python scripts/import_vrma_library.py --api-base https://3d.flobots.xyz --format fbx --source "Z:\\3d\\assets\\legacy\\3d\\fbx" --backfill-conversions
 """
 import argparse
+from collections import Counter
 import hashlib
 import json
 import os
@@ -115,28 +116,72 @@ def _infer_category(stem):
     return "humanoid"
 
 
-def _iter_animation_files(sources, formats):
+def _scan_sources(sources, formats, include_unprefixed_fbx=False):
     seen = set()
+    paths = []
+    stats = Counter()
     suffixes = {f".{fmt.lower().lstrip('.')}" for fmt in formats}
     for source in sources:
         if not source.exists():
             print(f"Missing source: {source}")
+            stats["missing_sources"] += 1
             continue
         if source.is_dir():
-            paths = (path for path in source.rglob("*") if path.is_file() and path.suffix.lower() in suffixes)
+            candidates = (path for path in source.rglob("*") if path.is_file())
         else:
-            paths = [source] if source.suffix.lower() in suffixes else []
-        for path in paths:
-            if path.suffix.lower() == ".fbx" and not path.name.lower().startswith("animations_"):
+            candidates = [source]
+        for path in candidates:
+            ext = path.suffix.lower()
+            if ext not in suffixes:
+                if ext in {".vrma", ".fbx", ".bvh"}:
+                    stats[f"ignored_{ext.lstrip('.')}"] += 1
+                continue
+            if ext == ".fbx" and not include_unprefixed_fbx and not path.name.lower().startswith("animations_"):
+                stats["ignored_unprefixed_fbx"] += 1
                 continue
             resolved = path.resolve()
             if resolved in seen:
+                stats["duplicates_in_scan"] += 1
                 continue
             seen.add(resolved)
-            yield path
+            stats[ext.lstrip(".")] += 1
+            paths.append(path)
+    return paths, stats
 
 
-def import_library(sources, manifests, owner_username=None, public=True, dry_run=False, limit=None, formats=None):
+def _iter_animation_files(sources, formats, include_unprefixed_fbx=False):
+    paths, _stats = _scan_sources(sources, formats, include_unprefixed_fbx=include_unprefixed_fbx)
+    yield from paths
+
+
+def _print_scan_summary(paths, stats, formats):
+    wanted = ",".join(formats)
+    print(
+        "Scan summary: "
+        f"formats={wanted} matched={len(paths)} "
+        f"vrma={stats.get('vrma', 0)} fbx={stats.get('fbx', 0)} bvh={stats.get('bvh', 0)} "
+        f"ignored_unprefixed_fbx={stats.get('ignored_unprefixed_fbx', 0)} "
+        f"ignored_vrma={stats.get('ignored_vrma', 0)} ignored_fbx={stats.get('ignored_fbx', 0)} "
+        f"ignored_bvh={stats.get('ignored_bvh', 0)}"
+    )
+    if stats.get("ignored_unprefixed_fbx"):
+        print(
+            "Note: unprefixed FBX files were skipped by default because this importer "
+            "treats FBX as legacy Mixamo animation clips. Pass --include-unprefixed-fbx "
+            "only when those FBX files should be imported as animation sources."
+        )
+
+
+def import_library(
+    sources,
+    manifests,
+    owner_username=None,
+    public=True,
+    dry_run=False,
+    limit=None,
+    formats=None,
+    include_unprefixed_fbx=False,
+):
     from app import create_app
     from app.models import Model3D, User
 
@@ -150,7 +195,11 @@ def import_library(sources, manifests, owner_username=None, public=True, dry_run
 
         fs = app.config["FILE_STORE"]
         changed = skipped = failed = 0
-        for index, path in enumerate(_iter_animation_files(sources, formats), 1):
+        paths, stats = _scan_sources(sources, formats, include_unprefixed_fbx=include_unprefixed_fbx)
+        _print_scan_summary(paths, stats, formats)
+        if not paths:
+            raise SystemExit("No matching animation files found. Check --source and --format.")
+        for index, path in enumerate(paths, 1):
             if limit and (changed + skipped + failed) >= limit:
                 break
             try:
@@ -214,7 +263,35 @@ def import_library(sources, manifests, owner_username=None, public=True, dry_run
         print(f"Done. imported={changed} skipped={skipped} failed={failed} dry_run={dry_run}")
 
 
-def import_library_via_api(sources, manifests, api_base, token_env, public=True, dry_run=False, limit=None, formats=None):
+def _trigger_conversion_backfill(api_base, token, limit=None, force=True):
+    import requests
+
+    params = {"force": "true" if force else "false"}
+    if limit:
+        params["limit"] = str(limit)
+    response = requests.post(
+        f"{api_base.rstrip('/')}/api/admin/conversion-backfill",
+        headers={"Authorization": f"Bearer {token}"},
+        params=params,
+        timeout=90,
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(f"conversion backfill failed: HTTP {response.status_code} {response.text[:300]}")
+    print(f"Conversion backfill queued: {response.text[:500]}")
+
+
+def import_library_via_api(
+    sources,
+    manifests,
+    api_base,
+    token_env,
+    public=True,
+    dry_run=False,
+    limit=None,
+    formats=None,
+    include_unprefixed_fbx=False,
+    backfill_conversions=False,
+):
     try:
         import requests
     except ImportError as error:
@@ -228,7 +305,11 @@ def import_library_via_api(sources, manifests, api_base, token_env, public=True,
     api_base = api_base.rstrip("/")
     formats = formats or ["vrma"]
     changed = skipped = failed = 0
-    for index, path in enumerate(_iter_animation_files(sources, formats), 1):
+    paths, stats = _scan_sources(sources, formats, include_unprefixed_fbx=include_unprefixed_fbx)
+    _print_scan_summary(paths, stats, formats)
+    if not paths:
+        raise SystemExit("No matching animation files found. Check --source and --format.")
+    for index, path in enumerate(paths, 1):
         if limit and (changed + skipped + failed) >= limit:
             break
         try:
@@ -280,17 +361,26 @@ def import_library_via_api(sources, manifests, api_base, token_env, public=True,
             print(f"[{index}] fail {path}: {str(error)[:300]}")
 
     print(f"Done. uploaded={changed} skipped={skipped} failed={failed} dry_run={dry_run}")
+    if backfill_conversions:
+        if dry_run:
+            print("Dry run: conversion backfill not queued.")
+        elif changed or skipped:
+            _trigger_conversion_backfill(api_base, token, force=True)
+        else:
+            print("No uploads or duplicates confirmed; conversion backfill not queued.")
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--source", action="append", type=Path, help="VRMA file or directory. Repeatable.")
+    parser.add_argument("--source", action="append", type=Path, help="Animation file or directory. Repeatable.")
     parser.add_argument("--manifest", action="append", type=Path, help="animation-list.json file. Repeatable.")
     parser.add_argument("--format", action="append", choices=["vrma", "fbx", "bvh", "all"], help="Animation source format to import. Repeatable. Default: vrma.")
     parser.add_argument("--owner-username", help="Asset owner username, e.g. lisa.")
     parser.add_argument("--private", action="store_true", help="Import as private assets.")
     parser.add_argument("--api-base", help="Upload through a live asset-store API instead of direct DB/FILE_STORE.")
     parser.add_argument("--api-token-env", default="ASSET_MANAGER_IMPORT_TOKEN", help="Environment variable holding the bearer token for --api-base.")
+    parser.add_argument("--include-unprefixed-fbx", action="store_true", help="Import FBX files that do not start with Animations_. Use for trusted animation-source folders only.")
+    parser.add_argument("--backfill-conversions", action="store_true", help="After API upload, ask the server to requeue FBX/BVH conversion.")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--limit", type=int)
     args = parser.parse_args()
@@ -307,7 +397,7 @@ def main():
         sources = [path for path in [*DEFAULT_SOURCES, *DEFAULT_FBX_SOURCES] if path.exists()]
     manifests = args.manifest or [path for path in DEFAULT_MANIFESTS if path.exists()]
     if not sources:
-        raise SystemExit("No VRMA sources found. Pass --source.")
+        raise SystemExit("No animation sources found. Pass --source.")
     if args.api_base:
         import_library_via_api(
             sources=sources,
@@ -318,6 +408,8 @@ def main():
             dry_run=args.dry_run,
             limit=args.limit,
             formats=formats,
+            include_unprefixed_fbx=args.include_unprefixed_fbx,
+            backfill_conversions=args.backfill_conversions,
         )
         return
     import_library(
@@ -328,6 +420,7 @@ def main():
         dry_run=args.dry_run,
         limit=args.limit,
         formats=formats,
+        include_unprefixed_fbx=args.include_unprefixed_fbx,
     )
 
 
