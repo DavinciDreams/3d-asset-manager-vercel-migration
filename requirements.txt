@@ -8,3 +8,8 @@ psycopg[binary]==3.3.2
 pymongo==4.17.0
 boto3>=1.34,<2
 Pillow>=10.4,<12
+# Server-side GLB->PNG thumbnail rendering (offscreen, OSMesa software GL).
+# pyrender hard-pins PyOpenGL==3.1.0, so we do NOT pin PyOpenGL ourselves.
+trimesh>=4.4,<5
+pyrender==0.1.45
+numpy>=1.26,<3
