@@ -1007,6 +1007,123 @@ def test_fbx_source_with_vrm_and_vrma_lives_in_avatar_animation_apis():
     assert clip["view_url"].endswith(f"/api/export/{model_id}?format=vrma")
 
 
+def test_animations_list_has_no_duplicate_model_cards():
+    """A row that matches more than one animation list (e.g. a native .vrma that
+    also carries a vrma_file_id) must surface as ONE card, not two."""
+    app = create_app()
+    client = app.test_client()
+    headers = {"Authorization": "Bearer test-token"}
+
+    upload = client.post("/api/upload", headers=headers, data={
+        "is_public": "true",
+        "file": (io.BytesIO(b"VRMA dup clip" + b"\x0c" * 64), "dup_clip.vrma"),
+    }, content_type="multipart/form-data")
+    assert upload.status_code == 201, upload.get_json()
+    model_id = upload.get_json()["model"]["id"]
+
+    with app.app_context():
+        # Force the overlap: native .vrma (List 1) that ALSO carries a
+        # vrma_file_id (List 2). Before the dedup fix this rendered twice.
+        clip = Model3D.get_by_id(model_id)
+        derived = app.config["FILE_STORE"].put(
+            b"vrma", filename="dup_derived.vrma",
+            content_type="application/octet-stream",
+            metadata={"derived_for": model_id, "kind": "vrma"},
+        )
+        clip.vrma_file_id = str(derived)
+        clip.save()
+
+    vrma = client.get("/api/vrma")
+    assert vrma.status_code == 200, vrma.get_json()
+    model_ids = [it["model_id"] for it in vrma.get_json()["animations"]]
+    assert model_ids.count(model_id) == 1, model_ids
+
+    page = client.get("/animations")
+    assert page.status_code == 200
+    # The card template emits clip.detail_url 3x per card (thumb + 2 links). One
+    # card -> 3 occurrences; a duplicate card would double it to 6.
+    assert page.get_data(as_text=True).count(f'href="/model/{model_id}"') == 3
+
+
+def test_render_processing_status_surfaces_and_blocks_tellus():
+    """While a server-side thumbnail render is in flight, the model must report
+    media_capture.status='processing' and ready_for_tellus=False so Tellus keeps
+    polling and doesn't render it in-world yet. Once a thumbnail exists the
+    status clears and ready_for_tellus depends only on thumbnail+game readiness."""
+    app = create_app()
+    client = app.test_client()
+    headers = {"Authorization": "Bearer test-token"}
+
+    upload = client.post("/api/upload", headers=headers, data={
+        "is_public": "true",
+        "file": (io.BytesIO(b"glTF" + b"\x0e" * 64), "render_status.glb"),
+    }, content_type="multipart/form-data")
+    assert upload.status_code == 201, upload.get_json()
+    model_id = upload.get_json()["model"]["id"]
+
+    import app.api as api
+    with app.app_context():
+        model = Model3D.get_by_id(model_id)
+        api._set_media_capture_state(model, status="processing", kind="server_render")
+        model.save()
+
+    detail = client.get(f"/api/model/{model_id}")
+    assert detail.status_code == 200, detail.get_json()
+    body = detail.get_json()["model"]
+    # The poller reads media_capture.status and processing_state.
+    assert body["media_capture"]["status"] == "processing"
+    assert body["processing_state"]["media_capture_status"] == "processing"
+    # No thumbnail yet -> Tellus must not render it.
+    assert body["processing_state"]["ready_for_tellus"] is False
+    assert "thumbnail" in body["processing_state"]["blocked_by"]
+
+    # Simulate the render completing: thumbnail stored flips status to captured.
+    with app.app_context():
+        model = Model3D.get_by_id(model_id)
+        api._store_thumbnail_png(model, _one_px_png(), kind="thumbnail", source="server_render")
+
+    detail2 = client.get(f"/api/model/{model_id}").get_json()["model"]
+    assert detail2["media_capture"]["status"] == "captured"
+    assert "thumbnail" not in detail2["processing_state"]["blocked_by"]
+
+
+def _one_px_png():
+    # Minimal valid 1x1 PNG so _store_thumbnail_png's WebP transcode has input.
+    import base64
+    return base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+    )
+
+
+def test_superseded_id_alias_resolves_to_replacement():
+    """A reference to a superseded model id (e.g. a Tellus world that stored an
+    id later replaced by a generationId re-upload) must still resolve to the
+    replacement model, not 404."""
+    app = create_app()
+    client = app.test_client()
+    headers = {"Authorization": "Bearer test-token"}
+
+    up = client.post("/api/upload", headers=headers, data={
+        "is_public": "true",
+        "file": (io.BytesIO(b"glTF" + b"\x11" * 64), "alias_target.glb"),
+    }, content_type="multipart/form-data")
+    assert up.status_code == 201, up.get_json()
+    new_id = up.get_json()["model"]["id"]
+
+    old_id = "00000000-0000-0000-0000-deadbeef0001"
+    with app.app_context():
+        Model3D.record_alias(old_id, new_id, reason="test")
+        assert Model3D.resolve_id(old_id) == new_id
+        # get_by_id stays strict (no alias); get_by_id_or_alias follows it.
+        assert Model3D.get_by_id(old_id) is None
+        assert Model3D.get_by_id_or_alias(old_id).id == new_id
+
+    # The consumer-facing endpoint resolves the old id to the live model.
+    via_alias = client.get(f"/api/model/{old_id}")
+    assert via_alias.status_code == 200, via_alias.get_json()
+    assert via_alias.get_json()["model"]["id"] == new_id
+
+
 def test_browse_page_renders_with_asset_filters():
     app = create_app()
     client = app.test_client()

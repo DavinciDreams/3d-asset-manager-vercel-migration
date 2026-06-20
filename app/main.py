@@ -437,6 +437,16 @@ def animations():
             for model in Model3D.list_animation_sources_for_user(user_id)
             if model.id not in generated_ids
         )
+        # The three lists above can overlap (e.g. a row that is both a native
+        # vrma and carries a vrma_file_id), which would render the same asset as
+        # two cards. Collapse to one card per underlying model, preferring a
+        # playable clip (native vrma / generated) over a source-only shell.
+        deduped = {}
+        for item in items:
+            prev = deduped.get(item['model_id'])
+            if prev is None or (item['playable'] and not prev['playable']):
+                deduped[item['model_id']] = item
+        items = list(deduped.values())
         if search:
             items = [
                 item for item in items
@@ -502,6 +512,15 @@ def model_detail(model_id):
         # covering reconstruction holes; surfaces its own toggle + download.
         fixed_eyes_variant = ModelVariant.get(model.id, 'fixed_eyes')
         game_variant_uses_fixed = _variant_uses_fixed_source(game_variant)
+        # Existence/readiness (controls whether the Game-Optimized tab + export
+        # link render at all) is independent of whether it's the DEFAULT toggle
+        # (game_variant_current, below). Previously these were conflated, so a
+        # ready game variant could exist yet stay hidden on reload whenever a
+        # fixed-eyes variant also existed.
+        has_game_variant = bool(
+            game_variant and game_variant.file_id
+            and (game_variant.status or 'ready') == 'ready'
+        )
         game_variant_current = bool(game_variant and (not fixed_eyes_variant or game_variant_uses_fixed))
         # VRM variant (if any): a rigged GLB converted to a VRM avatar via
         # glb2vrm; lets the owner play VRMA clips on it.
@@ -537,6 +556,7 @@ def model_detail(model_id):
         return render_template('model_detail.html', model=model, owner=owner,
                                all_tags=all_tags, game_variant=game_variant,
                                game_variant_current=game_variant_current,
+                               has_game_variant=has_game_variant,
                                game_variant_uses_fixed=game_variant_uses_fixed,
                                fixed_eyes_variant=fixed_eyes_variant,
                                vrm_variant=vrm_variant,

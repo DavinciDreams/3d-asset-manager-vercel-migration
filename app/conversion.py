@@ -488,7 +488,9 @@ def process_model_doc(app, doc):
                 fields["asset_types"] = merge_tags(doc.get("asset_types"), ["avatar", "vrm"])
 
                 # Auto-produce the rig-safe optimized avatar. Best-effort:
-                # imported lazily to avoid an api<->conversion import cycle.
+                # imported lazily to avoid an api<->conversion import cycle. Its
+                # own try/except keeps an optimizer hiccup from failing the
+                # whole conversion -- the VRM avatar variant already exists.
                 try:
                     from app.api import _optimize_vrm_variant
                     model_obj = Model3D.get_by_id(model_id)
@@ -497,10 +499,33 @@ def process_model_doc(app, doc):
                 except Exception as e:
                     print(f"Auto VRM optimization skipped for {model_id}: {e}")
             except Exception as e:
-                print(f"VRM generation failed for {model_id} (non-fatal): {e}")
+                # A humanoid FBX with mesh that can't bake to VRM is not a usable
+                # deliverable (FBX isn't a delivery format here). Fail it loudly
+                # instead of committing a half-built row that would slip into the
+                # animations catalog (vrma_file_id set, no avatar tags).
+                msg = f"VRM bake failed: {str(e)[:240]}"
+                print(f"VRM generation failed for {model_id} (fatal): {e}")
+                patch_model(app, model_id, conversion_status="failed", conversion_error=msg)
+                return "failed"
 
         fields["conversion_status"] = "done"
         patch_model(app, model_id, **fields)
+
+        # The viewable GLB now exists, so render a thumbnail immediately rather
+        # than waiting for the reconciler. _server_render_thumbnail sets an
+        # honest media_capture status (captured/failed/blocked) so a poller
+        # (Tellus) sees the result, not a stale state. Best-effort; lazy import
+        # avoids an api<->conversion cycle. Runs in the conversion worker thread.
+        try:
+            from app.models import Model3D
+            from app.api import _server_render_thumbnail
+            with app.app_context():
+                converted = Model3D.get_by_id(model_id)
+                if converted and not converted.thumbnail_file_id:
+                    _server_render_thumbnail(converted)
+        except Exception as e:
+            print(f"Post-conversion thumbnail render skipped for {model_id}: {str(e)[:200]}")
+
         return "done"
 
     except subprocess.TimeoutExpired:
