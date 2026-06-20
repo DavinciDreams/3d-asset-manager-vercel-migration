@@ -175,6 +175,18 @@ model_variants = Table(
     UniqueConstraint("model_id", "kind", "level", name="uq_model_variants_model_kind_level"),
 )
 
+# Maps a superseded model id to the model that replaced it, so a reference held
+# by an external consumer (e.g. a Tellus world that stored the old id) still
+# resolves after a generationId-replace upload deletes the original row.
+asset_aliases = Table(
+    "asset_aliases",
+    metadata,
+    Column("old_id", String(36), primary_key=True),
+    Column("new_id", String(36), nullable=False, index=True),
+    Column("reason", String(80)),
+    Column("created_at", DateTime, nullable=False, default=datetime.utcnow),
+)
+
 world_states = Table(
     "world_states",
     metadata,
@@ -391,6 +403,7 @@ def init_database(engine):
     _ensure_bundle_table(engine)
     _ensure_optimization_job_table(engine)
     _ensure_model_variants_table(engine)
+    _ensure_asset_aliases_table(engine)
 
 
 def _ensure_asset_file_columns(engine):
@@ -467,6 +480,11 @@ def _ensure_optimization_job_table(engine):
 def _ensure_model_variants_table(engine):
     if not inspect(engine).has_table("model_variants"):
         model_variants.create(engine, checkfirst=True)
+
+
+def _ensure_asset_aliases_table(engine):
+    if not inspect(engine).has_table("asset_aliases"):
+        asset_aliases.create(engine, checkfirst=True)
 
 
 @contextmanager
