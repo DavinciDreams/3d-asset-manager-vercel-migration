@@ -35,6 +35,11 @@ def _env_token() -> str:
     return ""
 
 
+# Per-call timeout (ms) for Playwright APIRequest calls to the app/MinIO so a
+# hung backend can never stall a whole poll cycle.
+API_REQUEST_TIMEOUT_MS = int(os.environ.get("MEDIA_CAPTURE_API_TIMEOUT", "30")) * 1000
+
+
 def _absolute(base_url: str, path: str) -> str:
     return urljoin(base_url.rstrip("/") + "/", path.lstrip("/"))
 
@@ -47,7 +52,7 @@ def _json_response(response, label: str) -> dict:
 
 
 def _login(page, base_url: str, username: str, password: str) -> None:
-    page.goto(_absolute(base_url, "/auth/login"), wait_until="networkidle")
+    page.goto(_absolute(base_url, "/auth/login"), wait_until="networkidle", timeout=API_REQUEST_TIMEOUT_MS)
     page.fill('input[name="login_field"]', username)
     page.fill('input[name="password"]', password)
     page.click('button[type="submit"], input[type="submit"]')
@@ -60,7 +65,7 @@ def _fetch_queue(context, base_url: str, limit: int, kind: str, recapture: bool)
         base_url,
         f"/api/admin/media-capture/queue?limit={limit}&kind={kind}&recapture={recapture_value}",
     )
-    data = _json_response(context.request.get(url), "queue fetch")
+    data = _json_response(context.request.get(url, timeout=API_REQUEST_TIMEOUT_MS), "queue fetch")
     return list(data.get("models") or [])
 
 
@@ -77,6 +82,7 @@ def _heartbeat(context, base_url: str, *, status: str, kind: str, count=None, ca
             _absolute(base_url, "/api/admin/media-capture/heartbeat"),
             data=json.dumps(payload),
             headers={"Content-Type": "application/json"},
+            timeout=API_REQUEST_TIMEOUT_MS,
         )
     except Exception as exc:
         print(f"[heartbeat] failed: {exc}", file=sys.stderr)
@@ -95,6 +101,7 @@ def _report_item(context, base_url: str, item: dict, *, status: str, error=None)
             _absolute(base_url, "/api/admin/media-capture/report"),
             data=json.dumps(payload),
             headers={"Content-Type": "application/json"},
+            timeout=API_REQUEST_TIMEOUT_MS,
         )
     except Exception as exc:
         print(f"[report] failed for {item.get('id')}: {exc}", file=sys.stderr)
@@ -102,7 +109,7 @@ def _report_item(context, base_url: str, item: dict, *, status: str, error=None)
 
 def _model_state(context, base_url: str, model_id: str) -> dict:
     data = _json_response(
-        context.request.get(_absolute(base_url, f"/api/model/{model_id}")),
+        context.request.get(_absolute(base_url, f"/api/model/{model_id}"), timeout=API_REQUEST_TIMEOUT_MS),
         f"model fetch {model_id}",
     )
     return data.get("model") or {}
@@ -143,6 +150,7 @@ def _enqueue_enrichment(context, base_url: str, model_id: str, overwrite: bool) 
         _absolute(base_url, f"/api/model/{model_id}/ai/autotag"),
         data=json.dumps(payload),
         headers={"Content-Type": "application/json"},
+        timeout=API_REQUEST_TIMEOUT_MS,
     )
     if response.status in (200, 202):
         print(f"  enrichment queued for {model_id}")
@@ -155,7 +163,11 @@ def _process_item(page, context, base_url: str, item: dict, args) -> bool:
     print(f"[capture] {model_id} {item.get('name')!r}")
     _report_item(context, base_url, item, status="processing")
     try:
-        page.goto(_absolute(base_url, item["capture_url"]), wait_until="networkidle")
+        page.goto(
+            _absolute(base_url, item["capture_url"]),
+            wait_until="networkidle",
+            timeout=args.capture_timeout * 1000,
+        )
         ok, model = _wait_for_media(context, base_url, item, args.capture_timeout)
     except Exception as exc:
         print(f"  capture page failed: {exc}")
@@ -218,6 +230,9 @@ def main(argv: list[str] | None = None) -> int:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=not args.show)
         context = browser.new_context(extra_http_headers=headers)
+        # Cap every navigation/wait so a single bad asset can't wedge the worker.
+        context.set_default_navigation_timeout(args.capture_timeout * 1000)
+        context.set_default_timeout(args.capture_timeout * 1000)
         page = context.new_page()
         if args.username and args.password:
             _login(page, args.base_url, args.username, args.password)
@@ -255,7 +270,18 @@ def main(argv: list[str] | None = None) -> int:
                     continue
 
                 ok_count = 0
-                for item in items:
+                for idx, item in enumerate(items):
+                    # Per-item heartbeat keeps the 180s worker-active window fresh
+                    # on large batches so the dashboard doesn't flag us inactive
+                    # mid-cycle.
+                    _heartbeat(
+                        context,
+                        args.base_url,
+                        status="processing",
+                        kind=args.kind,
+                        count=len(items),
+                        captured=ok_count,
+                    )
                     try:
                         if _process_item(page, context, args.base_url, item, args):
                             ok_count += 1

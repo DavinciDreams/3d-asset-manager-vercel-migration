@@ -10,6 +10,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 from app.db import (
     api_keys,
+    asset_aliases,
     asset_files,
     bundles,
     count_rows,
@@ -534,7 +535,7 @@ class Model3D:
             value = raw.get(key)
             if value:
                 normalized[key] = str(value)[:500]
-        for key in ("last_attempt_at", "last_success_at", "last_failed_at"):
+        for key in ("last_attempt_at", "last_success_at", "last_failed_at", "backoff_until"):
             value = raw.get(key)
             if value:
                 normalized[key] = str(value)[:80]
@@ -703,6 +704,64 @@ class Model3D:
         except Exception as e:
             print(f"Error getting model by ID: {e}")
             return None
+
+    @staticmethod
+    def record_alias(old_id, new_id, reason=None):
+        """Remember that old_id was superseded by new_id, so a reference held by
+        an external consumer (e.g. a Tellus world) still resolves after the old
+        row is deleted. Idempotent; never raises into the caller."""
+        old_id, new_id = str(old_id or "").strip(), str(new_id or "").strip()
+        if not old_id or not new_id or old_id == new_id:
+            return
+        try:
+            engine = current_app.config["DB_ENGINE"]
+            with engine.begin() as conn:
+                conn.execute(asset_aliases.delete().where(asset_aliases.c.old_id == old_id))
+                conn.execute(asset_aliases.insert().values(
+                    old_id=old_id, new_id=new_id, reason=(str(reason)[:80] if reason else None),
+                ))
+                # If old_id was itself a target of earlier aliases, repoint them
+                # forward so chains stay one hop (A->B->C collapses to A->C).
+                conn.execute(
+                    update(asset_aliases)
+                    .where(asset_aliases.c.new_id == old_id)
+                    .values(new_id=new_id)
+                )
+        except Exception as e:
+            print(f"Could not record asset alias {old_id}->{new_id}: {e}")
+
+    @staticmethod
+    def resolve_id(model_id, _depth=0):
+        """Follow the alias chain to the current id for a (possibly superseded)
+        id. Returns the input unchanged if there's no alias. Bounded against
+        accidental cycles."""
+        mid = str(model_id or "").strip()
+        if not mid or _depth > 8:
+            return mid
+        try:
+            engine = current_app.config["DB_ENGINE"]
+            with engine.begin() as conn:
+                row = conn.execute(
+                    select(asset_aliases.c.new_id).where(asset_aliases.c.old_id == mid)
+                ).first()
+            if row and row[0] and row[0] != mid:
+                return Model3D.resolve_id(row[0], _depth + 1)
+        except Exception as e:
+            print(f"Could not resolve asset alias for {mid}: {e}")
+        return mid
+
+    @staticmethod
+    def get_by_id_or_alias(model_id):
+        """get_by_id, but if the id was superseded (generationId-replace upload),
+        transparently resolve to the replacement so stale external references
+        keep working. Use on consumer-facing load endpoints, not hot internals."""
+        model = Model3D.get_by_id(model_id)
+        if model:
+            return model
+        resolved = Model3D.resolve_id(model_id)
+        if resolved and resolved != str(model_id or "").strip():
+            return Model3D.get_by_id(resolved)
+        return None
 
     @staticmethod
     def get_by_content_hash(content_hash):

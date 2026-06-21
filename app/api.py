@@ -2,7 +2,7 @@ from datetime import datetime, timedelta
 from flask import Blueprint, jsonify, request, current_app, make_response, url_for
 from flask_login import current_user, login_required
 from werkzeug.exceptions import HTTPException
-from sqlalchemy import or_, select, true, update
+from sqlalchemy import cast, func, or_, select, String, true, update
 from app.db import asset_files, model_variants, models as model_rows, optimization_jobs
 from app.models import ApiKey, AssetBundle, Model3D, ModelVariant, User, WorldState
 from app.openapi import get_openapi_spec
@@ -952,8 +952,8 @@ def list_animated_models():
 def download_model(model_id):
     """Download model file"""
     try:
-        model = Model3D.get_by_id(model_id)
-        
+        model = Model3D.get_by_id_or_alias(model_id)
+
         if not model:
             return jsonify({'error': 'Model not found'}), 404
         
@@ -985,8 +985,8 @@ def download_model(model_id):
 def view_model(model_id):
     """Serve the renderable model file for inline 3D viewing."""
     try:
-        model = Model3D.get_by_id(model_id)
-        
+        model = Model3D.get_by_id_or_alias(model_id)
+
         if not model:
             return jsonify({'error': 'Model not found'}), 404
         
@@ -1021,7 +1021,7 @@ def get_game_optimized(model_id):
     attachment. Honors HTTP Range and uses the immutable variant file id as a
     strong ETag. 404 if the model has no game-optimized variant yet."""
     try:
-        model = Model3D.get_by_id(model_id)
+        model = Model3D.get_by_id_or_alias(model_id)
         if not model:
             return jsonify({'error': 'Model not found'}), 404
         if not _can_access_model(model):
@@ -1296,6 +1296,35 @@ class VrmConversionError(Exception):
         self.status = status
 
 
+def _decompress_meshopt_glb(data, workdir):
+    """Strip EXT_meshopt_compression so downstream tools (glb2vrm) can read the
+    BIN chunk. Best-effort: returns the original bytes if gltfpack is missing or
+    the repack fails. Does NOT undo -si decimation -- callers that need a full
+    skeleton must start from an un-decimated source, not just decompress."""
+    import shutil
+    import subprocess
+    if not _glb_is_meshopt_compressed(data):
+        return data
+    gltfpack_bin = shutil.which('gltfpack')
+    if not gltfpack_bin:
+        return data
+    in_path = os.path.join(workdir, 'meshopt-in.glb')
+    out_path = os.path.join(workdir, 'meshopt-out.glb')
+    with open(in_path, 'wb') as f:
+        f.write(data)
+    try:
+        result = subprocess.run(
+            [gltfpack_bin, '-i', in_path, '-o', out_path, '-kn', '-km'],
+            capture_output=True, text=True, timeout=180, check=False,
+        )
+        if result.returncode == 0 and os.path.exists(out_path):
+            with open(out_path, 'rb') as f:
+                return f.read()
+    except Exception as e:
+        print(f"meshopt decompress failed (using original): {str(e)[:200]}")
+    return data
+
+
 def _convert_glb_bytes_to_vrm(model, data, author=None):
     """Convert rigged GLB bytes into a VRM, store it as the model's 'vrm'
     variant, and auto-produce the rig-safe optimized variant. Returns
@@ -1316,6 +1345,10 @@ def _convert_glb_bytes_to_vrm(model, data, author=None):
     try:
         in_path = os.path.join(workdir, 'input.glb')
         out_path = os.path.join(workdir, 'avatar.vrm')
+        # Safety net: a meshopt-compressed GLB would hide its BIN chunk from
+        # glb2vrm. Decompress first. (The rigger already prefers an un-decimated
+        # source; this guards any other caller.)
+        data = _decompress_meshopt_glb(data, workdir)
         with open(in_path, 'wb') as f:
             f.write(data)
         try:
@@ -1616,7 +1649,7 @@ def get_rigged(model_id):
 def _serve_vrm_variant(model_id, kind, etag_prefix, filename_suffix):
     """Shared serving for VRM variants (raw + optimized): ETag + immutable
     cache, inline by default, ?download=1 for an attachment."""
-    model = Model3D.get_by_id(model_id)
+    model = Model3D.get_by_id_or_alias(model_id)
     if not model:
         return jsonify({'error': 'Model not found'}), 404
     if not _can_access_model(model):
@@ -1873,7 +1906,7 @@ def export_model(model_id):
 
     try:
         fmt = (request.args.get('format') or '').lower().strip()
-        model = Model3D.get_by_id(model_id)
+        model = Model3D.get_by_id_or_alias(model_id)
         if not model:
             return jsonify({'error': 'Model not found'}), 404
         if not _can_access_model(model):
@@ -1947,7 +1980,7 @@ def export_model(model_id):
 def get_model(model_id):
     """Return a single model summary, including async job status."""
     try:
-        model = Model3D.get_by_id(model_id)
+        model = Model3D.get_by_id_or_alias(model_id)
         if not model:
             return jsonify({'error': 'Model not found'}), 404
         user, service = _api_principal()
@@ -2112,29 +2145,8 @@ def upload_thumbnail(model_id):
         if not png_bytes or len(png_bytes) > 2 * 1024 * 1024:
             return jsonify({'error': 'Thumbnail missing or too large'}), 400
 
-        fs = current_app.config['FILE_STORE']
-
-        # Remove the previous thumbnail, if any
-        if model.thumbnail_file_id:
-            try:
-                fs.delete(model.thumbnail_file_id)
-            except Exception as e:
-                print(f"Thumbnail cleanup warning: {e}")
-
-        thumb_bytes, thumb_ct, thumb_ext = _encode_thumbnail_webp(png_bytes)
-        new_id = fs.put(
-            thumb_bytes,
-            filename=f"thumb_{model_id}.{thumb_ext}",
-            content_type=thumb_ct,
-            metadata={'model_id': model_id, 'kind': 'thumbnail'}
-        )
-        model.thumbnail_file_id = str(new_id)
-        _set_media_capture_state(model, status='captured', kind='thumbnail')
-        model.save()
-        enrichment_queued = _maybe_enqueue_autotag_after_thumbnail(
-            model,
-            context={'source': 'thumbnail_capture'},
-        )
+        _, enrichment_queued = _store_thumbnail_png(
+            model, png_bytes, kind='thumbnail', source='thumbnail_capture')
 
         return jsonify({
             'success': True,
@@ -2147,12 +2159,157 @@ def upload_thumbnail(model_id):
         return jsonify({'error': 'Thumbnail upload failed'}), 500
 
 
+def _store_thumbnail_png(model, png_bytes, *, kind='thumbnail', source='server_render'):
+    """Store rendered/captured PNG bytes as the model's thumbnail.
+
+    Shared write path: transcode to WebP, swap the file, set thumbnail_file_id +
+    media_capture='captured', and kick AI enrichment. Used by the browser upload
+    route and the server-side renderer alike."""
+    if not png_bytes:
+        raise ValueError('empty thumbnail bytes')
+    fs = current_app.config['FILE_STORE']
+    if model.thumbnail_file_id:
+        try:
+            fs.delete(model.thumbnail_file_id)
+        except Exception as e:
+            print(f"Thumbnail cleanup warning: {e}")
+    thumb_bytes, thumb_ct, thumb_ext = _encode_thumbnail_webp(png_bytes)
+    new_id = fs.put(
+        thumb_bytes,
+        filename=f"thumb_{model.id}.{thumb_ext}",
+        content_type=thumb_ct,
+        metadata={'model_id': model.id, 'kind': 'thumbnail'},
+    )
+    model.thumbnail_file_id = str(new_id)
+    _set_media_capture_state(model, status='captured', kind=kind)
+    model.save()
+    enrichment_queued = _maybe_enqueue_autotag_after_thumbnail(model, context={'source': source})
+    return model.thumbnail_file_id, enrichment_queued
+
+
+def _mark_media_capture(model, status, error=None):
+    """Persist a media_capture status, swallowing save errors (best-effort)."""
+    try:
+        _set_media_capture_state(model, status=status, kind='server_render', error=error)
+        model.save()
+    except Exception as e:
+        print(f"Could not set media_capture={status} for {model.id}: {str(e)[:200]}")
+
+
+def _server_render_thumbnail(model, *, size=1024):
+    """Render a model's viewable GLB to a thumbnail server-side (no browser).
+
+    Returns True on success. Best-effort: returns False (and logs) on any failure
+    so a single bad asset never breaks a batch. Always leaves an honest
+    media_capture status so a poller (Tellus) is never stuck on a stale
+    'processing': 'captured' on success, 'failed' on a render error (queue stops
+    retrying), 'blocked' when the asset simply isn't renderable here."""
+    from app import render as render_mod
+
+    if not render_mod.render_available():
+        return False
+    fmt = (model.file_format or '').lower()
+    # Only mesh formats render here; vrm is glTF under the hood so it's fine too.
+    if fmt in ('vrma', 'bvh'):
+        _mark_media_capture(model, 'blocked', error='not a renderable mesh format')
+        return False
+    try:
+        data, view_fmt = model.get_viewable_data()
+    except Exception as e:
+        print(f"Render: could not read viewable for {model.id}: {e}")
+        _mark_media_capture(model, 'blocked', error='no viewable mesh available')
+        return False
+    if not data or data[:4] != b'glTF':
+        _mark_media_capture(model, 'blocked', error='no usable GLB bytes')
+        return False
+    try:
+        png = render_mod.render_glb_to_png(
+            data,
+            file_type=(view_fmt or 'glb').lower() if (view_fmt or 'glb').lower() in ('glb', 'gltf') else 'glb',
+            size=size,
+            decompress=lambda b: _decompress_meshopt_glb_bytes(b),
+        )
+        _store_thumbnail_png(model, png, kind='thumbnail', source='server_render')
+        return True
+    except render_mod.RenderError as e:
+        print(f"Render failed for {model.id}: {e}")
+        _mark_media_capture(model, 'failed', error=f'render failed: {str(e)[:200]}')
+        return False
+    except Exception as e:
+        print(f"Render unexpected error for {model.id}: {e}")
+        _mark_media_capture(model, 'failed', error=f'render error: {str(e)[:200]}')
+        return False
+
+
+def _decompress_meshopt_glb_bytes(data):
+    """Wrapper that gives the renderer a temp workdir for meshopt decompression."""
+    import tempfile
+    workdir = tempfile.mkdtemp(prefix='render_')
+    try:
+        return _decompress_meshopt_glb(data, workdir)
+    finally:
+        import shutil
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def _model_render_ready(model):
+    """True when a model can be rendered to a thumbnail right now: a renderable
+    format with usable bytes (native glb/gltf/vrm, or a converted FBX/etc. that
+    already has its viewable GLB)."""
+    fmt = (model.file_format or '').lower()
+    if fmt in ('vrma', 'bvh'):
+        return False
+    if fmt in ('glb', 'gltf', 'vrm'):
+        return True
+    return bool(model.viewable_file_id)
+
+
+def _maybe_render_thumbnail_async(model):
+    """Render this model's thumbnail in the background so a fresh upload/conversion
+    shows an image immediately, without waiting for the reconciler. Best-effort:
+    skipped if the model already has a thumbnail, isn't renderable yet, or the
+    render stack is unavailable. Never blocks the caller (HTTP upload response)."""
+    if os.environ.get('SERVER_RENDER_THUMBNAILS', '1').lower() in {'0', 'false', 'no', 'off'}:
+        return False
+    if not model or model.thumbnail_file_id or not _model_render_ready(model):
+        return False
+    from app import render as render_mod
+    if not render_mod.render_available():
+        return False
+
+    app = current_app._get_current_object()
+    model_id = model.id
+
+    # Mark 'processing' synchronously BEFORE the thread starts so the very first
+    # status poll (Tellus, world UI) sees a render in flight and waits, rather
+    # than seeing a derived 'queued'/'idle' and assuming nothing is happening.
+    # If the render thread dies, the pipeline stuck-sweep resets this after its
+    # timeout, so 'processing' is never permanently sticky.
+    try:
+        _set_media_capture_state(model, status='processing', kind='server_render')
+        model.save()
+    except Exception as e:
+        print(f"Could not mark render processing for {model_id}: {str(e)[:200]}")
+
+    def _run():
+        with app.app_context():
+            try:
+                fresh = Model3D.get_by_id(model_id)
+                if fresh and not fresh.thumbnail_file_id:
+                    _server_render_thumbnail(fresh)
+            except Exception as e:
+                print(f"Async thumbnail render failed for {model_id}: {str(e)[:200]}", flush=True)
+
+    threading.Thread(target=_run, name=f'render-thumb-{model_id[:8]}', daemon=True).start()
+    return True
+
+
 @api_bp.route('/model/<model_id>/thumbnail', methods=['GET'])
 def get_thumbnail(model_id):
     """Serve a model's thumbnail (WebP for new uploads, PNG for older ones).
     404 if none (frontend shows a fallback)."""
     try:
-        model = Model3D.get_by_id(model_id)
+        model = Model3D.get_by_id_or_alias(model_id)
         if not model or not model.thumbnail_file_id:
             return jsonify({'error': 'No thumbnail'}), 404
 
@@ -2236,7 +2393,13 @@ def list_vrma():
                 'source': 'upload',
                 'model_id': model.id,
             })
+        seen_clip_model_ids = {it['model_id'] for it in items}
         for model in Model3D.list_generated_vrma_for_user(user_id):
+            # A native .vrma that also carries a vrma_file_id would otherwise be
+            # listed twice (once per list); one clip per underlying model.
+            if model.id in seen_clip_model_ids:
+                continue
+            seen_clip_model_ids.add(model.id)
             vrma_url = url_for('api.export_model', model_id=model.id) + '?format=vrma'
             items.append({
                 'id': model.id + ':vrma',
@@ -2392,7 +2555,7 @@ def get_preview(model_id):
     """Serve a model's looping preview video. Supports HTTP Range requests so
     browsers can stream/seek without downloading the whole clip. 404 if none."""
     try:
-        model = Model3D.get_by_id(model_id)
+        model = Model3D.get_by_id_or_alias(model_id)
         if not model or not model.preview_file_id:
             return jsonify({'error': 'No preview'}), 404
 
@@ -2840,10 +3003,14 @@ def _store_one_upload(file, base_name, description, is_public, tags, allowed_ext
     )
     if is_legacy_pixal3d_direct and _block_legacy_pixal3d_uploads_enabled():
         return None, 'Pixal3D direct uploads are disabled; use the Tellus world upload path.'
+    superseded_ids = []
     existing_generation = _find_existing_generation_upload(generation_id, owner_id)
     if existing_generation:
         if world_id and _is_legacy_pixal3d_direct_model(existing_generation):
             try:
+                # Alias the deleted id -> the new model (recorded after save) so a
+                # Tellus reference to the old generation still resolves.
+                superseded_ids.append(existing_generation.id)
                 existing_generation.delete()
             except Exception as e:
                 print(f"Failed to replace legacy Pixal3D generation duplicate {existing_generation.id}: {e}")
@@ -2896,6 +3063,10 @@ def _store_one_upload(file, base_name, description, is_public, tags, allowed_ext
     # Auto-generate a game-optimized variant for GLB/GLTF uploads so every
     # asset gets a small, performant browse preview/download by default.
     _maybe_autostart_game_optimization(model)
+    # Render a thumbnail immediately for natively-viewable uploads (glb/gltf/vrm)
+    # so the browse grid shows an image without waiting for the reconciler.
+    # Converted formats (fbx/obj) get theirs when conversion finishes.
+    _maybe_render_thumbnail_async(model)
     _maybe_autotag_on_upload(model, context={'source': 'api_upload'})
     deleted_duplicates = _delete_recent_legacy_pixal3d_duplicates(model)
     if deleted_duplicates:
@@ -2904,6 +3075,10 @@ def _store_one_upload(file, base_name, description, is_public, tags, allowed_ext
             f"for Tellus upload {model.id}: {deleted_duplicates}",
             flush=True,
         )
+    # Alias every id we just superseded -> this surviving model, so a Tellus
+    # world that stored a now-deleted id keeps resolving to the replacement.
+    for old_id in list(superseded_ids) + list(deleted_duplicates):
+        Model3D.record_alias(old_id, model.id, reason='generation_replace')
     return model, None
 
 
@@ -3078,6 +3253,27 @@ def _media_capture_ready(model):
     if fmt in ('glb', 'gltf', 'vrm'):
         return True
     return bool(model.viewable_file_id)
+
+
+def _media_capture_suppressed(state):
+    """Whether a queued item should be skipped this cycle.
+
+    Stops the forever-retry loop: a job that has exhausted its attempts
+    ('failed'/'blocked') or is inside its exponential backoff window is held
+    back from the worker queue. The admin recapture path bypasses this by
+    building items with recapture=True (which forces status fresh).
+    """
+    status = (state or {}).get('status')
+    if status in {'failed', 'blocked'}:
+        return True
+    backoff_until = (state or {}).get('backoff_until')
+    if backoff_until:
+        try:
+            if datetime.fromisoformat(backoff_until) > datetime.utcnow():
+                return True
+        except (TypeError, ValueError):
+            return False
+    return False
 
 
 def _maybe_create_vrm_avatar_variant(model, file_content):
@@ -4483,6 +4679,34 @@ def _enqueue_game_optimization(model_id, owner_id, settings):
     return job_id
 
 
+def _is_rigged_or_avatar(model):
+    """True when a GLB carries a rig/avatar that mesh-simplification would break.
+
+    Game optimization runs `gltfpack -si` (aggressive mesh decimation) which
+    destroys a skeleton. Such assets must take the rig-safe `_optimize_vrm_variant`
+    path instead. Conservative on purpose: require a real VRM variant OR an
+    explicit avatar/vrm tag, so a plain static prop is never denied its -si pass.
+    """
+    try:
+        if ModelVariant.get(model.id, 'vrm'):
+            return True
+    except Exception:
+        pass
+    tags = {str(t or '').strip().lower() for t in (model.tags or [])}
+    types = {str(t or '').strip().lower() for t in (model.asset_types or [])}
+    return bool((tags | types) & {'avatar', 'vrm'})
+
+
+def _route_avatar_optimization(model):
+    """Run the rig-safe optimizer for an avatar/rigged GLB (best-effort)."""
+    if not ModelVariant.get(model.id, 'vrm'):
+        return  # a rigged GLB with no VRM variant: skip rather than risk the rig
+    try:
+        _optimize_vrm_variant(model)
+    except Exception as e:
+        print(f"Rig-safe VRM optimize skipped for {model.id}: {str(e)[:200]}")
+
+
 def _maybe_autostart_game_optimization(model, force=False):
     """Auto-queue a game-optimized variant.
 
@@ -4501,6 +4725,11 @@ def _maybe_autostart_game_optimization(model, force=False):
         if not force and (model.file_format or '').lower() not in ('glb', 'gltf'):
             return
         if not shutil.which('gltfpack'):
+            return
+        # Never run -si mesh decimation on a rigged/avatar GLB -- it would wreck
+        # the skeleton. Route those to the rig-safe optimizer instead.
+        if _is_rigged_or_avatar(model):
+            _route_avatar_optimization(model)
             return
         # On upload, don't double-optimize an existing variant. When forcing we
         # WANT to replace it (e.g. eyeless -> with eyes); upsert handles the swap.
@@ -4800,7 +5029,8 @@ def admin_fbx_avatar_import_status():
         return jsonify(dict(_fbx_avatar_import_state))
 
 
-def _media_capture_queue_snapshot(limit=50, kind='all', include_not_ready=False, recapture=False):
+def _media_capture_queue_snapshot(limit=50, kind='all', include_not_ready=False, recapture=False,
+                                  exclude_suppressed=False):
     limit = max(1, min(int(limit or 50), 200))
     kind = (kind or 'all').strip().lower()
     if kind not in {'all', 'models', 'animations'}:
@@ -4831,6 +5061,10 @@ def _media_capture_queue_snapshot(limit=50, kind='all', include_not_ready=False,
         for row in rows:
             model = Model3D.from_doc(row)
             if model.is_animation_carrier():
+                continue
+            if exclude_suppressed and not recapture and _media_capture_suppressed(
+                Model3D.normalize_media_capture(getattr(model, 'media_capture', None))
+            ):
                 continue
             item = _media_capture_queue_item(model, force_capture=recapture)
             if not item['capture_ready'] and not include_not_ready:
@@ -4893,6 +5127,9 @@ def admin_media_capture_queue():
         kind=request.args.get('kind') or 'all',
         include_not_ready=request.args.get('include_not_ready', 'false').lower() == 'true',
         recapture=request.args.get('recapture', 'false').lower() in {'1', 'true', 'yes'},
+        # The worker shouldn't re-attempt jobs that have failed out or are inside
+        # their backoff window; the /status dashboard still shows them.
+        exclude_suppressed=True,
     )
     return jsonify(data)
 
@@ -5023,6 +5260,12 @@ def _optimize_missing_game_variants(limit=5):
         if not model:
             result['failed'] += 1
             continue
+        # Rigged/avatar GLBs must not be -si decimated; route to the rig-safe
+        # optimizer (when they have a VRM variant) and count as skipped here.
+        if _is_rigged_or_avatar(model):
+            _route_avatar_optimization(model)
+            result['skipped'] += 1
+            continue
         try:
             _run_game_optimizer(model, model.user_id, dict(GAME_OPTIMIZE_DEFAULTS))
             result['optimized'] += 1
@@ -5060,6 +5303,110 @@ def _requeue_missing_conversions(limit=25):
     return queued
 
 
+def _sweep_stuck_media_capture(stuck_minutes=None, max_attempts=None, limit=200):
+    """Recover media-capture jobs wedged in 'processing'.
+
+    A worker that dies mid-capture (or a page that never paints despite the
+    worker's own timeout) can leave media_capture.status='processing' forever.
+    This sweep reclaims those: jobs that have exhausted their attempts are
+    marked 'failed' (so the queue stops serving them); the rest are reset to
+    'queued' with an exponential backoff window so they retry later without
+    hot-looping. Runs inside the pipeline reconciler.
+    """
+    stuck_minutes = int(stuck_minutes if stuck_minutes is not None
+                        else os.environ.get('MEDIA_CAPTURE_STUCK_MINUTES', '15'))
+    max_attempts = int(max_attempts if max_attempts is not None
+                       else os.environ.get('MEDIA_CAPTURE_MAX_ATTEMPTS', '5'))
+    cutoff = datetime.utcnow() - timedelta(minutes=max(1, stuck_minutes))
+    result = {'reset': 0, 'failed': 0}
+
+    # Coarse text prefilter (spacing-agnostic across Postgres JSONB / SQLite
+    # text); the authoritative status check happens per-row in Python below.
+    status_text = func.lower(func.coalesce(cast(model_rows.c.media_capture, String), ''))
+    with current_app.config['DB_ENGINE'].begin() as conn:
+        rows = conn.execute(
+            select(model_rows)
+            .where(status_text.like('%processing%'))
+            .limit(max(1, int(limit)))
+        ).mappings().all()
+
+    for row in rows:
+        model = Model3D.from_doc(row)
+        state = Model3D.normalize_media_capture(getattr(model, 'media_capture', None))
+        if state.get('status') != 'processing':
+            continue
+        last_attempt = state.get('last_attempt_at')
+        if last_attempt:
+            try:
+                if datetime.fromisoformat(last_attempt) > cutoff:
+                    continue  # still within the grace window
+            except (TypeError, ValueError):
+                pass
+        attempts = int(state.get('attempt_count') or 0)
+        if attempts >= max_attempts:
+            _set_media_capture_state(model, status='failed', error='exceeded max capture attempts')
+            model.save()
+            result['failed'] += 1
+        else:
+            # Reset to 'queued' WITHOUT bumping attempt_count (the bump already
+            # happened when it entered 'processing'); add an exponential backoff.
+            backoff_seconds = min(3600, 30 * (2 ** attempts))
+            state['status'] = 'queued'
+            state['backoff_until'] = (datetime.utcnow() + timedelta(seconds=backoff_seconds)).isoformat()
+            model.media_capture = Model3D.normalize_media_capture(state)
+            model.save()
+            result['reset'] += 1
+    return result
+
+
+def _render_missing_thumbnails(limit=10):
+    """Server-side render thumbnails for renderable models that still lack one.
+
+    This is the reliable replacement for the headless-browser capture: no auth,
+    no WebGL-in-Chromium, no MediaRecorder. Picks GLB/GLTF/VRM models with a
+    viewable file, no thumbnail, and not already failed/backed-off, and renders
+    each to a PNG via app.render. Best-effort and bounded per cycle."""
+    from app import render as render_mod
+    if os.environ.get('SERVER_RENDER_THUMBNAILS', '1').lower() in {'0', 'false', 'no', 'off'}:
+        return {'rendered': 0, 'failed': 0, 'skipped': 0, 'disabled': True}
+    if not render_mod.render_available():
+        return {'rendered': 0, 'failed': 0, 'skipped': 0, 'unavailable': True}
+
+    limit = max(1, min(int(limit or 10), 100))
+    result = {'rendered': 0, 'failed': 0, 'skipped': 0}
+    with current_app.config['DB_ENGINE'].begin() as conn:
+        rows = conn.execute(
+            select(model_rows)
+            .where(
+                model_rows.c.thumbnail_file_id.is_(None),
+                model_rows.c.file_format.not_in(['vrma', 'bvh']),
+                or_(
+                    model_rows.c.viewable_file_id.is_not(None),
+                    model_rows.c.file_format.in_(['glb', 'gltf', 'vrm']),
+                ),
+            )
+            .order_by(model_rows.c.upload_date.desc())
+            .limit(limit * 3)
+        ).mappings().all()
+
+    for row in rows:
+        if result['rendered'] + result['failed'] >= limit:
+            break
+        model = Model3D.from_doc(row)
+        if model.is_animation_carrier():
+            result['skipped'] += 1
+            continue
+        state = Model3D.normalize_media_capture(getattr(model, 'media_capture', None))
+        if _media_capture_suppressed(state):
+            result['skipped'] += 1
+            continue
+        if _server_render_thumbnail(model):
+            result['rendered'] += 1
+        else:
+            result['failed'] += 1
+    return result
+
+
 def _reconcile_asset_pipeline_once(app, *, optimize_limit=None, enrich_limit=None, conversion_limit=None):
     with app.app_context():
         started = datetime.utcnow()
@@ -5081,6 +5428,10 @@ def _reconcile_asset_pipeline_once(app, *, optimize_limit=None, enrich_limit=Non
             enrichment = _queue_thumbnail_ready_enrichment(
                 enrich_limit or int(os.environ.get('PIPELINE_ENRICH_LIMIT', '25'))
             )
+            media_sweep = _sweep_stuck_media_capture()
+            thumbnails = _render_missing_thumbnails(
+                int(os.environ.get('PIPELINE_RENDER_LIMIT', '10'))
+            )
             media = _media_capture_queue_snapshot(limit=50, kind='all', include_not_ready=True)
             result = {
                 'success': True,
@@ -5088,11 +5439,15 @@ def _reconcile_asset_pipeline_once(app, *, optimize_limit=None, enrich_limit=Non
                 'optimized': optimize,
                 'conversion_queued': conversions,
                 'enrichment_queued': enrichment,
+                'thumbnails_rendered': thumbnails.get('rendered', 0),
+                'thumbnails_failed': thumbnails.get('failed', 0),
                 'media_queue': {
                     'count': media.get('count', 0),
                     'ready_count': media.get('ready_count', 0),
                     'not_ready_count': media.get('not_ready_count', 0),
                 },
+                'media_stuck_reset': media_sweep.get('reset', 0),
+                'media_failed': media_sweep.get('failed', 0),
             }
             duration = round((datetime.utcnow() - started).total_seconds(), 3)
             _pipeline_reconcile_state.update({
@@ -5175,6 +5530,35 @@ def admin_pipeline_reconcile():
     )
     thread.start()
     return jsonify({'success': True, 'status': 'started', 'pipeline': _pipeline_reconciler_status()})
+
+
+@api_bp.route('/admin/render-thumbnails', methods=['POST'])
+def admin_render_thumbnails():
+    """Server-side render thumbnails. With ?model_id=, render that one (handy for
+    testing a single asset); otherwise backfill up to ?limit (default 25)
+    renderable models that lack a thumbnail. Synchronous so the response carries
+    the real outcome."""
+    if not _admin_or_asset_admin_session_ok():
+        return jsonify({'error': 'Unauthorized'}), 401
+    from app import render as render_mod
+    if not render_mod.render_available():
+        return jsonify({'success': False, 'error': 'Server render stack unavailable (trimesh/pyrender/OSMesa not installed).'}), 503
+
+    model_id = (request.args.get('model_id') or '').strip()
+    if model_id:
+        model = Model3D.get_by_id(model_id)
+        if not model:
+            return jsonify({'error': 'Model not found'}), 404
+        ok = _server_render_thumbnail(model, size=request.args.get('size', 1024, type=int))
+        return jsonify({
+            'success': ok,
+            'model_id': model_id,
+            'thumbnail_file_id': model.thumbnail_file_id,
+            'media_capture': _media_capture_state_for_model(model),
+        }), (200 if ok else 422)
+
+    result = _render_missing_thumbnails(request.args.get('limit', 25, type=int))
+    return jsonify({'success': True, **result})
 
 
 @api_bp.route('/admin/pipeline/status', methods=['GET'])

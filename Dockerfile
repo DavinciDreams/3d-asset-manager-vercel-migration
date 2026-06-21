@@ -27,16 +27,26 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# System tools for mesh conversion and FBX animation extraction.
+# System tools for mesh conversion and FBX animation extraction, plus the
+# OSMesa software-OpenGL stack so pyrender can rasterize GLB thumbnails
+# offscreen (no GPU, no X server) in this headless container.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         assimp-utils \
         bash \
         curl \
         ca-certificates \
         gnupg \
+        libosmesa6 \
+        libosmesa6-dev \
+        libgl1 \
+        libglib2.0-0 \
+        freeglut3-dev \
     && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
+
+# Tell PyOpenGL/pyrender to use the software OSMesa backend at import time.
+ENV PYOPENGL_PLATFORM=osmesa
 
 COPY --from=gltfpack-builder /usr/local/bin/gltfpack /usr/local/bin/gltfpack
 

@@ -138,13 +138,13 @@
             </div>
 
             <!-- Original / Game-Optimized / Fixed / VRM toggle (shown when a variant exists) -->
-            <div id="variant-toggle" class="{% if not game_variant_current and not fixed_eyes_variant and not vrm_variant %}hidden {% endif %}mt-3 inline-flex rounded-lg border border-gray-200 overflow-hidden text-sm">
+            <div id="variant-toggle" class="{% if not has_game_variant and not fixed_eyes_variant and not vrm_variant %}hidden {% endif %}mt-3 inline-flex rounded-lg border border-gray-200 overflow-hidden text-sm">
                 <button type="button" id="variant-btn-original" onclick="switchVariant('original')"
                         class="px-4 py-2 font-medium bg-indigo-600 text-white">
                     Original
                 </button>
                 <button type="button" id="variant-btn-game" onclick="switchVariant('game')"
-                        class="px-4 py-2 font-medium bg-white text-gray-700 hover:bg-gray-50 {% if not game_variant_current %}hidden{% endif %}">
+                        class="px-4 py-2 font-medium bg-white text-gray-700 hover:bg-gray-50 {% if not has_game_variant %}hidden{% endif %}">
                     <i class="fas fa-gamepad mr-1"></i>Game-Optimized<span id="variant-game-size">{% if game_variant and game_variant.size %} ({{ "%.2f"|format(game_variant.size / 1024 / 1024) }} MB){% endif %}</span>
                 </button>
                 <button type="button" id="variant-btn-fixed_eyes" onclick="switchVariant('fixed_eyes')"
@@ -244,9 +244,9 @@
                             VRMA (animation)
                         </a>
                         {% endif %}
-                        <div id="export-game-divider" class="border-t border-gray-100 my-1 {% if not game_variant_current %}hidden{% endif %}"></div>
+                        <div id="export-game-divider" class="border-t border-gray-100 my-1 {% if not has_game_variant %}hidden{% endif %}"></div>
                         <a id="export-game-link" href="{{ url_for('api.get_game_optimized', model_id=model.id, download=1) }}"
-                           class="block px-4 py-2 text-sm text-teal-700 hover:bg-teal-50 {% if not game_variant_current %}hidden{% endif %}">
+                           class="block px-4 py-2 text-sm text-teal-700 hover:bg-teal-50 {% if not has_game_variant %}hidden{% endif %}">
                             <i class="fas fa-gamepad mr-1"></i>Game-optimized GLB
                         </a>
                         <div id="export-fixed-divider" class="border-t border-gray-100 my-1 {% if not fixed_eyes_variant %}hidden{% endif %}"></div>
@@ -1002,8 +1002,13 @@ const IS_OWNER = {{ can_manage_model | tojson }};
 // editors load THIS as their base (not the original) so prior fixes carry into
 // the next bake (e.g. add a mouth without losing previously-baked eyes+blink).
 let HAS_FIXED_VARIANT = {{ (fixed_eyes_variant is not none) | tojson }};
-// Whether a game-optimized variant exists (it bakes in any eyes/mouth too).
-let HAS_GAME_VARIANT = {{ game_variant_current | tojson }};
+// Whether a game-optimized variant EXISTS (controls tab/export visibility). The
+// game tab must render whenever a ready variant exists, independent of which
+// toggle is pre-selected.
+let HAS_GAME_VARIANT = {{ has_game_variant | tojson }};
+// Whether the game variant should be the DEFAULT preview (false when a
+// fixed-eyes variant exists and the game build sourced the original).
+let GAME_VARIANT_IS_DEFAULT = {{ game_variant_current | tojson }};
 let GAME_VARIANT_USES_FIXED = {{ game_variant_uses_fixed | tojson }};
 let DETAIL_LOAD_TOKEN = 0;
 
@@ -1011,7 +1016,7 @@ let DETAIL_LOAD_TOKEN = 0;
 // includes any baked eyes/mouth) -> fixed-eyes -> original. Matches browse +
 // galleries so the detail page shows the fixed/animated version by default.
 function bestVariant() {
-    if (HAS_GAME_VARIANT && (!HAS_FIXED_VARIANT || GAME_VARIANT_USES_FIXED)) return 'game';
+    if (GAME_VARIANT_IS_DEFAULT && (!HAS_FIXED_VARIANT || GAME_VARIANT_USES_FIXED)) return 'game';
     if (HAS_FIXED_VARIANT) return 'fixed_eyes';
     if (HAS_GAME_VARIANT) return 'game';
     return 'original';
@@ -1151,6 +1156,10 @@ function revealGameOptimized(sizeBytes, sourceIsFixed) {
     GAME_VARIANT_USES_FIXED = Boolean(sourceIsFixed || !HAS_FIXED_VARIANT);
     const toggle = document.getElementById('variant-toggle');
     if (toggle) toggle.classList.remove('hidden');
+    // The game button starts hidden when no variant existed at render time;
+    // reveal it now so a freshly-built variant is selectable without a reload.
+    const gameBtn = document.getElementById('variant-btn-game');
+    if (gameBtn) gameBtn.classList.remove('hidden');
     const sizeEl = document.getElementById('variant-game-size');
     if (sizeEl && sizeBytes) sizeEl.textContent = ` (${(sizeBytes / 1024 / 1024).toFixed(2)} MB)`;
     const link = document.getElementById('export-game-link');
@@ -1791,8 +1800,31 @@ document.addEventListener('DOMContentLoaded', function() {
         panel.classList.add('hidden');
     }
 
+    // The rigger must operate on a riggable mesh: the game-optimized variant is
+    // gltfpack -si decimated (and meshopt-compressed), which breaks the
+    // mixamorig:* skeleton glb2vrm needs -- so VRM generation fails at the end.
+    // Always rig the highest UN-decimated source: the latest fix bake if one
+    // exists (so the rig carries the eye/mouth fixes), otherwise the original.
+    function riggableSource() {
+        return HAS_FIXED_VARIANT ? 'fixed_eyes' : 'original';
+    }
+    // Open the rig panel once the (possibly just-reloaded) viewer exposes its
+    // autorig. Polls briefly because loadDetailModel rebuilds the viewer async.
+    function openWhenReady(attempt = 0) {
+        if (rig()) { open(); return; }
+        if (attempt > 60) { alert('3D viewer not ready yet. Wait for the model to load, then try again.'); return; }
+        setTimeout(() => openWhenReady(attempt + 1), 100);
+    }
+
     toggle.addEventListener('click', () => {
-        if (panel.classList.contains('hidden')) open(); else close();
+        if (!panel.classList.contains('hidden')) { close(); return; }
+        const want = riggableSource();
+        if (!viewer() || CURRENT_VARIANT !== want) {
+            loadDetailModel(MODEL_ID, want, { allowFallback: false });
+            openWhenReady();
+        } else {
+            open();
+        }
     });
     cancelBtn.addEventListener('click', close);
     cancelBtn2.addEventListener('click', close);
