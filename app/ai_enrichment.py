@@ -30,7 +30,7 @@ HYADES_DEFAULT_MODEL = "holo"
 DEFAULT_USER_AGENT = "3d-asset-manager/1.0 (+https://github.com/DavinciDreams/3d-asset-manager-vercel-migration)"
 NOISY_ENRICHMENT_TAGS = {
     "3d", "3d-asset", "3d-model", "ai", "ai-generated", "asset", "generated", "generation",
-    "glb", "gltf", "fbx", "obj", "stl", "vrm", "image-to-3d", "model", "pixal3d",
+    "glb", "gltf", "fbx", "obj", "stl", "vrm", "vrma", "bvh", "image-to-3d", "model", "pixal3d",
 }
 FAB_LISTING_GUIDANCE = (
     "Write compelling copy describing the asset in detail. Use polished buyer-facing prose; "
@@ -158,6 +158,758 @@ def _clean_enrichment_tags(tags):
         tag for tag in Model3D.normalize_tags(tags)
         if tag not in NOISY_ENRICHMENT_TAGS
     ]
+
+
+ANIMATION_INTENT_KEYWORDS = {
+    "idle": ["idle", "stand", "standing", "breathing", "rest"],
+    "walk": ["walk", "walking", "stroll"],
+    "run": ["run", "running", "sprint", "jog"],
+    "dance": ["dance", "dancing", "hiphop", "hip-hop", "samba"],
+    "wave": ["wave", "waving", "hello", "greeting", "greet"],
+    "talk_idle": ["talk", "talking", "conversation", "speaking"],
+    "jump": ["jump", "jumping", "hop"],
+    "throw": ["throw", "throwing"],
+    "sit": ["sit", "sitting", "sitdown", "sit-down"],
+    "mount": ["mount", "mounting", "ride", "riding"],
+    "dismount": ["dismount", "dismounting"],
+    "attack": ["attack", "punch", "kick", "slash"],
+    "graze": ["graze", "grazing", "eat", "eating"],
+    "fly": ["fly", "flying", "flap", "flapping"],
+    "flap": ["flap", "flapping", "wingbeat", "wing-beat"],
+}
+
+LOCOMOTION_INTENTS = {"walk", "run", "jump", "fly", "mount", "dismount"}
+ANIMATION_QUALITY_ISSUES = (
+    "foot-sliding",
+    "bad-loop",
+    "wrong-scale",
+    "jaw-smushed",
+    "hand-clipping",
+    "pose-drift",
+    "broken-retarget",
+)
+
+
+def _animation_clip_name(model):
+    runtime = model.runtime_metadata or {}
+    for clip in runtime.get("animations") or []:
+        if isinstance(clip, dict) and str(clip.get("name") or "").strip():
+            return str(clip.get("name")).strip()
+        if isinstance(clip, str) and clip.strip():
+            return clip.strip()
+    name = model.name or model.original_filename or "Untitled Animation"
+    name = re.sub(r"\.(vrma|bvh|fbx)$", "", str(name), flags=re.IGNORECASE)
+    for suffix in (" Humanoid Animation Clip", " animation", " Animation"):
+        if name.lower().endswith(suffix.lower()):
+            name = name[:-len(suffix)].strip() or name
+    return name.replace("_", " ").replace("-", " ").strip() or "Untitled Animation"
+
+
+def _animation_duration(model):
+    runtime = model.runtime_metadata or {}
+    durations = []
+    for clip in runtime.get("animations") or []:
+        if not isinstance(clip, dict) or clip.get("duration") is None:
+            continue
+        try:
+            value = float(clip.get("duration"))
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            durations.append(value)
+    if durations:
+        return round(max(durations), 3)
+    return None
+
+
+def _animation_text(model):
+    runtime = model.runtime_metadata if isinstance(model.runtime_metadata, dict) else {}
+    values = [
+        model.name,
+        model.original_filename,
+        model.description,
+        " ".join(str(tag) for tag in (model.tags or [])),
+        " ".join(str(kind) for kind in (model.asset_types or [])),
+        json.dumps(runtime.get("animations") or [], sort_keys=True),
+    ]
+    return " ".join(str(value or "") for value in values).lower()
+
+
+def _animation_intent_from_text(text):
+    scores = {
+        intent: _keyword_score(text, words)
+        for intent, words in ANIMATION_INTENT_KEYWORDS.items()
+    }
+    best = max(scores, key=scores.get)
+    return best if scores[best] > 0 else "gesture"
+
+
+def _animation_energy(intent, text):
+    if intent in {"run", "dance", "jump", "throw", "attack", "fly"}:
+        return "high"
+    if _contains_any(text, ("sprint", "fast", "running", "run", "jump", "attack", "kick", "punch", "dance")):
+        return "high"
+    if intent in {"walk", "talk_idle", "wave", "graze", "mount", "dismount"}:
+        return "medium"
+    return "low"
+
+
+def _animation_body_type(model, text):
+    tags = set(Model3D.normalize_tags((model.tags or []) + (model.asset_types or [])))
+    if "quadruped" in tags or _contains_any(text, ("horse", "deer", "dog", "wolf", "cat", "unicorn", "quadruped")):
+        return "quadruped"
+    if _contains_any(text, ("bird", "wing", "flap", "fly")):
+        return "avian"
+    return "humanoid"
+
+
+def _animation_actor_kind(body_type, intent, text):
+    if body_type == "humanoid":
+        return "avatar"
+    if body_type == "avian":
+        return "animal"
+    if body_type == "quadruped":
+        if intent in {"mount", "dismount"} or _contains_any(text, ("horse", "unicorn", "mount", "mounted", "saddle", "riding")):
+            return "mount"
+        return "animal"
+    if body_type in {"creature", "mount"}:
+        return "mount" if body_type == "mount" else "animal"
+    if _contains_any(text, ("vehicle", "car", "boat", "ship", "airplane", "plane")):
+        return "vehicle"
+    return "object"
+
+
+def _animation_skeleton_profile(body_type, text):
+    if _contains_any(text, ("mixamo", "fbx")):
+        return "mixamo-humanoid"
+    if body_type == "humanoid":
+        return "vrm-humanoid"
+    if body_type == "avian":
+        return "bird"
+    if _contains_any(text, ("fish", "swim", "swimming")):
+        return "fish"
+    if body_type == "quadruped":
+        return "quadruped"
+    if _contains_any(text, ("vehicle", "wheels", "boat", "ship", "airplane", "plane")):
+        return "vehicle"
+    return "unknown"
+
+
+def _animation_category(intent, locomotion):
+    if intent == "idle":
+        return "ambient"
+    if intent == "dance":
+        return "dance"
+    if locomotion:
+        return "locomotion"
+    if intent in {"dance", "wave", "talk_idle", "throw", "attack"}:
+        return "gesture"
+    return "action"
+
+
+def _animation_gait(intent, text):
+    if _contains_any(text, ("gallop", "galloping")):
+        return "gallop"
+    if _contains_any(text, ("trot", "trotting")):
+        return "trot"
+    if _contains_any(text, ("canter", "cantering")):
+        return "canter"
+    if intent in {"walk", "run", "jump", "idle", "flap", "fly"}:
+        return intent
+    if intent == "graze":
+        return "idle"
+    if _contains_any(text, ("swim", "swimming")):
+        return "swim"
+    return "unknown"
+
+
+def _animation_speed(intent, gait, text):
+    if _contains_any(text, ("in-place", "in place", "stationary", "no root motion")):
+        return 0.0
+    if intent == "idle" or gait == "idle":
+        return 0.0
+    if gait == "walk" or intent == "walk":
+        return 1.3
+    if gait == "trot":
+        return 3.5
+    if gait == "canter":
+        return 5.5
+    if gait == "gallop":
+        return 8.0
+    if intent == "run" or gait == "run":
+        return 4.5
+    if intent in {"fly", "flap"}:
+        return 2.5
+    return None
+
+
+def _animation_root_motion(intent, locomotion, text):
+    if _contains_any(text, ("mixed root", "root motion mixed", "mixed")):
+        return "mixed"
+    if _contains_any(text, ("root motion", "root-motion", "moves forward", "travels forward")):
+        return "root-motion"
+    if _contains_any(text, ("in-place", "in place", "stationary", "no root motion")):
+        return "in-place"
+    if locomotion and intent in {"walk", "run", "fly"}:
+        return "unknown"
+    return "in-place"
+
+
+def _animation_direction(intent, text):
+    if _contains_any(text, ("turn left", "turn-left", "left turn")):
+        return "turn-left"
+    if _contains_any(text, ("turn right", "turn-right", "right turn")):
+        return "turn-right"
+    if _contains_any(text, ("backward", "backwards", "reverse")):
+        return "backward"
+    if _contains_any(text, ("strafe left", "step left")):
+        return "left"
+    if _contains_any(text, ("strafe right", "step right")):
+        return "right"
+    if intent in {"walk", "run", "fly", "flap"}:
+        return "forward"
+    if intent in {"idle", "dance", "wave", "talk_idle", "graze", "sit"}:
+        return "none"
+    return "unknown"
+
+
+def _animation_quality_issues(text, quality_notes=None):
+    values = list(quality_notes or [])
+    lowered = " ".join([text, " ".join(str(note) for note in values)]).lower()
+    for issue in ANIMATION_QUALITY_ISSUES:
+        if issue in lowered or issue.replace("-", " ") in lowered:
+            values.append(issue)
+    return Model3D.normalize_tags(values)
+
+
+def _animation_clip_label(clip, fallback):
+    if isinstance(clip, dict):
+        return str(clip.get("name") or fallback).strip() or fallback
+    if isinstance(clip, str):
+        return clip.strip() or fallback
+    return fallback
+
+
+def _animation_clip_duration(clip):
+    if not isinstance(clip, dict) or clip.get("duration") is None:
+        return None
+    try:
+        value = float(clip.get("duration"))
+    except (TypeError, ValueError):
+        return None
+    return round(value, 3) if value > 0 else None
+
+
+def _animation_clip_registry_entry(model, clip, index):
+    name = _animation_clip_label(clip, f"Clip {index + 1}")
+    text = " ".join([
+        str(model.name or ""),
+        str(model.original_filename or ""),
+        str(model.description or ""),
+        " ".join(str(tag) for tag in (model.tags or [])),
+        " ".join(str(kind) for kind in (model.asset_types or [])),
+        name,
+        json.dumps(clip, sort_keys=True) if isinstance(clip, dict) else "",
+    ]).lower()
+    label_intent = _animation_intent_from_text(name.lower())
+    intent = label_intent if label_intent != "gesture" else _animation_intent_from_text(text)
+    energy = _animation_energy(intent, text)
+    body_type = _animation_body_type(model, text)
+    locomotion = intent in LOCOMOTION_INTENTS or _contains_any(text, ("locomotion", "root motion", "in-place", "in place"))
+    actor_kind = _animation_actor_kind(body_type, intent, text)
+    skeleton_profile = _animation_skeleton_profile(body_type, text)
+    category = _animation_category(intent, locomotion)
+    gait = _animation_gait(intent, text)
+    root_motion = _animation_root_motion(intent, locomotion, text)
+    speed = _animation_speed(intent, gait, text)
+    direction = _animation_direction(intent, text)
+    aliases = _clean_enrichment_tags([name, intent, intent.replace("_", " "), *(_tokens(name)[:8])])[:12]
+    quality_issues = _animation_quality_issues(text)
+    tags = _clean_enrichment_tags([
+        intent,
+        actor_kind,
+        skeleton_profile,
+        category,
+        gait,
+        *(_tokens(name)[:6]),
+    ])[:14]
+    slug = Model3D.normalize_tags([name])[0] if name else f"clip-{index + 1}"
+    return {
+        "id": f"{model.id}:{slug or f'clip-{index + 1}'}",
+        "assetId": model.id,
+        "name": name,
+        "aliases": aliases,
+        "format": (model.file_format or "glb").lower(),
+        "actorKind": actor_kind,
+        "skeletonProfile": skeleton_profile,
+        "intents": [intent],
+        "intent": intent,
+        "category": category,
+        "loop": intent in {"idle", "walk", "run", "dance", "talk_idle", "graze", "fly", "flap"},
+        "durationSeconds": _animation_clip_duration(clip),
+        "duration": _animation_clip_duration(clip),
+        "rootMotion": root_motion,
+        "speedMetersPerSecond": speed,
+        "direction": direction,
+        "gait": gait,
+        "transition": {"from": [], "to": []},
+        "quality": {"score": 1.0 if not quality_issues else 0.5, "issues": quality_issues},
+        "searchText": " ".join(_clean_enrichment_tags([name, intent, actor_kind, skeleton_profile, category, gait, *aliases])),
+        "bodyType": body_type,
+        "tags": tags,
+        "energy": energy,
+        "locomotion": locomotion,
+        "requiresMount": actor_kind == "mount" or intent in {"mount", "dismount"},
+    }
+
+
+def _species_or_type(model, actor_kind, text):
+    for value in ("horse", "unicorn", "deer", "wolf", "dog", "cat", "bird", "fish", "dragon", "fox"):
+        if value in text:
+            return value
+    if actor_kind == "vehicle":
+        return "vehicle"
+    if actor_kind == "mount":
+        return "mount"
+    if actor_kind == "animal":
+        return "animal"
+    return "object"
+
+
+def _vehicle_mode(actor_kind, skeleton_profile, text):
+    if actor_kind == "vehicle":
+        if _contains_any(text, ("boat", "ship", "hull", "swim", "water")):
+            return "water"
+        if _contains_any(text, ("air", "fly", "plane", "airplane", "bird", "wing")):
+            return "air"
+        return "ground"
+    if actor_kind in {"animal", "mount"}:
+        if skeleton_profile == "bird" or _contains_any(text, ("fly", "flap", "wing")):
+            return "air"
+        if skeleton_profile == "fish" or _contains_any(text, ("swim", "fish")):
+            return "water"
+        return "ground"
+    return "none"
+
+
+def _ground_contact(actor_kind, skeleton_profile, text):
+    if actor_kind == "vehicle":
+        if _contains_any(text, ("boat", "ship", "hull")):
+            return "hull"
+        if _contains_any(text, ("hover", "drone")):
+            return "hover"
+        return "wheels"
+    if skeleton_profile in {"quadruped", "bird", "vrm-humanoid", "mixamo-humanoid"}:
+        return "feet"
+    return "unknown"
+
+
+def enrich_embedded_model_animations(model, extra_context=None):
+    runtime = model.runtime_metadata if isinstance(model.runtime_metadata, dict) else {}
+    clips = [clip for clip in (runtime.get("animations") or []) if clip]
+    if not clips:
+        return None
+    clip_entries = [_animation_clip_registry_entry(model, clip, index) for index, clip in enumerate(clips)]
+    search_text = " ".join([
+        str(model.name or ""),
+        str(model.original_filename or ""),
+        str(model.description or ""),
+        " ".join(str(tag) for tag in (model.tags or [])),
+        " ".join(str(kind) for kind in (model.asset_types or [])),
+        " ".join(entry.get("searchText") or "" for entry in clip_entries),
+    ]).lower()
+    first = clip_entries[0]
+    actor_kind = first["actorKind"]
+    skeleton_profile = first["skeletonProfile"]
+    movement = {
+        "idleIntent": next((entry["intent"] for entry in clip_entries if entry["intent"] == "graze"), None)
+            or next((entry["intent"] for entry in clip_entries if entry["intent"] == "idle"), None),
+        "walkIntent": next((entry["intent"] for entry in clip_entries if entry["intent"] == "walk"), None),
+        "runIntent": next((entry["intent"] for entry in clip_entries if entry["intent"] in {"run", "fly", "flap"}), None),
+        "turnRateDegreesPerSecond": None,
+    }
+    return {
+        "assetId": model.id,
+        "actorKind": actor_kind,
+        "skeletonProfile": skeleton_profile,
+        "speciesOrType": _species_or_type(model, actor_kind, search_text),
+        "mountable": bool(actor_kind == "mount" or _contains_any(search_text, ("mountable", "ride", "riding", "saddle", "horse", "unicorn"))),
+        "vehicleMode": _vehicle_mode(actor_kind, skeleton_profile, search_text),
+        "canonicalHeightMeters": None,
+        "groundContact": _ground_contact(actor_kind, skeleton_profile, search_text),
+        "movement": movement,
+        "anchors": {},
+        "animationClipIds": [entry["id"] for entry in clip_entries],
+        "animationClips": clip_entries,
+    }
+
+
+def _heuristic_animation_metadata(model, extra_context=None):
+    text = _animation_text(model)
+    clip_name = _animation_clip_name(model)
+    intent = _animation_intent_from_text(text)
+    energy = _animation_energy(intent, text)
+    body_type = _animation_body_type(model, text)
+    duration = _animation_duration(model)
+    locomotion = intent in LOCOMOTION_INTENTS or _contains_any(text, ("locomotion", "in-place", "root motion"))
+    requires_mount = intent in {"mount", "dismount"} or _contains_any(text, ("horseback", "saddle", "mounted", "riding"))
+    actor_kind = _animation_actor_kind(body_type, intent, text)
+    skeleton_profile = _animation_skeleton_profile(body_type, text)
+    category = _animation_category(intent, locomotion)
+    gait = _animation_gait(intent, text)
+    root_motion = _animation_root_motion(intent, locomotion, text)
+    direction = _animation_direction(intent, text)
+    speed = _animation_speed(intent, gait, text)
+    aliases = _clean_enrichment_tags([clip_name, intent, intent.replace("_", " "), *(_tokens(clip_name)[:8])])
+    quality_issues = _animation_quality_issues(text)
+    tags = _clean_enrichment_tags([
+        intent,
+        body_type,
+        actor_kind,
+        category,
+        energy,
+        "locomotion" if locomotion else "gesture",
+        *(model.tags or []),
+        *(_tokens(clip_name)[:6]),
+    ])
+    title = " ".join(word.capitalize() for word in clip_name.split())
+    description = (
+        f"{title} is a {body_type} animation clip for the {intent.replace('_', ' ')} intent. "
+        f"It is suitable for deterministic avatar playback, intent matching, and short staged sequences."
+    )
+    return {
+        "title": title[:80],
+        "description": description,
+        "summary": f"{body_type} {intent.replace('_', ' ')} animation clip.",
+        "asset_category": "animation",
+        "asset_styles": [],
+        "asset_types": ["avatar-animation"] + (["locomotion"] if locomotion else ["gesture"]),
+        "tags": tags[:14],
+        "categories": ["animation", intent],
+        "quality_notes": [],
+        "animation": {
+            "intent": intent,
+            "intents": [intent],
+            "actorKind": actor_kind,
+            "skeletonProfile": skeleton_profile,
+            "category": category,
+            "bodyType": body_type,
+            "tags": tags[:14],
+            "loop": intent in {"idle", "walk", "run", "dance", "talk_idle", "graze", "fly"},
+            "duration": duration,
+            "durationSeconds": duration,
+            "transitionIn": 0.2,
+            "transitionOut": 0.2,
+            "energy": energy,
+            "locomotion": locomotion,
+            "rootMotion": root_motion,
+            "speedMetersPerSecond": speed,
+            "direction": direction,
+            "gait": gait,
+            "transition": {"from": [], "to": []},
+            "aliases": aliases[:12],
+            "quality": {"score": 1.0 if not quality_issues else 0.5, "issues": quality_issues},
+            "searchText": " ".join(_clean_enrichment_tags([clip_name, intent, body_type, actor_kind, skeleton_profile, category, gait, *aliases])),
+            "requiresMount": requires_mount,
+        },
+        "provider": "heuristic",
+    }
+
+
+def _normalize_animation_metadata(parsed, model, provider=None, transport=None, response_id=None):
+    parsed = parsed if isinstance(parsed, dict) else {}
+    fallback = _heuristic_animation_metadata(model)
+    animation = parsed.get("animation") if isinstance(parsed.get("animation"), dict) else {}
+    intent = Model3D.normalize_tags(animation.get("intent") or parsed.get("intent") or fallback["animation"]["intent"])
+    intent = intent[0] if intent else fallback["animation"]["intent"]
+    body_type = str(animation.get("bodyType") or animation.get("body_type") or parsed.get("bodyType") or fallback["animation"]["bodyType"]).strip()
+    if body_type not in {"humanoid", "quadruped", "avian", "creature", "mount", "prop", "unknown"}:
+        body_type = fallback["animation"]["bodyType"]
+    skeleton_profile = str(animation.get("skeletonProfile") or animation.get("skeleton_profile") or fallback["animation"]["skeletonProfile"]).strip()
+    if skeleton_profile not in {"vrm-humanoid", "mixamo-humanoid", "quadruped", "bird", "fish", "vehicle", "unknown"}:
+        skeleton_profile = fallback["animation"]["skeletonProfile"]
+    actor_kind = str(animation.get("actorKind") or animation.get("actor_kind") or fallback["animation"]["actorKind"]).strip()
+    if actor_kind not in {"avatar", "agent", "animal", "mount", "vehicle", "object"}:
+        actor_kind = fallback["animation"]["actorKind"]
+    energy = str(animation.get("energy") or parsed.get("energy") or fallback["animation"]["energy"]).strip().lower()
+    if energy not in {"low", "medium", "high"}:
+        energy = fallback["animation"]["energy"]
+    try:
+        duration = animation.get("duration", parsed.get("duration", fallback["animation"]["duration"]))
+        duration = round(float(duration), 3) if duration is not None else None
+        if duration is not None and duration <= 0:
+            duration = None
+    except (TypeError, ValueError):
+        duration = fallback["animation"]["duration"]
+    tags = _clean_enrichment_tags((parsed.get("tags") or []) + (animation.get("tags") or []) + fallback["animation"]["tags"])[:14]
+    intents = Model3D.normalize_tags(animation.get("intents") or parsed.get("intents") or [])
+    intents = _clean_enrichment_tags([intent, *intents])[:8]
+    category = str(animation.get("category") or fallback["animation"]["category"]).strip().lower()
+    if category not in {"locomotion", "gesture", "dance", "action", "sport", "pose", "ambient", "transition", "other"}:
+        category = fallback["animation"]["category"]
+    root_motion = str(animation.get("rootMotion") or animation.get("root_motion") or fallback["animation"]["rootMotion"]).strip().lower()
+    if root_motion not in {"in-place", "root-motion", "mixed", "unknown"}:
+        root_motion = fallback["animation"]["rootMotion"]
+    try:
+        speed = animation.get("speedMetersPerSecond", animation.get("speed_meters_per_second", fallback["animation"]["speedMetersPerSecond"]))
+        speed = round(float(speed), 3) if speed is not None else None
+        if speed is not None and speed < 0:
+            speed = None
+    except (TypeError, ValueError):
+        speed = fallback["animation"]["speedMetersPerSecond"]
+    gait = animation.get("gait", fallback["animation"]["gait"])
+    gait = Model3D.normalize_tags([gait])[0] if gait else "unknown"
+    if gait not in {"walk", "trot", "canter", "gallop", "flap", "swim", "idle", "run", "unknown"}:
+        gait = fallback["animation"]["gait"]
+    direction = str(animation.get("direction") or fallback["animation"]["direction"]).strip().lower()
+    if direction not in {"forward", "backward", "left", "right", "turn-left", "turn-right", "none", "unknown"}:
+        direction = fallback["animation"]["direction"]
+    transition = animation.get("transition") if isinstance(animation.get("transition"), dict) else {}
+    normalized_transition = {
+        "from": Model3D.normalize_tags(transition.get("from") or fallback["animation"]["transition"]["from"]),
+        "to": Model3D.normalize_tags(transition.get("to") or fallback["animation"]["transition"]["to"]),
+    }
+    aliases = _clean_enrichment_tags((animation.get("aliases") or parsed.get("aliases") or []) + fallback["animation"]["aliases"])[:12]
+    quality = animation.get("quality") if isinstance(animation.get("quality"), dict) else {}
+    try:
+        quality_score = float(quality.get("score", fallback["animation"]["quality"]["score"]))
+        quality_score = max(0.0, min(1.0, round(quality_score, 3)))
+    except (TypeError, ValueError):
+        quality_score = fallback["animation"]["quality"]["score"]
+    quality_issues = _animation_quality_issues(
+        _animation_text(model),
+        (quality.get("issues") if isinstance(quality.get("issues"), list) else []) + (parsed.get("quality_notes") or []),
+    )
+    search_text = str(animation.get("searchText") or animation.get("search_text") or fallback["animation"]["searchText"]).strip()
+    normalized_animation = {
+        "intent": intent,
+        "intents": intents,
+        "actorKind": actor_kind,
+        "skeletonProfile": skeleton_profile,
+        "category": category,
+        "bodyType": body_type,
+        "tags": tags,
+        "loop": bool(animation.get("loop", fallback["animation"]["loop"])),
+        "duration": duration,
+        "durationSeconds": duration,
+        "transitionIn": float(animation.get("transitionIn", animation.get("transition_in", fallback["animation"]["transitionIn"])) or 0.2),
+        "transitionOut": float(animation.get("transitionOut", animation.get("transition_out", fallback["animation"]["transitionOut"])) or 0.2),
+        "energy": energy,
+        "locomotion": bool(animation.get("locomotion", fallback["animation"]["locomotion"])),
+        "rootMotion": root_motion,
+        "speedMetersPerSecond": speed,
+        "direction": direction,
+        "gait": gait,
+        "transition": normalized_transition,
+        "aliases": aliases,
+        "quality": {"score": quality_score, "issues": quality_issues},
+        "searchText": search_text,
+        "requiresMount": bool(animation.get("requiresMount", animation.get("requires_mount", fallback["animation"]["requiresMount"]))),
+    }
+    title = (parsed.get("title") or fallback["title"]).strip()[:80]
+    description = (parsed.get("description") or fallback["description"]).strip()
+    return {
+        "title": title,
+        "description": description,
+        "summary": (parsed.get("summary") or fallback["summary"]).strip(),
+        "asset_category": "animation",
+        "asset_styles": Model3D.normalize_tags(parsed.get("asset_styles", [])),
+        "asset_types": _clean_enrichment_tags((parsed.get("asset_types") or []) + ["avatar-animation", "locomotion" if normalized_animation["locomotion"] else "gesture"]),
+        "tags": tags,
+        "categories": parsed.get("categories") if isinstance(parsed.get("categories"), list) else ["animation", intent],
+        "quality_notes": parsed.get("quality_notes") if isinstance(parsed.get("quality_notes"), list) else [],
+        "animation": normalized_animation,
+        "provider": provider or parsed.get("provider") or fallback["provider"],
+        "transport": transport or parsed.get("transport"),
+        "base_url": _base_url(provider) if provider else parsed.get("base_url"),
+        "model": _model_name(provider) if provider else parsed.get("model"),
+        "response_id": response_id or parsed.get("response_id"),
+        "vision_frame": bool(parsed.get("vision_frame", fallback.get("vision_frame", False))),
+        "preview_video_available": bool(parsed.get("preview_video_available", fallback.get("preview_video_available", False))),
+    }
+
+
+def _animation_metadata_prompt(model, extra_context=None):
+    has_thumbnail = bool(model.thumbnail_file_id)
+    has_preview = bool(model.preview_file_id)
+    payload = {
+        "asset": {
+            "name": model.name,
+            "description": model.description,
+            "original_filename": model.original_filename,
+            "file_format": model.file_format,
+            "existing_tags": model.tags,
+            "asset_types": model.asset_types,
+            "runtime_metadata": model.runtime_metadata,
+            "has_animation_thumbnail_frame": has_thumbnail,
+            "has_animation_preview_video": has_preview,
+        },
+        "extra_context": extra_context or {},
+        "contract": {
+            "actorKind": "avatar, agent, animal, mount, vehicle, or object.",
+            "skeletonProfile": "vrm-humanoid, mixamo-humanoid, quadruped, bird, fish, vehicle, or unknown.",
+            "intents": "One or more short runtime intents such as idle, walk, run, dance, wave, talk_idle, jump, throw, mount, dismount, graze, flap, fly, attack, sit, or gesture.",
+            "category": "locomotion, gesture, dance, action, sport, pose, ambient, transition, or other.",
+            "tags": "Search tags for text-intent matching, not file formats.",
+            "loop": "True for ambient/continuous clips like idle, walk, run, dance, talk_idle, graze, fly.",
+            "rootMotion": "in-place, root-motion, mixed, or unknown.",
+            "speedMetersPerSecond": "Approximate locomotion speed when knowable, otherwise null.",
+            "direction": "forward, backward, left, right, turn-left, turn-right, none, or unknown.",
+            "gait": "walk, trot, canter, gallop, flap, swim, idle, run, or unknown.",
+            "aliases": "Search aliases, including common names users might type.",
+            "quality.issues": "Known problems such as foot-sliding, bad-loop, wrong-scale, jaw-smushed, hand-clipping, pose-drift, or broken-retarget.",
+            "searchText": "Flattened searchable text covering name, aliases, intents, category, actorKind, skeletonProfile, and gait.",
+        },
+    }
+    return (
+        "Create searchable runtime metadata for a VRMA/BVH avatar animation catalog. "
+        "Agents will use this metadata to call playIntent(actorId, intent), playSequence, and setLocomotion instead of filenames. "
+        "Return JSON only. Do not write marketplace copy for a mesh; classify the motion clip. "
+        "When a visual frame is attached, treat the visible pose/action as stronger evidence than the filename; "
+        "filenames can be wrong (for example a file named bowing may visually read as elbowing). "
+        "Use filename, tags, and runtime metadata only as secondary hints. "
+        "Use deterministic concise fields and avoid inventing details not present in the visual frame or supplied metadata.\n\n"
+        + json.dumps(payload, sort_keys=True)
+    )
+
+
+def _ai_animation_metadata(model, extra_context=None):
+    provider = _provider()
+    api_key = _api_key()
+    if not api_key:
+        return None
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "title": {"type": "string"},
+            "description": {"type": "string"},
+            "summary": {"type": "string"},
+            "tags": {"type": "array", "items": {"type": "string"}, "maxItems": 14},
+            "asset_styles": {"type": "array", "items": {"type": "string"}, "maxItems": 6},
+            "asset_types": {"type": "array", "items": {"type": "string"}, "maxItems": 8},
+            "categories": {"type": "array", "items": {"type": "string"}, "maxItems": 6},
+            "quality_notes": {"type": "array", "items": {"type": "string"}, "maxItems": 8},
+            "animation": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "intent": {"type": "string"},
+                    "intents": {"type": "array", "items": {"type": "string"}, "maxItems": 8},
+                    "actorKind": {"type": "string"},
+                    "skeletonProfile": {"type": "string"},
+                    "category": {"type": "string"},
+                    "bodyType": {"type": "string"},
+                    "tags": {"type": "array", "items": {"type": "string"}, "maxItems": 14},
+                    "loop": {"type": "boolean"},
+                    "duration": {"type": ["number", "null"]},
+                    "durationSeconds": {"type": ["number", "null"]},
+                    "transitionIn": {"type": "number"},
+                    "transitionOut": {"type": "number"},
+                    "energy": {"type": "string"},
+                    "locomotion": {"type": "boolean"},
+                    "rootMotion": {"type": "string"},
+                    "speedMetersPerSecond": {"type": ["number", "null"]},
+                    "direction": {"type": "string"},
+                    "gait": {"type": "string"},
+                    "transition": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "from": {"type": "array", "items": {"type": "string"}, "maxItems": 8},
+                            "to": {"type": "array", "items": {"type": "string"}, "maxItems": 8},
+                        },
+                        "required": ["from", "to"],
+                    },
+                    "aliases": {"type": "array", "items": {"type": "string"}, "maxItems": 12},
+                    "quality": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "score": {"type": "number"},
+                            "issues": {"type": "array", "items": {"type": "string"}, "maxItems": 12},
+                        },
+                        "required": ["score", "issues"],
+                    },
+                    "searchText": {"type": "string"},
+                    "requiresMount": {"type": "boolean"},
+                },
+                "required": ["intent", "intents", "actorKind", "skeletonProfile", "category", "bodyType", "tags", "loop", "duration", "durationSeconds", "transitionIn", "transitionOut", "energy", "locomotion", "rootMotion", "speedMetersPerSecond", "direction", "gait", "transition", "aliases", "quality", "searchText", "requiresMount"],
+            },
+        },
+        "required": ["title", "description", "summary", "tags", "asset_styles", "asset_types", "categories", "quality_notes", "animation"],
+    }
+    user_text = _animation_metadata_prompt(model, extra_context=extra_context)
+    if _transport(provider) == "a2a":
+        parts = [{"kind": "text", "text": user_text + "\n\nReturn JSON matching this schema:\n" + json.dumps(schema, sort_keys=True)}]
+        image_part = _a2a_image_part(model)
+        if image_part:
+            parts.append(image_part)
+        payload = _post_json(
+            _base_url(provider),
+            {
+                "jsonrpc": "2.0",
+                "id": f"animation-enrichment-{uuid.uuid4()}",
+                "method": os.environ.get("HYADES_A2A_METHOD", "message/send"),
+                "params": {
+                    "message": {
+                        "role": os.environ.get("HYADES_A2A_ROLE", "user"),
+                        "parts": parts,
+                        "messageId": f"animation-enrichment-{uuid.uuid4()}",
+                    },
+                    "metadata": {"model": _model_name(provider)},
+                    "configuration": {"acceptedOutputModes": ["application/json", "text/plain"]},
+                },
+            },
+            {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            provider=provider,
+            transport="a2a",
+        )
+        output_text = _strip_json_fence(_extract_a2a_output(payload))
+        task_id = _a2a_task_id(payload)
+        if not output_text and task_id:
+            payload = _poll_a2a_task(provider, api_key, task_id)
+            output_text = _strip_json_fence(_extract_a2a_output(payload or {}))
+        parsed = _parse_json_object(output_text, provider=provider, transport="a2a", label="animation enrichment provider")
+        enriched = _normalize_animation_metadata(parsed, model, provider=provider, transport="a2a", response_id=payload.get("id") if isinstance(payload, dict) else None)
+        enriched["vision_frame"] = bool(image_part)
+        enriched["preview_video_available"] = bool(model.preview_file_id)
+        return enriched
+
+    image = _image_part(model) if _openai_transport_supports_image_parts(provider) else None
+    user_content = [{"type": "text", "text": user_text}, image] if image else user_text
+    body = {
+        "model": _model_name(provider),
+        "messages": [
+            {"role": "system", "content": "You classify VRMA avatar animation clips for fast deterministic runtime intent matching. Return JSON only."},
+            {"role": "user", "content": user_content},
+        ],
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {"name": "animation_enrichment", "strict": True, "schema": schema},
+        },
+    }
+    payload = _post_json(
+        _request_url(_base_url(provider)),
+        body,
+        {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        provider=provider,
+        transport="openai",
+    )
+    parsed = _parse_json_object(_strip_json_fence(_extract_chat_output(payload)), provider=provider, transport="openai", label="animation enrichment provider")
+    enriched = _normalize_animation_metadata(parsed, model, provider=provider, transport="openai", response_id=payload.get("id"))
+    enriched["vision_frame"] = bool(image)
+    enriched["preview_video_available"] = bool(model.preview_file_id)
+    return enriched
+
+
+def enrich_animation_clip(model, extra_context=None):
+    enriched = _ai_animation_metadata(model, extra_context=extra_context)
+    if enriched is None:
+        enriched = _heuristic_animation_metadata(model, extra_context=extra_context)
+        enriched["vision_frame"] = False
+        enriched["preview_video_available"] = bool(model.preview_file_id)
+    return _normalize_animation_metadata(enriched, model, provider=enriched.get("provider"), transport=enriched.get("transport"), response_id=enriched.get("response_id"))
 
 
 def _vision_denies_light(text):

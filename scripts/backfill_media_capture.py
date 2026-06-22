@@ -183,9 +183,10 @@ def _process_item(page, context, base_url: str, item: dict, args) -> bool:
         return False
     _report_item(context, base_url, item, status="captured")
     print("  media captured")
-    if args.enrich and model.get("has_thumbnail"):
+    can_enrich = bool(model.get("has_thumbnail")) or item.get("capture_mode") == "animation"
+    if args.enrich and can_enrich:
         ai_status = model.get("ai_status")
-        if args.overwrite_enrichment or ai_status not in ("done", "processing", "pending"):
+        if args.overwrite_enrichment or item.get("needs_enrichment") or ai_status not in ("done", "processing", "pending"):
             _enqueue_enrichment(context, base_url, model_id, args.overwrite_enrichment)
     return True
 
