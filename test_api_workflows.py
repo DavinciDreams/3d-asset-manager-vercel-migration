@@ -806,6 +806,16 @@ def test_admin_media_capture_queue_lists_only_renderable_missing_media():
     assert vrma.status_code == 201, vrma.get_json()
     vrma_id = vrma.get_json()["model"]["id"]
 
+    animal = client.post("/api/upload", headers=headers, data={
+        "name": "Animated Deer",
+        "is_public": "true",
+        "asset_types": "animal, quadruped",
+        "runtime_metadata": json.dumps({"animations": [{"name": "Graze", "duration": 2.0}]}),
+        "file": (io.BytesIO(b"glTF" + b"\x07" * 64), "animated_deer.glb"),
+    }, content_type="multipart/form-data")
+    assert animal.status_code == 201, animal.get_json()
+    animal_id = animal.get_json()["model"]["id"]
+
     fbx = client.post("/api/upload", headers=headers, data={
         "is_public": "true",
         "file": (io.BytesIO(b"Kaydara FBX Binary" + b"\x03" * 64), "prop_source.fbx"),
@@ -858,9 +868,42 @@ def test_admin_media_capture_queue_lists_only_renderable_missing_media():
         headers=headers,
     )
     assert animation_queue.status_code == 200, animation_queue.get_json()
+    animation_ids = {item["id"] for item in animation_queue.get_json()["models"]}
+    assert animal_id not in animation_ids
     fbx_item = next(item for item in animation_queue.get_json()["models"] if item["id"] == fbx_id)
     assert fbx_item["capture_mode"] == "animation"
     assert fbx_item["capture_url"].endswith(f"/animations?capture_clip={fbx_id}:vrma")
+
+    with app.app_context():
+        clip = Model3D.get_by_id(vrma_id)
+        thumb_id = app.config["FILE_STORE"].put(
+            b"webp",
+            filename="idle_clip.webp",
+            content_type="image/webp",
+            metadata={"model_id": vrma_id, "kind": "thumbnail"},
+        )
+        preview_id = app.config["FILE_STORE"].put(
+            b"webm",
+            filename="idle_clip.webm",
+            content_type="video/webm",
+            metadata={"model_id": vrma_id, "kind": "preview"},
+        )
+        clip.thumbnail_file_id = str(thumb_id)
+        clip.preview_file_id = str(preview_id)
+        clip.ai_status = "done"
+        clip.ai_metadata = {"provider": "heuristic", "vision_fallback": True}
+        clip.save()
+
+    enrichment_queue = client.get(
+        "/api/admin/media-capture/queue?kind=animations&include_not_ready=true&limit=20",
+        headers=headers,
+    )
+    assert enrichment_queue.status_code == 200, enrichment_queue.get_json()
+    vrma_item = next(item for item in enrichment_queue.get_json()["models"] if item["id"] == vrma_id)
+    assert vrma_item["capture_mode"] == "animation"
+    assert vrma_item["needs_thumbnail"] is False
+    assert vrma_item["needs_preview"] is False
+    assert vrma_item["needs_enrichment"] is True
 
 
 def test_admin_media_capture_status_and_heartbeat():
@@ -1043,6 +1086,201 @@ def test_animations_list_has_no_duplicate_model_cards():
     # The card template emits clip.detail_url 3x per card (thumb + 2 links). One
     # card -> 3 occurrences; a duplicate card would double it to 6.
     assert page.get_data(as_text=True).count(f'href="/model/{model_id}"') == 3
+
+
+def test_animation_autotag_builds_intent_registry_without_thumbnail():
+    app = create_app()
+    client = app.test_client()
+    headers = {"Authorization": "Bearer test-token"}
+
+    upload = client.post("/api/upload", headers=headers, data={
+        "name": "Hip Hop Dancing",
+        "is_public": "true",
+        "file": (io.BytesIO(b"VRMA dance clip" + b"\x0d" * 64), "hip_hop_dancing.vrma"),
+    }, content_type="multipart/form-data")
+    assert upload.status_code == 201, upload.get_json()
+    model_id = upload.get_json()["model"]["id"]
+
+    enrich = client.post(
+        f"/api/model/{model_id}/ai/autotag",
+        headers=headers,
+        json={"overwrite": True, "context": {"source": "animations"}},
+    )
+    assert enrich.status_code == 200, enrich.get_json()
+    model = enrich.get_json()["model"]
+    assert model["ai_status"] == "done"
+    assert model["asset_category"] == "animation"
+    assert "avatar-animation" in model["asset_types"]
+    enrichment = enrich.get_json()["enrichment"]
+    assert enrichment["animation"]["intent"] == "dance"
+    assert enrichment["animation"]["intents"] == ["dance"]
+    assert enrichment["animation"]["actorKind"] == "avatar"
+    assert enrichment["animation"]["skeletonProfile"] == "vrm-humanoid"
+    assert enrichment["animation"]["category"] == "dance"
+    assert enrichment["animation"]["loop"] is True
+    assert enrichment["animation"]["rootMotion"] == "in-place"
+    assert enrichment["animation"]["quality"]["issues"] == []
+
+    vrma = client.get("/api/vrma")
+    assert vrma.status_code == 200, vrma.get_json()
+    clip = next(item for item in vrma.get_json()["animations"] if item["model_id"] == model_id)
+    assert clip["intent"] == "dance"
+    assert clip["actorKind"] == "avatar"
+    assert clip["skeletonProfile"] == "vrm-humanoid"
+    assert clip["category"] == "dance"
+    assert clip["durationSeconds"] is None
+    assert clip["animation"]["energy"] == "high"
+    compact = next(item for item in vrma.get_json()["clips"] if item["id"] == model_id)
+    assert compact["intent"] == "dance"
+    assert compact["intents"] == ["dance"]
+    assert compact["actorKind"] == "avatar"
+    assert compact["rootMotion"] == "in-place"
+    assert compact["quality"]["issues"] == []
+    assert "dance" in compact["tags"]
+
+
+def test_animation_enrichment_uses_thumbnail_frame_over_filename(monkeypatch):
+    from app import ai_enrichment
+
+    app = create_app()
+    client = app.test_client()
+    headers = {"Authorization": "Bearer test-token"}
+
+    upload = client.post("/api/upload", headers=headers, data={
+        "name": "Bowing",
+        "is_public": "true",
+        "file": (io.BytesIO(b"VRMA bowing clip" + b"\x0f" * 64), "mixamo_bowing.vrma"),
+    }, content_type="multipart/form-data")
+    assert upload.status_code == 201, upload.get_json()
+    model_id = upload.get_json()["model"]["id"]
+    _attach_thumbnail(app, model_id)
+
+    captured = {}
+
+    def fake_post_json(url, body, headers, provider=None, transport=None):
+        captured["body"] = body
+        return {
+            "id": "animation-response",
+            "choices": [{
+                "message": {
+                    "content": json.dumps({
+                        "title": "Elbow Strike",
+                        "description": "Humanoid elbowing gesture animation.",
+                        "summary": "Elbowing gesture.",
+                        "tags": ["elbow", "strike", "gesture"],
+                        "asset_styles": [],
+                        "asset_types": ["gesture"],
+                        "categories": ["animation", "attack"],
+                        "quality_notes": [],
+                        "animation": {
+                            "intent": "attack",
+                            "intents": ["attack", "elbow"],
+                            "actorKind": "avatar",
+                            "skeletonProfile": "mixamo-humanoid",
+                            "category": "action",
+                            "bodyType": "humanoid",
+                            "tags": ["elbow", "strike", "gesture"],
+                            "loop": False,
+                            "duration": None,
+                            "durationSeconds": None,
+                            "transitionIn": 0.15,
+                            "transitionOut": 0.2,
+                            "energy": "high",
+                            "locomotion": False,
+                            "rootMotion": "in-place",
+                            "speedMetersPerSecond": None,
+                            "direction": "none",
+                            "gait": "idle",
+                            "transition": {"from": ["idle"], "to": ["idle"]},
+                            "aliases": ["elbow", "elbow strike", "attack"],
+                            "quality": {"score": 0.9, "issues": []},
+                            "searchText": "elbow strike attack avatar mixamo humanoid",
+                            "requiresMount": False,
+                        },
+                    })
+                }
+            }],
+        }
+
+    monkeypatch.setenv("AI_AUTOTAG_PROVIDER", "openai")
+    monkeypatch.setenv("AI_AUTOTAG_API_KEY", "openai-key")
+    monkeypatch.setattr(ai_enrichment, "_post_json", fake_post_json)
+
+    enrich = client.post(
+        f"/api/model/{model_id}/ai/autotag",
+        headers=headers,
+        json={"overwrite": True, "context": {"source": "animations"}},
+    )
+    assert enrich.status_code == 200, enrich.get_json()
+    enrichment = enrich.get_json()["enrichment"]
+    assert enrichment["animation"]["intent"] == "attack"
+    assert enrichment["animation"]["intents"] == ["attack", "elbow"]
+    assert enrichment["animation"]["actorKind"] == "avatar"
+    assert enrichment["animation"]["skeletonProfile"] == "mixamo-humanoid"
+    assert enrichment["animation"]["aliases"][:2] == ["elbow", "elbow strike"]
+    assert enrichment["vision_frame"] is True
+
+    content = captured["body"]["messages"][1]["content"]
+    assert isinstance(content, list)
+    assert content[1]["type"] == "image_url"
+    assert "visible pose/action as stronger evidence than the filename" in content[0]["text"]
+    schema = captured["body"]["response_format"]["json_schema"]["schema"]
+    required = schema["properties"]["animation"]["required"]
+    assert {"actorKind", "skeletonProfile", "intents", "rootMotion", "quality", "searchText"}.issubset(required)
+
+
+def test_animated_animal_glb_gets_embedded_animation_metadata_not_vrma_clip():
+    app = create_app()
+    client = app.test_client()
+    headers = {"Authorization": "Bearer test-token"}
+
+    upload = client.post("/api/upload", headers=headers, data={
+        "name": "Forest Deer",
+        "description": "Animated deer with graze and run loops.",
+        "is_public": "true",
+        "asset_category": "fauna",
+        "asset_types": "animal, quadruped",
+        "tags": "deer, animal, quadruped",
+        "runtime_metadata": json.dumps({
+            "animations": [
+                {"name": "Graze", "duration": 2.0},
+                {"name": "Run", "duration": 1.2},
+            ],
+        }),
+        "file": (io.BytesIO(b"glTF deer animated" + b"\x11" * 64), "forest_deer.glb"),
+    }, content_type="multipart/form-data")
+    assert upload.status_code == 201, upload.get_json()
+    model_id = upload.get_json()["model"]["id"]
+    _attach_thumbnail(app, model_id)
+
+    enrich = client.post(
+        f"/api/model/{model_id}/ai/autotag",
+        headers=headers,
+        json={"overwrite": True, "context": {"source": "embedded-animations"}},
+    )
+    assert enrich.status_code == 200, enrich.get_json()
+    model = enrich.get_json()["model"]
+    assert model["asset_category"] == "fauna"
+    assert "avatar-animation" not in model["asset_types"]
+
+    metadata = enrich.get_json()["enrichment"]
+    animated_model = metadata["animatedModel"]
+    assert animated_model["assetId"] == model_id
+    assert animated_model["actorKind"] == "animal"
+    assert animated_model["skeletonProfile"] == "quadruped"
+    assert animated_model["vehicleMode"] == "ground"
+    assert animated_model["groundContact"] == "feet"
+    assert animated_model["movement"]["idleIntent"] == "graze"
+    assert animated_model["movement"]["runIntent"] == "run"
+    clips = metadata["animationClips"]
+    assert [clip["intent"] for clip in clips] == ["graze", "run"]
+    assert clips[0]["actorKind"] == "animal"
+    assert clips[0]["skeletonProfile"] == "quadruped"
+    assert clips[1]["speedMetersPerSecond"] == 4.5
+
+    vrma = client.get("/api/vrma")
+    assert vrma.status_code == 200, vrma.get_json()
+    assert model_id not in {item["model_id"] for item in vrma.get_json()["animations"]}
 
 
 def test_render_processing_status_surfaces_and_blocks_tellus():

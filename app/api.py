@@ -2374,6 +2374,86 @@ def _animation_clip_name(model):
     return name
 
 
+def _animation_registry_metadata(model):
+    metadata = model.ai_metadata if isinstance(model.ai_metadata, dict) else {}
+    animation = metadata.get('animation') if isinstance(metadata.get('animation'), dict) else {}
+    runtime = model.runtime_metadata if isinstance(model.runtime_metadata, dict) else {}
+    duration = animation.get('duration')
+    if duration is None:
+        for clip in runtime.get('animations') or []:
+            if not isinstance(clip, dict) or clip.get('duration') is None:
+                continue
+            try:
+                duration = round(max(0, float(clip.get('duration'))), 3)
+                break
+            except (TypeError, ValueError):
+                continue
+    return {
+        'intent': animation.get('intent'),
+        'intents': animation.get('intents') or ([animation.get('intent')] if animation.get('intent') else []),
+        'actorKind': animation.get('actorKind'),
+        'skeletonProfile': animation.get('skeletonProfile'),
+        'category': animation.get('category'),
+        'bodyType': animation.get('bodyType'),
+        'tags': animation.get('tags') or metadata.get('tags') or model.ai_tags or model.tags or [],
+        'loop': animation.get('loop'),
+        'duration': duration,
+        'durationSeconds': animation.get('durationSeconds', duration),
+        'transitionIn': animation.get('transitionIn'),
+        'transitionOut': animation.get('transitionOut'),
+        'energy': animation.get('energy'),
+        'locomotion': animation.get('locomotion'),
+        'rootMotion': animation.get('rootMotion'),
+        'speedMetersPerSecond': animation.get('speedMetersPerSecond'),
+        'direction': animation.get('direction'),
+        'gait': animation.get('gait'),
+        'transition': animation.get('transition') or {'from': [], 'to': []},
+        'aliases': animation.get('aliases') or [],
+        'quality': animation.get('quality') or {'score': None, 'issues': []},
+        'searchText': animation.get('searchText'),
+        'requiresMount': animation.get('requiresMount'),
+    }
+
+
+def _vrma_item(model, *, clip_id, view_url, download_url, source):
+    registry = _animation_registry_metadata(model)
+    return {
+        'id': clip_id,
+        'name': _animation_clip_name(model),
+        'view_url': view_url,
+        'download_url': download_url,
+        'source': source,
+        'model_id': model.id,
+        'description': model.description or model.ai_description or '',
+        'tags': model.tags or [],
+        'ai_tags': model.ai_tags or [],
+        'ai_status': model.ai_status,
+        'animation': registry,
+        'intent': registry.get('intent'),
+        'intents': registry.get('intents'),
+        'actorKind': registry.get('actorKind'),
+        'skeletonProfile': registry.get('skeletonProfile'),
+        'category': registry.get('category'),
+        'bodyType': registry.get('bodyType'),
+        'loop': registry.get('loop'),
+        'duration': registry.get('duration'),
+        'durationSeconds': registry.get('durationSeconds'),
+        'transitionIn': registry.get('transitionIn'),
+        'transitionOut': registry.get('transitionOut'),
+        'energy': registry.get('energy'),
+        'locomotion': registry.get('locomotion'),
+        'rootMotion': registry.get('rootMotion'),
+        'speedMetersPerSecond': registry.get('speedMetersPerSecond'),
+        'direction': registry.get('direction'),
+        'gait': registry.get('gait'),
+        'transition': registry.get('transition'),
+        'aliases': registry.get('aliases'),
+        'quality': registry.get('quality'),
+        'searchText': registry.get('searchText'),
+        'requiresMount': registry.get('requiresMount'),
+    }
+
+
 @api_bp.route('/vrma')
 def list_vrma():
     """List VRMA animation assets available to apply on a VRM avatar:
@@ -2385,14 +2465,13 @@ def list_vrma():
         items = []
         for model in Model3D.list_vrma_for_user(user_id):
             view_url = url_for('api.view_model', model_id=model.id)
-            items.append({
-                'id': model.id,
-                'name': _animation_clip_name(model),
-                'view_url': view_url,
-                'download_url': url_for('api.download_model', model_id=model.id),
-                'source': 'upload',
-                'model_id': model.id,
-            })
+            items.append(_vrma_item(
+                model,
+                clip_id=model.id,
+                view_url=view_url,
+                download_url=url_for('api.download_model', model_id=model.id),
+                source='upload',
+            ))
         seen_clip_model_ids = {it['model_id'] for it in items}
         for model in Model3D.list_generated_vrma_for_user(user_id):
             # A native .vrma that also carries a vrma_file_id would otherwise be
@@ -2401,16 +2480,15 @@ def list_vrma():
                 continue
             seen_clip_model_ids.add(model.id)
             vrma_url = url_for('api.export_model', model_id=model.id) + '?format=vrma'
-            items.append({
-                'id': model.id + ':vrma',
-                'name': _animation_clip_name(model),
-                'view_url': vrma_url,
-                # The generated VRMA is served via export; expose an explicit
-                # download URL so API consumers can fetch the .vrma file.
-                'download_url': vrma_url,
-                'source': 'generated',
-                'model_id': model.id,
-            })
+            # The generated VRMA is served via export; expose an explicit
+            # download URL so API consumers can fetch the .vrma file.
+            items.append(_vrma_item(
+                model,
+                clip_id=model.id + ':vrma',
+                view_url=vrma_url,
+                download_url=vrma_url,
+                source='generated',
+            ))
         default = _pick_default_vrma(items)
         for item in items:
             item['is_default'] = bool(default and item['id'] == default['id'])
@@ -2423,11 +2501,35 @@ def list_vrma():
             'name': it['name'],
             'downloadUrl': it.get('download_url') or it['view_url'],
             'source': it['source'],
+            'intent': it.get('intent'),
+            'intents': it.get('intents') or [],
+            'tags': it.get('animation', {}).get('tags') or it.get('tags') or [],
+            'actorKind': it.get('actorKind'),
+            'skeletonProfile': it.get('skeletonProfile'),
+            'category': it.get('category'),
+            'bodyType': it.get('bodyType'),
+            'loop': it.get('loop'),
+            'duration': it.get('duration'),
+            'durationSeconds': it.get('durationSeconds'),
+            'transitionIn': it.get('transitionIn'),
+            'transitionOut': it.get('transitionOut'),
+            'energy': it.get('energy'),
+            'locomotion': it.get('locomotion'),
+            'rootMotion': it.get('rootMotion'),
+            'speedMetersPerSecond': it.get('speedMetersPerSecond'),
+            'direction': it.get('direction'),
+            'gait': it.get('gait'),
+            'transition': it.get('transition'),
+            'aliases': it.get('aliases') or [],
+            'quality': it.get('quality') or {'score': None, 'issues': []},
+            'searchText': it.get('searchText'),
+            'requiresMount': it.get('requiresMount'),
         } for it in items]
 
         return jsonify({
             'clips': clips,
             'animations': items,
+            'registry': clips,
             'default_id': default['id'] if default else None,
             'default_url': default['view_url'] if default else None,
         })
@@ -3365,6 +3467,7 @@ def _animation_media_capture_queue_item(model, *, generated=False, capture_ready
     clip_id = (model.id + ':vrma') if generated else model.id
     needs_thumbnail = force_capture or not bool(model.thumbnail_file_id)
     needs_preview = force_capture or not bool(model.preview_file_id)
+    needs_enrichment = _ai_enrichment_needs_visual_retry(model)
     capture_state = _media_capture_state_for_model(model)
     return {
         'id': model.id,
@@ -3386,7 +3489,7 @@ def _animation_media_capture_queue_item(model, *, generated=False, capture_ready
         'needs_thumbnail': needs_thumbnail,
         'needs_preview': needs_preview,
         'force_capture': force_capture,
-        'needs_enrichment': False,
+        'needs_enrichment': needs_enrichment,
         'capture_ready': capture_ready,
         'capture_status': capture_state.get('status'),
         'capture_attempt_count': capture_state.get('attempt_count', 0),
@@ -3405,6 +3508,12 @@ def _animation_media_capture_queue_items(limit, *, include_not_ready=False, reca
     missing = true() if recapture else or_(
         model_rows.c.thumbnail_file_id.is_(None),
         model_rows.c.preview_file_id.is_(None),
+        model_rows.c.ai_status.is_(None),
+        model_rows.c.ai_status == '',
+        model_rows.c.ai_status == 'failed',
+        # Include done rows so Python can detect legacy/generic enrichment that
+        # should be retried with a captured animation frame.
+        model_rows.c.ai_status == 'done',
     )
     with current_app.config['DB_ENGINE'].begin() as conn:
         rows = conn.execute(
@@ -3428,6 +3537,8 @@ def _animation_media_capture_queue_items(limit, *, include_not_ready=False, reca
             capture_ready=capture_ready,
             force_capture=recapture,
         )
+        if not (item['needs_thumbnail'] or item['needs_preview'] or item['needs_enrichment']):
+            continue
         if not item['capture_ready'] and not include_not_ready:
             skipped_not_ready += 1
             continue
@@ -3819,6 +3930,39 @@ def _model_is_avatar_like(model):
     )
 
 
+def _model_is_animation_like(model):
+    try:
+        return bool(model and model.is_animation_carrier())
+    except Exception:
+        if not model:
+            return False
+        return (model.file_format or '').lower() in {'vrma', 'bvh'} or bool(model.vrma_file_id)
+
+
+def _model_has_embedded_animation_clips(model):
+    runtime = model.runtime_metadata if isinstance(getattr(model, 'runtime_metadata', None), dict) else {}
+    return bool(runtime.get('animations'))
+
+
+def _model_should_enrich_embedded_animations(model):
+    if not model or _model_is_animation_like(model) or _model_is_avatar_like(model):
+        return False
+    if not _model_has_embedded_animation_clips(model):
+        return False
+    text = ' '.join([
+        str(model.name or ''),
+        str(model.original_filename or ''),
+        str(model.asset_category or ''),
+        ' '.join(str(tag) for tag in (model.tags or [])),
+        ' '.join(str(kind) for kind in (model.asset_types or [])),
+    ]).lower()
+    # Humanoids are expected to flow through the VRM/avatar path. Embedded GLB
+    # animation metadata is for animals, mounts, vehicles, and objects.
+    if any(token in text for token in ('avatar', 'vrm', 'humanoid', 'mixamo', 'person', 'human')):
+        return False
+    return True
+
+
 def _preserved_structural_runtime_metadata(existing):
     existing = existing or {}
     if not isinstance(existing, dict):
@@ -3836,8 +3980,16 @@ def _run_ai_enrichment(model, data=None):
     include_title = _as_bool(data.get('include_title', True))
     include_description = _as_bool(data.get('include_description', True))
 
-    from app.ai_enrichment import enrich_model, _generic_description, _generic_title
-    enriched = enrich_model(model, extra_context=data.get('context') or {})
+    is_animation = _model_is_animation_like(model)
+    from app.ai_enrichment import enrich_animation_clip, enrich_embedded_model_animations, enrich_model, _generic_description, _generic_title
+    enriched = (
+        enrich_animation_clip(model, extra_context=data.get('context') or {})
+        if is_animation else enrich_model(model, extra_context=data.get('context') or {})
+    )
+    embedded_animation = (
+        enrich_embedded_model_animations(model, extra_context=data.get('context') or {})
+        if not is_animation and _model_should_enrich_embedded_animations(model) else None
+    )
 
     model.ai_status = 'done'
     model.ai_error = None
@@ -3852,6 +4004,9 @@ def _run_ai_enrichment(model, data=None):
         'summary': enriched.get('summary'),
         'categories': enriched.get('categories', []),
         'quality_notes': enriched.get('quality_notes', []),
+        'animation': enriched.get('animation'),
+        'animatedModel': embedded_animation,
+        'animationClips': (embedded_animation or {}).get('animationClips', []),
         'provider': enriched.get('provider'),
         'base_url': enriched.get('base_url'),
         'model': enriched.get('model'),
@@ -3861,22 +4016,31 @@ def _run_ai_enrichment(model, data=None):
         'vision_mcp_attempted': enriched.get('vision_mcp_attempted', False),
         'vision_mcp_analysis': enriched.get('vision_mcp_analysis'),
         'vision_mcp_error': enriched.get('vision_mcp_error'),
+        'vision_frame': enriched.get('vision_frame', False),
+        'preview_video_available': enriched.get('preview_video_available', False),
         'updated_at': datetime.utcnow().isoformat(),
     }
     avatar_like = _model_is_avatar_like(model)
     if overwrite:
         model.tags = _merge_tags(_preserved_provenance_tags(model.tags), model.ai_tags)
-        if avatar_like:
+        if is_animation:
+            model.asset_category = 'animation'
+        elif avatar_like:
             model.tags = _merge_tags(model.tags, ['avatar', 'vrm'])
             model.asset_category = 'person'
         else:
             model.asset_category = enriched.get('asset_category') or model.asset_category
         model.asset_styles = Model3D.normalize_tags(enriched.get('asset_styles', []))
+        blocked_types = {'static', 'static-mesh', *_STRUCTURAL_ASSET_TYPES, 'light-emitter', 'emissive', 'glowing', 'vrm', 'optimized'}
+        if is_animation:
+            blocked_types = blocked_types - {'animated'}
         ai_asset_types = [
             value for value in Model3D.normalize_tags(enriched.get('asset_types', []))
-            if value not in {'static', 'static-mesh', *_STRUCTURAL_ASSET_TYPES, 'light-emitter', 'emissive', 'glowing', 'vrm', 'optimized'}
+            if value not in blocked_types
         ]
         model.asset_types = _merge_tags(_preserved_structural_asset_types(model.asset_types), ai_asset_types)
+        if is_animation:
+            model.asset_types = _merge_tags(model.asset_types, ['avatar-animation'])
         if avatar_like:
             model.asset_types = _merge_tags(model.asset_types, ['avatar', 'vrm', 'humanoid'])
         model.runtime_metadata = Model3D.normalize_runtime_metadata(model.runtime_metadata)
@@ -3886,7 +4050,9 @@ def _run_ai_enrichment(model, data=None):
             model.description = model.ai_description
     else:
         model.tags = _merge_tags(model.tags, model.ai_tags)
-        if avatar_like:
+        if is_animation:
+            model.asset_category = 'animation'
+        elif avatar_like:
             model.tags = _merge_tags(model.tags, ['avatar', 'vrm'])
             model.asset_category = 'person'
         elif enriched.get('asset_category') and not model.asset_category:
@@ -3897,6 +4063,8 @@ def _run_ai_enrichment(model, data=None):
             if value not in {'static', 'static-mesh', *_STRUCTURAL_ASSET_TYPES, 'light-emitter', 'emissive', 'glowing', 'vrm', 'optimized'}
         ]
         model.asset_types = _merge_tags(model.asset_types, ai_asset_types)
+        if is_animation:
+            model.asset_types = _merge_tags(model.asset_types, ['avatar-animation'])
         if avatar_like:
             model.asset_types = _merge_tags(model.asset_types, ['avatar', 'vrm', 'humanoid'])
         if include_title and (not model.name or _generic_title(model.name)) and enriched.get('title'):
@@ -3908,6 +4076,8 @@ def _run_ai_enrichment(model, data=None):
 
 
 def _thumbnail_required_error(model):
+    if _model_is_animation_like(model):
+        return None
     if model and model.thumbnail_file_id:
         return None
     return 'AI enrichment requires a saved thumbnail. Capture/upload a thumbnail before enriching metadata.'
@@ -3926,6 +4096,10 @@ def _ai_enrichment_needs_visual_retry(model):
     if model.ai_error and 'thumbnail' in str(model.ai_error).lower():
         return True
     if model.ai_status == 'done':
+        if _model_should_enrich_embedded_animations(model):
+            metadata = model.ai_metadata if isinstance(model.ai_metadata, dict) else {}
+            if not metadata.get('animatedModel') or not metadata.get('animationClips'):
+                return True
         try:
             from app.ai_enrichment import _generic_description, _generic_title
             return (
