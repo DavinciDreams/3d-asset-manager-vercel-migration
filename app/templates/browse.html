@@ -133,10 +133,12 @@
                 <!-- Square preview -->
                 {% set is_owner = current_user.is_authenticated and (current_user.id == model.user_id or asset_admin) %}
                 {% set show_animation_preview = model.preview_file_id and model.has_embedded_animations() %}
+                {% set viewable = model.viewable_file_id or model.file_format in ['glb', 'gltf'] %}
                 <a href="{{ url_for('main.model_detail', model_id=model.id) }}"
                    class="block relative aspect-square bg-gray-100 card-media"
                    data-model-id="{{ model.id }}"
-                   data-viewable="0"
+                   data-viewable="{{ '0' if show_animation_preview else ('1' if viewable else '0') }}"
+                   {% if viewable and not show_animation_preview %}data-view-src="{% if model.has_game_optimized %}{{ url_for('api.get_game_optimized', model_id=model.id) }}{% elif model.has_fixed_eyes %}{{ url_for('api.get_fixed_eyes', model_id=model.id) }}{% else %}{{ url_for('api.view_model', model_id=model.id) }}?viewer=2{% endif %}"{% endif %}
                    data-is-owner="{{ '1' if is_owner else '0' }}"
                    {% if model.camera_orbit %}data-camera-orbit="{{ model.camera_orbit }}"{% endif %}
                    {% if model.default_animation %}data-default-animation="{{ model.default_animation }}"{% endif %}
@@ -240,12 +242,12 @@
             let hasNext = {{ 'true' if models.has_next else 'false' }};
             let loading = false;
 
-            // Browse uses cached videos/images only. The detail page owns the
-            // interactive model-viewer experience.
             const observeMediaIn = (root) => window.LivePreviews.observeMediaIn(root);
+            const observeLiveIn = (root) => window.LivePreviews.observeLiveIn(root);
 
             // Wire up the server-rendered first page.
             observeMediaIn(grid);
+            observeLiveIn(grid);
 
             const esc = (s) => String(s == null ? '' : s)
                 .replace(/&/g, '&amp;').replace(/</g, '&lt;')
@@ -273,7 +275,9 @@
 
             function cardHtml(m) {
                 let media;
-                if (m.is_animated && m.has_preview && m.preview_url) {
+                const showAnimationPreview = !!(m.is_animated && m.has_preview && m.preview_url);
+                const useLivePreview = !!(m.viewable && m.view_url && !showAnimationPreview);
+                if (showAnimationPreview) {
                     media = `<video class="w-full h-full object-cover lazy-media" loop muted playsinline preload="none"
                                  data-preview-src="${esc(m.preview_url)}"
                                  ${m.thumbnail_url ? `poster="${esc(m.thumbnail_url)}"` : ''}></video>`;
@@ -306,8 +310,9 @@
                             title="Delete asset"><i class="fas fa-trash"></i> Delete</button>` : '';
 
                 const mediaAttrs =
-                    `data-model-id="${esc(m.id)}" data-viewable="0" ` +
+                    `data-model-id="${esc(m.id)}" data-viewable="${useLivePreview ? '1' : '0'}" ` +
                     `data-is-owner="${m.is_owner ? '1' : '0'}"` +
+                    `${useLivePreview ? ` data-view-src="${esc(m.view_url)}"` : ''}` +
                     `${m.camera_orbit ? ` data-camera-orbit="${esc(m.camera_orbit)}"` : ''}` +
                     `${m.default_animation ? ` data-default-animation="${esc(m.default_animation)}"` : ''}` +
                     `${m.thumbnail_url ? ` data-thumb-src="${esc(m.thumbnail_url)}"` : ''}`;
@@ -390,6 +395,7 @@
                     const added = Array.from(frag.children);
                     added.forEach((node) => grid.appendChild(node));
                     observeMediaIn(grid);
+                    observeLiveIn(grid);
 
                     page = data.page;
                     hasNext = !!data.has_next;

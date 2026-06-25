@@ -5734,6 +5734,7 @@ def _reconcile_asset_pipeline_once(app, *, optimize_limit=None, enrich_limit=Non
                 'optimized': optimize,
                 'conversion_queued': conversions,
                 'enrichment_queued': enrichment,
+                'thumbnail_render': thumbnails,
                 'thumbnails_rendered': thumbnails.get('rendered', 0),
                 'thumbnails_failed': thumbnails.get('failed', 0),
                 'media_queue': {
@@ -5860,6 +5861,8 @@ def admin_render_thumbnails():
 def admin_pipeline_status():
     if not _admin_or_asset_admin_session_ok():
         return jsonify({'error': 'Unauthorized'}), 401
+    from app import render as render_mod
+    render_enabled = os.environ.get('SERVER_RENDER_THUMBNAILS', '1').lower() not in {'0', 'false', 'no', 'off'}
     media = _media_capture_queue_snapshot(
         limit=request.args.get('limit', 50, type=int),
         kind=request.args.get('kind') or 'all',
@@ -5869,6 +5872,10 @@ def admin_pipeline_status():
         'success': True,
         'pipeline': _pipeline_reconciler_status(),
         'media_worker': _media_capture_worker_status(),
+        'thumbnail_render': {
+            'enabled': render_enabled,
+            'available': bool(render_enabled and render_mod.render_available()),
+        },
         'media_queue': {
             'count': media.get('count', 0),
             'ready_count': media.get('ready_count', 0),

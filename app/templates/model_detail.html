@@ -273,6 +273,10 @@
                 </button>
                 {% endif %}
                 {% if can_manage_model and model.file_format in ['glb', 'gltf'] %}
+                <a href="{{ url_for('main.model_detail', model_id=model.id, capture=1, regen=1) }}"
+                   class="w-full sm:w-auto bg-blue-600 text-white py-3 px-6 rounded-lg hover:bg-blue-700 transition flex items-center justify-center">
+                    <i class="fas fa-camera mr-2"></i>Regenerate Media
+                </a>
                 <button type="button" id="fix-eyes-toggle"
                         class="w-full sm:w-auto bg-purple-600 text-white py-3 px-6 rounded-lg hover:bg-purple-700 transition flex items-center justify-center">
                     <i class="fas fa-eye mr-2"></i>Fix Eyes
@@ -288,14 +292,14 @@
                     <i class="fas fa-bone mr-2"></i>Rig Avatar
                 </button>
                 <!-- Alternative external auto-rigger (round-trip: rig there, re-upload). -->
-                <a href="https://app.mesh2motion.org/" target="_blank" rel="noopener"
+                <a href="https://app.mesh2motion.org/create.html" target="_blank" rel="noopener"
                    id="rig-mesh2motion-link"
                    class="w-full sm:w-auto bg-slate-500 text-white py-3 px-6 rounded-lg hover:bg-slate-600 transition flex items-center justify-center text-sm">
-                    <i class="fas fa-external-link-alt mr-2"></i>mesh2motion
+                    <i class="fas fa-external-link-alt mr-2"></i>Open mesh2motion
                 </a>
                 <button type="button" id="animation-source-toggle"
                         class="w-full sm:w-auto bg-cyan-700 text-white py-3 px-6 rounded-lg hover:bg-cyan-800 transition flex items-center justify-center">
-                    <i class="fas fa-person-running mr-2"></i>Upload Animated GLB
+                    <i class="fas fa-person-running mr-2"></i>Attach Animated GLB
                 </button>
                 <button type="button" id="make-vrm-btn"
                         class="w-full sm:w-auto bg-emerald-600 text-white py-3 px-6 rounded-lg hover:bg-emerald-700 transition flex items-center justify-center">
@@ -356,9 +360,19 @@
             {% if can_manage_model and model.file_format in ['glb', 'gltf'] %}
             <div id="animation-source-panel"
                  class="hidden mt-3 border border-cyan-100 bg-cyan-50 rounded-lg p-4">
+                <div class="mb-4 flex flex-col gap-2 sm:flex-row sm:flex-wrap">
+                    <a href="{{ url_for('api.download_model', model_id=model.id) }}"
+                       class="inline-flex items-center justify-center rounded bg-white px-4 py-2 text-sm font-medium text-cyan-800 ring-1 ring-cyan-200 hover:bg-cyan-100">
+                        <i class="fas fa-download mr-2"></i>Download Source
+                    </a>
+                    <a href="https://app.mesh2motion.org/create.html" target="_blank" rel="noopener"
+                       class="inline-flex items-center justify-center rounded bg-white px-4 py-2 text-sm font-medium text-cyan-800 ring-1 ring-cyan-200 hover:bg-cyan-100">
+                        <i class="fas fa-external-link-alt mr-2"></i>Open mesh2motion
+                    </a>
+                </div>
                 <form id="animation-source-form" class="space-y-3">
                     <div>
-                        <label for="animation-source-file" class="block text-xs font-semibold text-gray-700 mb-1">Animated GLB/GLTF</label>
+                        <label for="animation-source-file" class="block text-xs font-semibold text-gray-700 mb-1">Returned animated GLB/GLTF</label>
                         <input id="animation-source-file" name="file" type="file" accept=".glb,.gltf"
                                class="block w-full text-sm text-gray-700 file:mr-3 file:py-2 file:px-3 file:rounded file:border-0 file:bg-cyan-700 file:text-white hover:file:bg-cyan-800">
                     </div>

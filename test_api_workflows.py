@@ -140,6 +140,8 @@ def test_asset_admin_dashboard_can_start_conversion_backfill(monkeypatch):
     assert pipeline.status_code == 200, pipeline.get_json()
     assert "pipeline" in pipeline.get_json()
     assert "media_queue" in pipeline.get_json()
+    assert "thumbnail_render" in pipeline.get_json()
+    assert set(pipeline.get_json()["thumbnail_render"]) == {"enabled", "available"}
 
 
 def test_asset_admin_can_import_fbx_avatar_batch(monkeypatch, tmp_path):
@@ -859,7 +861,8 @@ def test_vrm_detail_capture_flags_do_not_break_avatar_loader():
     assert "mediaFlag('captureEnabled')" in detail
 
 
-def test_model_detail_escapes_metadata_in_viewer_script():
+def test_model_detail_escapes_metadata_in_viewer_script(monkeypatch):
+    monkeypatch.setenv("AUTO_GAME_OPTIMIZE", "0")
     app = create_app()
     client = app.test_client()
     with app.app_context():
@@ -888,6 +891,13 @@ def test_model_detail_escapes_metadata_in_viewer_script():
     assert 'id="edit-asset-styles"' in html
     assert 'id="edit-asset-types"' in html
     assert 'id="rig-profile-flip"' in html
+    assert f'href="/model/{model_id}?capture=1&amp;regen=1"' in html
+    assert "Regenerate Media" in html
+    assert f'href="/api/download/{model_id}"' in html
+    assert "Download Source" in html
+    assert 'href="https://app.mesh2motion.org/create.html"' in html
+    assert "Attach Animated GLB" in html
+    assert "Returned animated GLB/GLTF" in html
 
 
 def test_admin_media_capture_queue_lists_only_renderable_missing_media():
@@ -1592,6 +1602,36 @@ def test_home_and_browse_prefer_video_for_animated_model_previews(monkeypatch):
     home_html = home.get_data(as_text=True)
     assert f'data-preview-src="/api/model/{model_id}/preview"' in home_html
     assert f'data-model-id="{model_id}"\n                   data-viewable="0"' in home_html
+
+
+def test_browse_uses_live_preview_fallback_for_uncaptured_glb(monkeypatch):
+    monkeypatch.setenv("AUTO_GAME_OPTIMIZE", "0")
+    app = create_app()
+    client = app.test_client()
+    headers = {"Authorization": "Bearer test-token"}
+
+    upload = client.post("/api/upload", headers=headers, data={
+        "name": "Uncaptured Browse Preview",
+        "is_public": "true",
+        "file": (io.BytesIO(_minimal_glb({"asset": {"version": "2.0"}})), "uncaptured.glb"),
+    }, content_type="multipart/form-data")
+    assert upload.status_code == 201, upload.get_json()
+    model_id = upload.get_json()["model"]["id"]
+
+    browse_api = client.get("/api/models/browse?per_page=20")
+    assert browse_api.status_code == 200, browse_api.get_json()
+    card = next(item for item in browse_api.get_json()["models"] if item["id"] == model_id)
+    assert card["has_thumbnail"] is False
+    assert card["viewable"] is True
+    assert card["view_url"].endswith(f"/api/view/{model_id}?viewer=2")
+
+    browse_page = client.get("/browse")
+    assert browse_page.status_code == 200
+    html = browse_page.get_data(as_text=True)
+    assert f'data-model-id="{model_id}"' in html
+    assert 'data-viewable="1"' in html
+    assert f'data-view-src="/api/view/{model_id}?viewer=2"' in html
+    assert "observeLiveIn(grid)" in html
 
 
 def test_animations_page_renders_playable_clips_on_preview_avatar():
