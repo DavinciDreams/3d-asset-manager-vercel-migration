@@ -1555,6 +1555,42 @@ def get_openapi_spec(base_url=''):
                     },
                 },
             },
+            '/model/{model_id}/animation-source': {
+                'parameters': [{'name': 'model_id', 'in': 'path', 'required': True, 'schema': {'type': 'string'}}],
+                'post': {
+                    'tags': ['Workflows'],
+                    'summary': 'Attach an animated roundtrip file to the original model',
+                    'description': (
+                        'Uploads a GLB/GLTF returned from mesh2motion or another animation tool, '
+                        'stores it as the original model rigged/animated source variant, merges '
+                        'embedded animation metadata onto the original model, and can queue a fresh '
+                        'game-optimized copy from that animated source.'
+                    ),
+                    'security': [{'sessionCookie': []}, {'bearerAuth': []}],
+                    'requestBody': {
+                        'required': True,
+                        'content': {
+                            'multipart/form-data': {
+                                'schema': {
+                                    'type': 'object',
+                                    'required': ['file'],
+                                    'properties': {
+                                        'file': {'type': 'string', 'format': 'binary'},
+                                        'reoptimize': {'type': 'boolean', 'default': False},
+                                    },
+                                },
+                            },
+                        },
+                    },
+                    'responses': {
+                        '200': {'description': 'Animated source stored', 'content': {'application/json': {'schema': {'type': 'object'}}}},
+                        '400': _error_response('Invalid or non-animated GLB/GLTF'),
+                        '403': _error_response('Access denied'),
+                        '404': _error_response('Model not found'),
+                        '413': _error_response('Animated source is too large'),
+                    },
+                },
+            },
             '/model/{model_id}/ai/autotag': {
                 'parameters': [{'name': 'model_id', 'in': 'path', 'required': True, 'schema': {'type': 'string'}}],
                 'post': {

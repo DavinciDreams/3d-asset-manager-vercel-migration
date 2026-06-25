@@ -683,6 +683,112 @@ def test_asset_admin_can_overwrite_rigged_variant(monkeypatch):
     assert variant.status == "ready"
 
 
+def test_owner_can_attach_animated_roundtrip_to_original_model():
+    app = create_app()
+    client = app.test_client()
+    with app.app_context():
+        owner = _ensure_user("roundtrip-owner")
+        model = Model3D(
+            name="Roundtrip Target",
+            file_format="glb",
+            file_size=8,
+            user_id=owner.id,
+            is_public=False,
+            gridfs_file_id=app.config["FILE_STORE"].put(
+                _minimal_glb({"asset": {"version": "2.0"}}),
+                filename="target.glb",
+                content_type="model/gltf-binary",
+                metadata={},
+            ),
+        ).save()
+
+    login = client.post("/auth/login", data={
+        "login_field": "roundtrip-owner",
+        "password": "pw123456",
+    }, follow_redirects=True)
+    assert login.status_code == 200
+
+    animated = _minimal_glb({
+        "asset": {"version": "2.0"},
+        "nodes": [{"name": "Armature"}],
+        "skins": [{"joints": [0]}],
+        "animations": [{"name": "Wave"}],
+    })
+    response = client.post(f"/api/model/{model.id}/animation-source", data={
+        "file": (io.BytesIO(animated), "target_wave.glb"),
+        "reoptimize": "0",
+    }, content_type="multipart/form-data")
+    assert response.status_code == 200, response.get_json()
+    body = response.get_json()
+    assert body["success"] is True
+    assert body["animations"] == [{"name": "Wave"}]
+    assert "animated" in body["model"]["asset_types"]
+    assert "rigged" in body["model"]["asset_types"]
+
+    with app.app_context():
+        saved = Model3D.get_by_id(model.id)
+        variant = ModelVariant.get(model.id, "rigged")
+    assert saved.runtime_metadata["animations"] == [{"name": "Wave"}]
+    assert variant is not None
+    assert variant.settings["source"] == "animation_roundtrip"
+    assert variant.settings["original_filename"] == "target_wave.glb"
+
+
+def test_game_optimizer_prefers_uploaded_animated_roundtrip_source():
+    import app.api as api
+
+    app = create_app()
+    with app.app_context():
+        owner = _ensure_user("roundtrip-opt-owner")
+        original = _minimal_glb({
+            "asset": {"version": "2.0"},
+            "extensionsUsed": ["EXT_meshopt_compression"],
+        })
+        animated = _minimal_glb({
+            "asset": {"version": "2.0"},
+            "extensionsUsed": ["EXT_meshopt_compression"],
+            "nodes": [{"name": "Armature"}],
+            "skins": [{"joints": [0]}],
+            "animations": [{"name": "Run"}],
+        })
+        model = Model3D(
+            name="Optimizer Roundtrip Target",
+            file_format="glb",
+            file_size=len(original),
+            user_id=owner.id,
+            is_public=False,
+            gridfs_file_id=app.config["FILE_STORE"].put(
+                original,
+                filename="target.glb",
+                content_type="model/gltf-binary",
+                metadata={},
+            ),
+            asset_types=[],
+        ).save()
+        rigged_id = app.config["FILE_STORE"].put(
+            animated,
+            filename="target-run.glb",
+            content_type="model/gltf-binary",
+            metadata={"kind": "animation_source", "source_model_id": model.id},
+        )
+        ModelVariant.upsert(
+            model.id, "rigged", str(rigged_id),
+            file_format="glb", size=len(animated),
+            settings={"source": "animation_roundtrip"},
+            status="ready",
+        )
+
+        result = api._run_game_optimizer(model, owner.id, {})
+        game = ModelVariant.get(model.id, "game")
+
+    assert result["success"] is True
+    assert result["source_variant_kind"] == "rigged"
+    assert result["source_is_rigged"] is True
+    assert result["original_size"] == len(animated)
+    assert game.settings["source_variant_kind"] == "rigged"
+    assert game.settings["source_is_rigged"] is True
+
+
 def test_replacing_vrm_drops_stale_optimized_variant(monkeypatch):
     app = create_app()
     client = app.test_client()
@@ -1429,6 +1535,63 @@ def test_browse_asset_filters_include_vrm_and_animated_models():
     animated_ids = {item["id"] for item in animated_browse.get_json()["models"]}
     assert animated_id in animated_ids
     assert vrm_id not in animated_ids
+
+
+def test_home_and_browse_prefer_video_for_animated_model_previews(monkeypatch):
+    monkeypatch.setenv("AUTO_GAME_OPTIMIZE", "0")
+    app = create_app()
+    client = app.test_client()
+    headers = {"Authorization": "Bearer test-token"}
+
+    animated_upload = client.post("/api/upload", headers=headers, data={
+        "name": "Previewing Animated Creature",
+        "is_public": "true",
+        "asset_types": "rigged, animated",
+        "file": (io.BytesIO(_minimal_glb({
+            "asset": {"version": "2.0"},
+            "nodes": [{"name": "Armature"}],
+            "skins": [{"joints": [0]}],
+            "animations": [{"name": "Hop", "channels": [], "samplers": []}],
+        })), "previewing_animated_creature.glb"),
+    }, content_type="multipart/form-data")
+    assert animated_upload.status_code == 201, animated_upload.get_json()
+    model_id = animated_upload.get_json()["model"]["id"]
+
+    with app.app_context():
+        model = Model3D.get_by_id(model_id)
+        preview_id = app.config["FILE_STORE"].put(
+            b"webm preview",
+            filename="preview.webm",
+            content_type="video/webm",
+            metadata={"model_id": model_id, "kind": "preview"},
+        )
+        thumb_id = app.config["FILE_STORE"].put(
+            b"webp thumbnail",
+            filename="thumbnail.webp",
+            content_type="image/webp",
+            metadata={"model_id": model_id, "kind": "thumbnail"},
+        )
+        model.preview_file_id = str(preview_id)
+        model.thumbnail_file_id = str(thumb_id)
+        model.save()
+
+    browse_api = client.get("/api/models/browse?asset=animated&per_page=20")
+    assert browse_api.status_code == 200, browse_api.get_json()
+    card = next(item for item in browse_api.get_json()["models"] if item["id"] == model_id)
+    assert card["is_animated"] is True
+    assert card["preview_url"].endswith(f"/api/model/{model_id}/preview")
+
+    browse_page = client.get("/browse?asset=animated")
+    assert browse_page.status_code == 200
+    browse_html = browse_page.get_data(as_text=True)
+    assert f'data-preview-src="/api/model/{model_id}/preview"' in browse_html
+    assert f'data-img-src="/api/model/{model_id}/thumbnail"' not in browse_html
+
+    home = client.get("/")
+    assert home.status_code == 200
+    home_html = home.get_data(as_text=True)
+    assert f'data-preview-src="/api/model/{model_id}/preview"' in home_html
+    assert f'data-model-id="{model_id}"\n                   data-viewable="0"' in home_html
 
 
 def test_animations_page_renders_playable_clips_on_preview_avatar():

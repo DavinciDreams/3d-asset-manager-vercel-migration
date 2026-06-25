@@ -132,6 +132,7 @@
             <div class="model-card bg-white rounded-lg card-shadow hover-scale overflow-hidden flex flex-col">
                 <!-- Square preview -->
                 {% set is_owner = current_user.is_authenticated and (current_user.id == model.user_id or asset_admin) %}
+                {% set show_animation_preview = model.preview_file_id and model.has_embedded_animations() %}
                 <a href="{{ url_for('main.model_detail', model_id=model.id) }}"
                    class="block relative aspect-square bg-gray-100 card-media"
                    data-model-id="{{ model.id }}"
@@ -140,8 +141,8 @@
                    {% if model.camera_orbit %}data-camera-orbit="{{ model.camera_orbit }}"{% endif %}
                    {% if model.default_animation %}data-default-animation="{{ model.default_animation }}"{% endif %}
                    {% if model.thumbnail_file_id %}data-thumb-src="{{ url_for('api.get_thumbnail', model_id=model.id) }}"{% endif %}>
-                    {% if model.preview_file_id %}
-                        {# Browse uses cached rotating video for performance; detail remains the interactive viewer. #}
+                    {% if show_animation_preview %}
+                        {# Animated assets use their cached motion preview on browse. #}
                         <video class="w-full h-full object-cover lazy-media" loop muted playsinline
                                preload="none"
                                data-preview-src="{{ url_for('api.get_preview', model_id=model.id) }}"
@@ -272,7 +273,7 @@
 
             function cardHtml(m) {
                 let media;
-                if (m.has_preview && m.preview_url) {
+                if (m.is_animated && m.has_preview && m.preview_url) {
                     media = `<video class="w-full h-full object-cover lazy-media" loop muted playsinline preload="none"
                                  data-preview-src="${esc(m.preview_url)}"
                                  ${m.thumbnail_url ? `poster="${esc(m.thumbnail_url)}"` : ''}></video>`;

@@ -336,6 +336,14 @@ def _file_derived_metadata(file_content, file_extension):
     return asset_types, runtime
 
 
+def _validate_uploaded_gltf_bytes(data, file_format='glb'):
+    fmt = (file_format or 'glb').lower()
+    if fmt not in {'glb', 'gltf'}:
+        return False
+    gltf = _gltf_json_from_bytes(data, fmt)
+    return isinstance(gltf, dict) and isinstance(gltf.get('asset'), dict)
+
+
 def _gltf_mesh_stats(gltf):
     accessors = gltf.get('accessors') if isinstance(gltf.get('accessors'), list) else []
     meshes = gltf.get('meshes') if isinstance(gltf.get('meshes'), list) else []
@@ -1537,6 +1545,102 @@ def post_rig(model_id):
     except Exception as e:
         print(f"API rig error: {e}")
         return jsonify({'error': 'Could not save rigged model.'}), 500
+
+
+@api_bp.route('/model/<model_id>/animation-source', methods=['POST'])
+def post_animation_source(model_id):
+    """Attach a returned animated GLB/GLTF to the original model.
+
+    This is the mesh2motion roundtrip path: the edited file stays a variant of
+    the original asset, its embedded animation metadata is merged onto the
+    original model, and future game optimization uses this animated source.
+    """
+    try:
+        model = Model3D.get_by_id(model_id)
+        if not model:
+            return jsonify({'error': 'Model not found'}), 404
+        if not _can_write_model(model):
+            return jsonify({'error': 'Access denied'}), 403
+
+        upload = request.files.get('file')
+        if upload is None or not upload.filename:
+            return jsonify({'error': 'No file uploaded.'}), 400
+        filename = upload.filename.rsplit('\\', 1)[-1].rsplit('/', 1)[-1]
+        file_format = filename.rsplit('.', 1)[1].lower() if '.' in filename else 'glb'
+        if file_format not in {'glb', 'gltf'}:
+            return jsonify({'error': 'Upload the animated roundtrip as GLB or GLTF.'}), 400
+
+        data = upload.read()
+        if not data:
+            return jsonify({'error': 'Uploaded file is empty.'}), 400
+        if len(data) > FIXED_EYES_MAX_BYTES:
+            return jsonify({'error': 'Animated source is too large.'}), 413
+        if not _validate_uploaded_gltf_bytes(data, file_format):
+            return jsonify({'error': 'Uploaded file is not a valid GLB/GLTF asset.'}), 400
+
+        derived_asset_types, derived_runtime = _file_derived_metadata(data, file_format)
+        if 'animated' not in derived_asset_types:
+            return jsonify({'error': 'Uploaded file does not contain embedded animation clips.'}), 400
+
+        fs = current_app.config['FILE_STORE']
+        file_id = fs.put(
+            data,
+            filename=f'{_safe_stem(model)}-animated.{file_format}',
+            content_type=_mime_for(file_format),
+            metadata={
+                'kind': 'animation_source',
+                'source_model_id': model.id,
+                'original_filename': filename,
+                'size': len(data),
+            },
+        )
+        settings = {
+            'source': 'animation_roundtrip',
+            'original_filename': filename,
+            'runtime_metadata': derived_runtime,
+        }
+        variant, old_file_id = ModelVariant.upsert(
+            model.id, 'rigged', str(file_id),
+            file_format=file_format, size=len(data), settings=settings, status='ready',
+        )
+        if old_file_id and old_file_id != str(file_id):
+            try:
+                fs.delete(old_file_id)
+            except Exception as e:
+                print(f"Old animated source blob {old_file_id} not deleted: {e}")
+
+        model.asset_types = _merge_tags(model.asset_types, derived_asset_types)
+        model.runtime_metadata = _merge_runtime_metadata(model.runtime_metadata, derived_runtime)
+        model.ai_status = None
+        model.ai_error = None
+        if isinstance(model.ai_metadata, dict):
+            metadata = dict(model.ai_metadata)
+            metadata.pop('animatedModel', None)
+            metadata.pop('animationClips', None)
+            model.ai_metadata = metadata
+        model.save()
+
+        reoptimize = _as_bool(request.form.get('reoptimize') or request.args.get('reoptimize'))
+        job = None
+        status_url = None
+        if reoptimize:
+            job_id = _enqueue_game_optimization(model.id, model.user_id, dict(GAME_OPTIMIZE_DEFAULTS))
+            job = _get_optimization_job(job_id)
+            status_url = url_for('api.game_optimization_status', model_id=model.id, job_id=job_id)
+
+        return jsonify({
+            'success': True,
+            'variant': variant.to_api() if variant else None,
+            'model': _serialize_model(model),
+            'animations': (model.runtime_metadata or {}).get('animations') or [],
+            'reoptimizing': reoptimize,
+            'queued': bool(job),
+            'job': _optimization_job_to_api(job) if job else None,
+            'status_url': status_url,
+        })
+    except Exception as e:
+        print(f"API animation-source error: {e}")
+        return jsonify({'error': 'Could not save animated source.'}), 500
 
 
 def _decode_data_url_image(value):
@@ -2770,6 +2874,7 @@ def _serialize_browse_card(model):
         'asset_styles': model.asset_styles or [],
         'asset_types': model.asset_types or [],
         'runtime_metadata': model.runtime_metadata or {},
+        'is_animated': bool(model.has_embedded_animations()),
         'has_preview': bool(model.preview_file_id),
         'has_thumbnail': bool(model.thumbnail_file_id),
         'preview_url': url_for('api.get_preview', model_id=model.id) if model.preview_file_id else None,
@@ -4525,19 +4630,29 @@ def _run_game_optimizer(model, owner_id, settings):
     compression_mode = settings['compression_mode']
     texture_limit_applied = bool(texture_limit)
 
-    # Prefer the fixed-eyes variant as the source when it exists, so the
-    # game-optimized asset includes the baked eyeballs (+ blink). Falls back to
-    # the model's normal viewable data. The fixed-eyes file is a self-contained
-    # GLB, so gltfpack handles it the same way (and preserves the blink clip).
+    # Prefer a mesh2motion/rigged roundtrip as the source when it exists so
+    # re-optimization keeps the returned animation clips attached to the
+    # original asset. Fall back to fixed-eyes, then the normal viewable data.
     src_bytes = None
     src_fmt = None
+    source_variant_kind = 'original'
+    used_rigged = False
     used_fixed_eyes = False
+    rigged_variant = ModelVariant.get(model.id, 'rigged')
+    if rigged_variant and rigged_variant.file_id:
+        data = rigged_variant.read_data()
+        if data:
+            src_bytes = data
+            src_fmt = (rigged_variant.file_format or 'glb').lower()
+            source_variant_kind = 'rigged'
+            used_rigged = True
     fixed_variant = ModelVariant.get(model.id, 'fixed_eyes')
-    if fixed_variant and fixed_variant.file_id:
+    if src_bytes is None and fixed_variant and fixed_variant.file_id:
         data = fixed_variant.read_data()
         if data:
             src_bytes = data
             src_fmt = (fixed_variant.file_format or 'glb').lower()
+            source_variant_kind = 'fixed_eyes'
             used_fixed_eyes = True
     if src_bytes is None:
         src_bytes, src_fmt = model.get_viewable_data()
@@ -4612,6 +4727,8 @@ def _run_game_optimizer(model, owner_id, settings):
             'source_model_id': model.id,
             'source_format': src_fmt,
             'source_size': len(src_bytes),
+            'source_variant_kind': source_variant_kind,
+            'source_is_rigged': used_rigged,
             'source_is_fixed_eyes': used_fixed_eyes,
             'optimized_size': len(out_bytes),
             'texture_limit': texture_limit if texture_limit_applied else None,
@@ -4677,6 +4794,8 @@ def _run_game_optimizer(model, owner_id, settings):
             'physical': variant_physical,
             'source_runtime_cost': source_runtime_cost,
             'runtime_cost': runtime_cost,
+            'source_variant_kind': source_variant_kind,
+            'source_is_rigged': used_rigged,
             'source_is_fixed_eyes': used_fixed_eyes,
             'report': report,
         }
@@ -4700,6 +4819,8 @@ def _run_game_optimizer(model, owner_id, settings):
             'savings_ratio': savings_ratio,
             'source_mesh_stats': source_mesh_stats,
             'optimized_mesh_stats': optimized_mesh_stats,
+            'source_variant_kind': source_variant_kind,
+            'source_is_rigged': used_rigged,
             'source_is_fixed_eyes': used_fixed_eyes,
             'settings': {
                 'texture_limit': texture_limit,

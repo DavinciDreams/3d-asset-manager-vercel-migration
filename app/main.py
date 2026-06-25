@@ -56,15 +56,20 @@ def _variant_uses_fixed_source(variant):
     return bool(variant and isinstance(variant.settings, dict) and variant.settings.get('source_is_fixed_eyes'))
 
 
+def _variant_uses_rigged_source(variant):
+    return bool(variant and isinstance(variant.settings, dict) and variant.settings.get('source_is_rigged'))
+
+
 def _attach_preview_variant_flags(models):
     game_by_id = ModelVariant.map_by_kind('game', [m.id for m in models])
     fixed_by_id = ModelVariant.map_by_kind('fixed_eyes', [m.id for m in models])
     for model in models:
         fixed = fixed_by_id.get(model.id)
         game = game_by_id.get(model.id)
-        model.has_game_optimized = bool(game and (not fixed or _variant_uses_fixed_source(game)))
+        model.has_game_optimized = bool(game and (not fixed or _variant_uses_fixed_source(game) or _variant_uses_rigged_source(game)))
         model.has_fixed_eyes = bool(fixed)
         model.game_uses_fixed = _variant_uses_fixed_source(game)
+        model.game_uses_rigged = _variant_uses_rigged_source(game)
         model.dashboard_game_size = game.size if model.has_game_optimized and game else None
 
 
@@ -512,6 +517,7 @@ def model_detail(model_id):
         # covering reconstruction holes; surfaces its own toggle + download.
         fixed_eyes_variant = ModelVariant.get(model.id, 'fixed_eyes')
         game_variant_uses_fixed = _variant_uses_fixed_source(game_variant)
+        game_variant_uses_rigged = _variant_uses_rigged_source(game_variant)
         # Existence/readiness (controls whether the Game-Optimized tab + export
         # link render at all) is independent of whether it's the DEFAULT toggle
         # (game_variant_current, below). Previously these were conflated, so a
@@ -521,7 +527,7 @@ def model_detail(model_id):
             game_variant and game_variant.file_id
             and (game_variant.status or 'ready') == 'ready'
         )
-        game_variant_current = bool(game_variant and (not fixed_eyes_variant or game_variant_uses_fixed))
+        game_variant_current = bool(game_variant and (not fixed_eyes_variant or game_variant_uses_fixed or game_variant_uses_rigged))
         # VRM variant (if any): a rigged GLB converted to a VRM avatar via
         # glb2vrm; lets the owner play VRMA clips on it.
         vrm_variant = ModelVariant.get(model.id, 'vrm')
@@ -558,6 +564,7 @@ def model_detail(model_id):
                                game_variant_current=game_variant_current,
                                has_game_variant=has_game_variant,
                                game_variant_uses_fixed=game_variant_uses_fixed,
+                               game_variant_uses_rigged=game_variant_uses_rigged,
                                fixed_eyes_variant=fixed_eyes_variant,
                                vrm_variant=vrm_variant,
                                rigged_variant=rigged_variant,

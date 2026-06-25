@@ -109,17 +109,22 @@
         <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-8">
             {% for model in recent_models %}
             {% set viewable = model.viewable_file_id or model.file_format in ['glb', 'gltf'] %}
+            {% set show_animation_preview = model.preview_file_id and model.has_embedded_animations() %}
             <div class="bg-white rounded-xl card-shadow hover-scale overflow-hidden">
                 <!-- Big preview for Recent Models: live rotating 3D when viewable
                      (prefers the small optimized variant), else thumbnail/icon. -->
                 <a href="{{ url_for('main.model_detail', model_id=model.id) }}"
                    class="block h-56 relative bg-gray-100 card-media"
                    data-model-id="{{ model.id }}"
-                   data-viewable="{{ '1' if viewable else '0' }}"
-                   {% if viewable %}data-view-src="{% if model.has_game_optimized %}{{ url_for('api.get_game_optimized', model_id=model.id) }}{% elif model.has_fixed_eyes %}{{ url_for('api.get_fixed_eyes', model_id=model.id) }}{% else %}{{ url_for('api.view_model', model_id=model.id) }}?viewer=2{% endif %}"{% endif %}
+                   data-viewable="{{ '0' if show_animation_preview else ('1' if viewable else '0') }}"
+                   {% if viewable and not show_animation_preview %}data-view-src="{% if model.has_game_optimized %}{{ url_for('api.get_game_optimized', model_id=model.id) }}{% elif model.has_fixed_eyes %}{{ url_for('api.get_fixed_eyes', model_id=model.id) }}{% else %}{{ url_for('api.view_model', model_id=model.id) }}?viewer=2{% endif %}"{% endif %}
                    {% if model.camera_orbit %}data-camera-orbit="{{ model.camera_orbit }}"{% endif %}
                    {% if model.default_animation %}data-default-animation="{{ model.default_animation }}"{% endif %}>
-                    {% if model.thumbnail_file_id %}
+                    {% if show_animation_preview %}
+                        <video class="w-full h-full object-cover lazy-media" loop muted playsinline preload="none"
+                               data-preview-src="{{ url_for('api.get_preview', model_id=model.id) }}"
+                               poster="{% if model.thumbnail_file_id %}{{ url_for('api.get_thumbnail', model_id=model.id) }}{% endif %}"></video>
+                    {% elif model.thumbnail_file_id %}
                         <img alt="{{ model.name }}" class="w-full h-full object-cover lazy-media"
                              loading="lazy"
                              data-img-src="{{ url_for('api.get_thumbnail', model_id=model.id) }}"
@@ -127,9 +132,6 @@
                         <div class="absolute inset-0 hidden items-center justify-center text-gray-300">
                             <i class="fas fa-cube text-5xl"></i>
                         </div>
-                    {% elif not viewable and model.preview_file_id %}
-                        <video class="w-full h-full object-cover lazy-media" loop muted playsinline preload="none"
-                               data-preview-src="{{ url_for('api.get_preview', model_id=model.id) }}"></video>
                     {% else %}
                         <div class="absolute inset-0 flex items-center justify-center text-gray-300">
                             <i class="fas {% if model.file_format == 'vrm' %}fa-user{% elif model.file_format == 'vrma' %}fa-person-running{% else %}fa-cube{% endif %} text-5xl"></i>

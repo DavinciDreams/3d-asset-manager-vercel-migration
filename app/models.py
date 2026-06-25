@@ -438,6 +438,12 @@ class Model3D:
             or (isinstance(upload, dict) and upload.get("source") == "vrma-library-import")
         )
 
+    def has_embedded_animations(self):
+        runtime = self.runtime_metadata if isinstance(self.runtime_metadata, dict) else {}
+        asset_types = {str(tag or "").strip().lower() for tag in (self.asset_types or [])}
+        animations = runtime.get("animations") if isinstance(runtime.get("animations"), list) else []
+        return bool(animations) or "animated" in asset_types
+
     def get_file_size_formatted(self):
         if not self.file_size:
             return "Unknown"

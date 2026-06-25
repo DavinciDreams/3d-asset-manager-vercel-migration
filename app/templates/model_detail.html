@@ -257,7 +257,7 @@
                         <div id="export-rigged-divider" class="border-t border-gray-100 my-1 {% if not rigged_variant %}hidden{% endif %}"></div>
                         <a id="export-rigged-link" href="{{ url_for('api.get_rigged', model_id=model.id, download=1) }}"
                            class="block px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 {% if not rigged_variant %}hidden{% endif %}">
-                            <i class="fas fa-bone mr-1"></i>Rigged GLB
+                            <i class="fas fa-bone mr-1"></i>Animated/Rigged GLB
                         </a>
                         <div id="export-vrm-divider" class="border-t border-gray-100 my-1 {% if not vrm_variant %}hidden{% endif %}"></div>
                         <a id="export-vrm-link" href="{{ url_for('api.get_vrm_variant', model_id=model.id, download=1) }}"
@@ -293,6 +293,10 @@
                    class="w-full sm:w-auto bg-slate-500 text-white py-3 px-6 rounded-lg hover:bg-slate-600 transition flex items-center justify-center text-sm">
                     <i class="fas fa-external-link-alt mr-2"></i>mesh2motion
                 </a>
+                <button type="button" id="animation-source-toggle"
+                        class="w-full sm:w-auto bg-cyan-700 text-white py-3 px-6 rounded-lg hover:bg-cyan-800 transition flex items-center justify-center">
+                    <i class="fas fa-person-running mr-2"></i>Upload Animated GLB
+                </button>
                 <button type="button" id="make-vrm-btn"
                         class="w-full sm:w-auto bg-emerald-600 text-white py-3 px-6 rounded-lg hover:bg-emerald-700 transition flex items-center justify-center">
                     <i class="fas fa-child mr-2"></i><span id="make-vrm-label">Make VRM avatar</span>
@@ -307,6 +311,11 @@
                    class="text-sm text-purple-700 mb-3 {% if not fixed_eyes_variant %}hidden{% endif %}">
                     <i class="fas fa-eye mr-1"></i>Using your <b>fixed</b> version as the source,
                     so the optimized game asset keeps the baked eyes/mouth fixes.
+                </p>
+                <p id="game-opt-rigged-note"
+                   class="text-sm text-cyan-700 mb-3 {% if not rigged_variant %}hidden{% endif %}">
+                    <i class="fas fa-person-running mr-1"></i>Using your <b>animated/rigged</b> version as the source,
+                    so the optimized game asset keeps the returned animation clips.
                 </p>
                 <div class="grid grid-cols-1 sm:grid-cols-4 gap-3">
                     <div>
@@ -345,6 +354,26 @@
             {% endif %}
 
             {% if can_manage_model and model.file_format in ['glb', 'gltf'] %}
+            <div id="animation-source-panel"
+                 class="hidden mt-3 border border-cyan-100 bg-cyan-50 rounded-lg p-4">
+                <form id="animation-source-form" class="space-y-3">
+                    <div>
+                        <label for="animation-source-file" class="block text-xs font-semibold text-gray-700 mb-1">Animated GLB/GLTF</label>
+                        <input id="animation-source-file" name="file" type="file" accept=".glb,.gltf"
+                               class="block w-full text-sm text-gray-700 file:mr-3 file:py-2 file:px-3 file:rounded file:border-0 file:bg-cyan-700 file:text-white hover:file:bg-cyan-800">
+                    </div>
+                    <label class="flex items-center gap-2 text-sm text-gray-700">
+                        <input type="checkbox" id="animation-source-reoptimize" checked>
+                        Rebuild game-optimized GLB after upload
+                    </label>
+                    <button type="submit"
+                            class="bg-cyan-700 text-white px-4 py-2 rounded hover:bg-cyan-800 transition">
+                        Upload to Original
+                    </button>
+                    <p id="animation-source-status" class="text-sm text-gray-600"></p>
+                </form>
+            </div>
+
             <!-- Rig Avatar panel: Mixamo-style 2D joint placement. Switches the
                  viewer to a flat front view; click to drop markers, then Build
                  Rig (skeleton + skin client-side) -> upload as a rigged GLB. -->
@@ -1002,6 +1031,7 @@ const IS_OWNER = {{ can_manage_model | tojson }};
 // editors load THIS as their base (not the original) so prior fixes carry into
 // the next bake (e.g. add a mouth without losing previously-baked eyes+blink).
 let HAS_FIXED_VARIANT = {{ (fixed_eyes_variant is not none) | tojson }};
+let HAS_RIGGED_VARIANT = {{ (rigged_variant is not none) | tojson }};
 // Whether a game-optimized variant EXISTS (controls tab/export visibility). The
 // game tab must render whenever a ready variant exists, independent of which
 // toggle is pre-selected.
@@ -1010,13 +1040,14 @@ let HAS_GAME_VARIANT = {{ has_game_variant | tojson }};
 // fixed-eyes variant exists and the game build sourced the original).
 let GAME_VARIANT_IS_DEFAULT = {{ game_variant_current | tojson }};
 let GAME_VARIANT_USES_FIXED = {{ game_variant_uses_fixed | tojson }};
+let GAME_VARIANT_USES_RIGGED = {{ game_variant_uses_rigged | tojson }};
 let DETAIL_LOAD_TOKEN = 0;
 
 // The best variant to show in the main preview: game-optimized (smallest AND
 // includes any baked eyes/mouth) -> fixed-eyes -> original. Matches browse +
 // galleries so the detail page shows the fixed/animated version by default.
 function bestVariant() {
-    if (GAME_VARIANT_IS_DEFAULT && (!HAS_FIXED_VARIANT || GAME_VARIANT_USES_FIXED)) return 'game';
+    if (GAME_VARIANT_IS_DEFAULT && (!HAS_FIXED_VARIANT || GAME_VARIANT_USES_FIXED || GAME_VARIANT_USES_RIGGED)) return 'game';
     if (HAS_FIXED_VARIANT) return 'fixed_eyes';
     if (HAS_GAME_VARIANT) return 'game';
     return 'original';
@@ -1151,9 +1182,10 @@ function switchVariant(variant) {
 
 // Reveal the Original/Game-Optimized toggle + the download entry once a
 // game-optimized variant exists (called after a successful optimization).
-function revealGameOptimized(sizeBytes, sourceIsFixed) {
+function revealGameOptimized(sizeBytes, sourceIsFixed, sourceIsRigged) {
     HAS_GAME_VARIANT = true;
-    GAME_VARIANT_USES_FIXED = Boolean(sourceIsFixed || !HAS_FIXED_VARIANT);
+    GAME_VARIANT_USES_FIXED = Boolean(sourceIsFixed || (!HAS_FIXED_VARIANT && !sourceIsRigged));
+    GAME_VARIANT_USES_RIGGED = Boolean(sourceIsRigged);
     const toggle = document.getElementById('variant-toggle');
     if (toggle) toggle.classList.remove('hidden');
     // The game button starts hidden when no variant existed at render time;
@@ -1171,6 +1203,7 @@ function revealGameOptimized(sizeBytes, sourceIsFixed) {
 function hideGameOptimized() {
     HAS_GAME_VARIANT = false;
     GAME_VARIANT_USES_FIXED = false;
+    GAME_VARIANT_USES_RIGGED = false;
     const btn = document.getElementById('variant-btn-game');
     if (btn) btn.classList.add('hidden');
     const link = document.getElementById('export-game-link');
@@ -1588,13 +1621,17 @@ document.addEventListener('DOMContentLoaded', function() {
             // settings carry the flag; the job result may carry it too).
             const usedFixed = (data.source_is_fixed_eyes
                 || (data.variant && data.variant.settings && data.variant.settings.source_is_fixed_eyes));
-            const eyesNote = usedFixed ? ' (includes your fixed eyes &amp; blink)' : '';
+            const usedRigged = (data.source_is_rigged
+                || (data.variant && data.variant.settings && data.variant.settings.source_is_rigged));
+            const sourceNote = usedRigged
+                ? ' (includes your uploaded animation clips)'
+                : (usedFixed ? ' (includes your fixed eyes &amp; blink)' : '');
             gameOptStatus.innerHTML =
                 `Game-optimized version ready: ${mb(optimizedSize)} MB from ${mb(data.original_size)} MB ` +
-                `(${savings.toFixed(1)}% smaller)${eyesNote}. ` +
+                `(${savings.toFixed(1)}% smaller)${sourceNote}. ` +
                 `<button type="button" class="font-semibold text-teal-700 hover:text-teal-900 underline" onclick="switchVariant('game')">View it</button>`;
             // Attached to this model -- reveal the toggle + download entry in place.
-            revealGameOptimized(optimizedSize, usedFixed);
+            revealGameOptimized(optimizedSize, usedFixed, usedRigged);
         }
 
         async function pollGameOptimizeJob(statusUrl) {
@@ -1652,6 +1689,98 @@ document.addEventListener('DOMContentLoaded', function() {
             } finally {
                 gameOptRun.disabled = false;
                 gameOptRun.classList.remove('opacity-70', 'cursor-not-allowed');
+            }
+        });
+    }
+
+    const animationSourceToggle = document.getElementById('animation-source-toggle');
+    const animationSourcePanel = document.getElementById('animation-source-panel');
+    const animationSourceForm = document.getElementById('animation-source-form');
+    const animationSourceFile = document.getElementById('animation-source-file');
+    const animationSourceReoptimize = document.getElementById('animation-source-reoptimize');
+    const animationSourceStatus = document.getElementById('animation-source-status');
+    if (animationSourceToggle && animationSourcePanel) {
+        animationSourceToggle.addEventListener('click', () => {
+            animationSourcePanel.classList.toggle('hidden');
+        });
+    }
+    if (animationSourceForm && animationSourceStatus) {
+        async function parseAnimationSourceResponse(response) {
+            const contentType = response.headers.get('content-type') || '';
+            if (contentType.includes('application/json')) return await response.json();
+            const text = (await response.text()).trim();
+            return { error: text || `HTTP ${response.status}` };
+        }
+
+        async function pollAnimationSourceOptimize(statusUrl) {
+            for (let attempt = 0; attempt < 240; attempt += 1) {
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                const response = await fetch(statusUrl, { headers: { 'Accept': 'application/json' } });
+                const data = await parseAnimationSourceResponse(response);
+                if (!response.ok) throw new Error(data.error || 'Could not check optimization status.');
+                const job = data.job || {};
+                if (job.status === 'done') {
+                    const size = job.optimized_size || (job.variant && job.variant.size) || 0;
+                    revealGameOptimized(size, false, true);
+                    animationSourceStatus.innerHTML = 'Animated source saved and game copy rebuilt. '
+                        + "<button type=\"button\" class=\"font-semibold text-cyan-700 hover:text-cyan-900 underline\" onclick=\"switchVariant('game')\">View it</button>";
+                    return;
+                }
+                if (job.status === 'failed') throw new Error(job.error || 'Game optimization failed.');
+                animationSourceStatus.textContent = job.status === 'running'
+                    ? 'Animated source saved. Rebuilding game copy...'
+                    : 'Animated source saved. Optimization queued...';
+            }
+            throw new Error('Optimization is still running. Refresh this page in a few minutes.');
+        }
+
+        animationSourceForm.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            const file = animationSourceFile && animationSourceFile.files && animationSourceFile.files[0];
+            if (!file) {
+                animationSourceStatus.textContent = 'Choose the animated GLB/GLTF first.';
+                return;
+            }
+            const submit = animationSourceForm.querySelector('button[type="submit"]');
+            if (submit) {
+                submit.disabled = true;
+                submit.classList.add('opacity-70', 'cursor-not-allowed');
+            }
+            animationSourceStatus.textContent = 'Uploading animated source...';
+            try {
+                const fd = new FormData();
+                fd.append('file', file);
+                fd.append('reoptimize', animationSourceReoptimize && animationSourceReoptimize.checked ? '1' : '0');
+                const response = await fetch('/api/model/{{ model.id }}/animation-source', {
+                    method: 'POST',
+                    headers: { 'Accept': 'application/json' },
+                    body: fd
+                });
+                const data = await parseAnimationSourceResponse(response);
+                if (!response.ok || !data.success) throw new Error(data.error || 'Animated source upload failed.');
+
+                HAS_RIGGED_VARIANT = true;
+                const rl = document.getElementById('export-rigged-link');
+                const rd = document.getElementById('export-rigged-divider');
+                if (rl) rl.classList.remove('hidden');
+                if (rd) rd.classList.remove('hidden');
+                const riggedNote = document.getElementById('game-opt-rigged-note');
+                if (riggedNote) riggedNote.classList.remove('hidden');
+
+                if (data.status_url) {
+                    await pollAnimationSourceOptimize(data.status_url);
+                } else {
+                    const count = (data.animations || []).length;
+                    animationSourceStatus.textContent = `Animated source saved${count ? ` with ${count} clip(s)` : ''}.`;
+                    hideGameOptimized();
+                }
+            } catch (error) {
+                animationSourceStatus.textContent = error.message || 'Animated source upload failed.';
+            } finally {
+                if (submit) {
+                    submit.disabled = false;
+                    submit.classList.remove('opacity-70', 'cursor-not-allowed');
+                }
             }
         });
     }
