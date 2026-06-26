@@ -5335,6 +5335,18 @@ _conversion_backfill_state = {
     'finished_at': None,
     'last_error': None,
 }
+_LOD_BACKFILL_LOCK = threading.Lock()
+_lod_backfill_state = {
+    'running': False,
+    'total': 0,
+    'done': 0,
+    'failed': 0,
+    'skipped': 0,
+    'current': None,
+    'started_at': None,
+    'finished_at': None,
+    'last_error': None,
+}
 _FBX_AVATAR_IMPORT_LOCK = threading.Lock()
 _fbx_avatar_import_state = {
     'running': False,
@@ -6335,6 +6347,110 @@ def admin_conversion_backfill_status():
         return jsonify({'error': 'Unauthorized'}), 401
     with _CONVERSION_BACKFILL_LOCK:
         return jsonify(dict(_conversion_backfill_state))
+
+
+def _run_lod_backfill(app, *, limit=None):
+    with app.app_context():
+        try:
+            import shutil
+            if not shutil.which('gltfpack'):
+                with _LOD_BACKFILL_LOCK:
+                    _lod_backfill_state['running'] = False
+                    _lod_backfill_state['last_error'] = 'gltfpack is not installed on the server.'
+                    _lod_backfill_state['finished_at'] = datetime.utcnow().isoformat()
+                return
+
+            ids = Model3D.optimizable_ids()
+            todo = []
+            skipped = 0
+            for mid in ids:
+                model = Model3D.get_by_id(mid)
+                if not model:
+                    skipped += 1
+                    continue
+                if _is_rigged_or_avatar(model):
+                    skipped += 1
+                    continue
+                if _lod_variants_complete(model):
+                    skipped += 1
+                    continue
+                todo.append(model)
+            if limit:
+                todo = todo[:max(1, int(limit))]
+            with _LOD_BACKFILL_LOCK:
+                _lod_backfill_state['total'] = len(todo)
+                _lod_backfill_state['skipped'] = skipped
+            for model in todo:
+                with _LOD_BACKFILL_LOCK:
+                    _lod_backfill_state['current'] = model.name or model.id
+                try:
+                    _run_lod_optimizer(model, model.user_id)
+                    with _LOD_BACKFILL_LOCK:
+                        _lod_backfill_state['done'] += 1
+                except Exception as e:
+                    print(f"LOD backfill failed for {model.id}: {e}", flush=True)
+                    with _LOD_BACKFILL_LOCK:
+                        _lod_backfill_state['failed'] += 1
+                        _lod_backfill_state['last_error'] = f"{model.name or model.id}: {str(e)[:200]}"
+        except Exception as e:
+            print(f"LOD backfill runner crashed: {e}", flush=True)
+            with _LOD_BACKFILL_LOCK:
+                _lod_backfill_state['last_error'] = str(e)[:300]
+        finally:
+            with _LOD_BACKFILL_LOCK:
+                _lod_backfill_state['running'] = False
+                _lod_backfill_state['current'] = None
+                _lod_backfill_state['finished_at'] = datetime.utcnow().isoformat()
+
+
+@api_bp.route('/admin/lod-backfill', methods=['POST', 'GET'])
+def admin_lod_backfill():
+    if not _admin_or_asset_admin_session_ok():
+        return jsonify({'error': 'Unauthorized'}), 401
+    if request.method == 'GET':
+        with _LOD_BACKFILL_LOCK:
+            return jsonify(dict(_lod_backfill_state))
+
+    sync = request.args.get('sync', 'false').lower() in {'1', 'true', 'yes'}
+    limit = request.args.get('limit', type=int)
+    with _LOD_BACKFILL_LOCK:
+        if _lod_backfill_state['running']:
+            return jsonify({'status': 'already_running', **_lod_backfill_state})
+        _lod_backfill_state.update({
+            'running': True,
+            'total': 0,
+            'done': 0,
+            'failed': 0,
+            'skipped': 0,
+            'current': None,
+            'started_at': datetime.utcnow().isoformat(),
+            'finished_at': None,
+            'last_error': None,
+        })
+
+    if sync:
+        _run_lod_backfill(current_app._get_current_object(), limit=limit)
+        with _LOD_BACKFILL_LOCK:
+            return jsonify({'status': 'finished', **_lod_backfill_state})
+
+    thread = threading.Thread(
+        target=_run_lod_backfill,
+        args=(current_app._get_current_object(),),
+        kwargs={'limit': limit},
+        name='lod-backfill',
+        daemon=True,
+    )
+    thread.start()
+    with _LOD_BACKFILL_LOCK:
+        return jsonify({'status': 'started', **_lod_backfill_state})
+
+
+@api_bp.route('/admin/lod-backfill/status', methods=['GET'])
+def admin_lod_backfill_status():
+    if not _admin_or_asset_admin_session_ok():
+        return jsonify({'error': 'Unauthorized'}), 401
+    with _LOD_BACKFILL_LOCK:
+        return jsonify(dict(_lod_backfill_state))
 
 
 def _run_backfill_optimization(app):

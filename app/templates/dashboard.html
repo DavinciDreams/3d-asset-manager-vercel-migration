@@ -147,6 +147,10 @@
                         class="bg-teal-600 text-white px-4 py-2 rounded-lg font-semibold hover:bg-teal-700 disabled:opacity-50 disabled:cursor-not-allowed">
                     <i class="fas fa-tools mr-2"></i>Run conversion backfill
                 </button>
+                <button type="button" id="lod-backfill-btn"
+                        class="bg-indigo-600 text-white px-4 py-2 rounded-lg font-semibold hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed">
+                    <i class="fas fa-layer-group mr-2"></i>Run LOD backfill
+                </button>
                 <button type="button" id="pipeline-reconcile-btn"
                         class="bg-slate-900 text-white px-4 py-2 rounded-lg font-semibold hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed">
                     <i class="fas fa-heartbeat mr-2"></i>Repair pipeline
@@ -171,6 +175,17 @@
             </div>
             <p id="conversion-backfill-current" class="text-xs text-gray-500 mt-2"></p>
             <p id="conversion-backfill-error" class="text-xs text-red-600 mt-1"></p>
+        </div>
+        <div id="lod-backfill-status" class="hidden mt-4 pt-4 border-t border-gray-100" aria-live="polite">
+            <div class="flex justify-between text-sm text-gray-600 mb-2">
+                <span id="lod-backfill-label">Idle</span>
+                <span id="lod-backfill-counts"></span>
+            </div>
+            <div class="w-full bg-gray-200 rounded-full h-2.5 overflow-hidden">
+                <div id="lod-backfill-bar" class="bg-indigo-500 h-2.5 rounded-full transition-all" style="width:0%"></div>
+            </div>
+            <p id="lod-backfill-current" class="text-xs text-gray-500 mt-2"></p>
+            <p id="lod-backfill-error" class="text-xs text-red-600 mt-1"></p>
         </div>
         <div id="fbx-avatar-import-status" class="hidden mt-4 pt-4 border-t border-gray-100" aria-live="polite">
             <div class="flex justify-between text-sm text-gray-600 mb-2">
@@ -764,6 +779,82 @@ async function pollOptimizeJob(statusUrl, modelId) {
         wrap.classList.remove('hidden');
         error.textContent = err.message;
     }));
+    document.addEventListener('DOMContentLoaded', () => fetchStatus().catch(() => {}));
+})();
+
+// Admin LOD backfill. Generates Tellus-facing LOD0/1/2 variants under each
+// original model id, so Tellus can use its stable asset LOD URLs.
+(function () {
+    const runBtn = document.getElementById('lod-backfill-btn');
+    const wrap = document.getElementById('lod-backfill-status');
+    const label = document.getElementById('lod-backfill-label');
+    const counts = document.getElementById('lod-backfill-counts');
+    const bar = document.getElementById('lod-backfill-bar');
+    const current = document.getElementById('lod-backfill-current');
+    const error = document.getElementById('lod-backfill-error');
+    let pollTimer = null;
+
+    if (!runBtn) return;
+
+    function render(state) {
+        wrap.classList.remove('hidden');
+        const total = state.total || 0;
+        const processed = (state.done || 0) + (state.failed || 0);
+        const pct = total ? Math.min(100, Math.round((processed / total) * 100)) : (state.running ? 0 : 100);
+        bar.style.width = `${pct}%`;
+        label.textContent = state.running ? 'Generating LODs...' : (state.finished_at ? 'Finished' : 'Idle');
+        counts.textContent = total
+            ? `${processed}/${total} (${state.done || 0} done, ${state.failed || 0} failed, ${state.skipped || 0} skipped)`
+            : (state.running ? 'starting...' : '');
+        current.textContent = state.current ? `Current: ${state.current}` : '';
+        error.textContent = state.last_error ? `Last error: ${state.last_error}` : '';
+        runBtn.disabled = Boolean(state.running);
+        if (state.running && !pollTimer) startPolling();
+        if (!state.running && pollTimer) {
+            clearInterval(pollTimer);
+            pollTimer = null;
+        }
+    }
+
+    async function fetchStatus() {
+        const response = await fetch('/api/admin/lod-backfill/status', {
+            headers: { 'Accept': 'application/json' },
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            throw new Error(data.error || `LOD status failed (HTTP ${response.status}).`);
+        }
+        render(data);
+    }
+
+    function startPolling() {
+        if (!pollTimer) {
+            pollTimer = setInterval(() => fetchStatus().catch(() => {}), 2000);
+        }
+    }
+
+    runBtn.addEventListener('click', async () => {
+        runBtn.disabled = true;
+        label.textContent = 'Starting...';
+        error.textContent = '';
+        wrap.classList.remove('hidden');
+        try {
+            const response = await fetch('/api/admin/lod-backfill', {
+                method: 'POST',
+                headers: { 'Accept': 'application/json' },
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                throw new Error(data.error || `LOD backfill failed (HTTP ${response.status}).`);
+            }
+            render(data);
+            startPolling();
+        } catch (err) {
+            runBtn.disabled = false;
+            error.textContent = err.message;
+        }
+    });
+
     document.addEventListener('DOMContentLoaded', () => fetchStatus().catch(() => {}));
 })();
 

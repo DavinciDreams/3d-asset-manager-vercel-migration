@@ -114,7 +114,22 @@ def test_asset_admin_dashboard_can_start_conversion_backfill(monkeypatch):
     app = create_app()
     client = app.test_client()
     with app.app_context():
-        _ensure_user("dashboard-admin")
+        owner = _ensure_user("dashboard-admin")
+        source = _minimal_glb({"asset": {"version": "2.0"}, "scene": 0})
+        Model3D(
+            name="Dashboard LOD Target",
+            file_format="glb",
+            file_size=len(source),
+            user_id=owner.id,
+            is_public=True,
+            gridfs_file_id=app.config["FILE_STORE"].put(
+                source,
+                filename="dashboard-lod-target.glb",
+                content_type="model/gltf-binary",
+                metadata={},
+            ),
+            asset_types=[],
+        ).save()
 
     login = client.post("/auth/login", data={
         "login_field": "dashboard-admin",
@@ -123,10 +138,13 @@ def test_asset_admin_dashboard_can_start_conversion_backfill(monkeypatch):
     assert login.status_code == 200
     html = login.get_data(as_text=True)
     assert "Run conversion backfill" in html
+    assert "Run LOD backfill" in html
     assert "Repair pipeline" in html
     assert "Import FBX avatars" in html
     assert "Check media queue" in html
     assert "/api/admin/conversion-backfill?force=true" in html
+    assert "/api/admin/lod-backfill" in html
+    assert "/api/admin/lod-backfill/status" in html
     assert "/api/admin/fbx-avatar-import?tag=robot" in html
     assert "/api/admin/pipeline/status" in html
 
@@ -142,6 +160,22 @@ def test_asset_admin_dashboard_can_start_conversion_backfill(monkeypatch):
     assert "media_queue" in pipeline.get_json()
     assert "thumbnail_render" in pipeline.get_json()
     assert set(pipeline.get_json()["thumbnail_render"]) == {"enabled", "available"}
+
+    import app.api as api
+    import shutil
+
+    monkeypatch.setattr(shutil, "which", lambda name: "gltfpack" if name == "gltfpack" else None)
+    monkeypatch.setattr(api, "_run_lod_optimizer", lambda model, owner_id=None: {"success": True})
+    lod_start = client.post("/api/admin/lod-backfill?sync=true&limit=1")
+    assert lod_start.status_code == 200, lod_start.get_json()
+    lod_status = lod_start.get_json()
+    assert lod_status.get("running") is False
+    assert lod_status.get("done") == 1
+    assert "skipped" in lod_status
+
+    lod_poll = client.get("/api/admin/lod-backfill/status")
+    assert lod_poll.status_code == 200, lod_poll.get_json()
+    assert lod_poll.get_json().get("done") == 1
 
 
 def test_asset_admin_can_import_fbx_avatar_batch(monkeypatch, tmp_path):
