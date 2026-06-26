@@ -1195,6 +1195,64 @@ def get_openapi_spec(base_url=''):
                     },
                 }
             },
+            '/assets/model/{model_id}/game-optimized': {
+                'get': {
+                    'tags': ['Files'],
+                    'summary': 'Tellus asset URL for the game-optimized GLB',
+                    'description': 'Alias of /model/{model_id}/game-optimized used by Tellus asset LOD URL generation.',
+                    'parameters': [
+                        {'name': 'model_id', 'in': 'path', 'required': True, 'schema': {'type': 'string'}},
+                        {'name': 'Range', 'in': 'header', 'required': False, 'schema': {'type': 'string'}},
+                    ],
+                    'responses': {
+                        '200': {'description': 'The game-optimized GLB'},
+                        '206': {'description': 'Partial content (range request)'},
+                        '304': {'description': 'Not modified (ETag matched)'},
+                        '403': _error_response('Access denied (private model)'),
+                        '404': _error_response('No game-optimized variant'),
+                    },
+                }
+            },
+            '/assets/model/{model_id}/lod/{level}': {
+                'get': {
+                    'tags': ['Files'],
+                    'summary': 'Tellus asset URL for generated LOD GLBs',
+                    'description': (
+                        'Returns ModelVariant(kind=lod, level=0/1/2) under the original asset id. '
+                        'LOD 0 falls back to the game-optimized variant until explicit LOD backfill exists.'
+                    ),
+                    'parameters': [
+                        {'name': 'model_id', 'in': 'path', 'required': True, 'schema': {'type': 'string'}},
+                        {'name': 'level', 'in': 'path', 'required': True, 'schema': {'type': 'integer', 'enum': [0, 1, 2]}},
+                        {'name': 'Range', 'in': 'header', 'required': False, 'schema': {'type': 'string'}},
+                    ],
+                    'responses': {
+                        '200': {'description': 'The LOD GLB'},
+                        '206': {'description': 'Partial content (range request)'},
+                        '304': {'description': 'Not modified (ETag matched)'},
+                        '403': _error_response('Access denied (private model)'),
+                        '404': _error_response('No LOD variant'),
+                    },
+                }
+            },
+            '/assets/model/{model_id}/impostor': {
+                'get': {
+                    'tags': ['Files'],
+                    'summary': 'Tellus asset URL for generated impostor media',
+                    'description': 'Returns ModelVariant(kind=impostor) under the original asset id.',
+                    'parameters': [
+                        {'name': 'model_id', 'in': 'path', 'required': True, 'schema': {'type': 'string'}},
+                        {'name': 'Range', 'in': 'header', 'required': False, 'schema': {'type': 'string'}},
+                    ],
+                    'responses': {
+                        '200': {'description': 'The impostor media file'},
+                        '206': {'description': 'Partial content (range request)'},
+                        '304': {'description': 'Not modified (ETag matched)'},
+                        '403': _error_response('Access denied (private model)'),
+                        '404': _error_response('No impostor variant'),
+                    },
+                }
+            },
             '/models/browse': {
                 'get': {
                     'tags': ['Models'],

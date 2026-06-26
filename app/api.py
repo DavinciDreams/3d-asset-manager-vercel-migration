@@ -39,6 +39,10 @@ MIME_TYPES = {
     'stl': 'application/octet-stream',
     'vrm': 'model/gltf-binary',
     'vrma': 'application/octet-stream',
+    'png': 'image/png',
+    'jpg': 'image/jpeg',
+    'jpeg': 'image/jpeg',
+    'webp': 'image/webp',
 }
 
 
@@ -1039,70 +1043,138 @@ def get_game_optimized(model_id):
         if not variant or not variant.file_id:
             return jsonify({'error': 'No game-optimized variant'}), 404
 
-        file_id = variant.file_id
-        etag = f'"game-{file_id}"'
-        cache_control = 'public, max-age=31536000, immutable'
-        as_download = request.args.get('download') in ('1', 'true', 'yes')
-        content_type = _mime_for('glb')
-        download_name = f'{_safe_stem(model)}-game.glb'
-
-        if request.if_none_match and etag in request.if_none_match:
-            resp = make_response('', 304)
-            resp.headers['ETag'] = etag
-            resp.headers['Cache-Control'] = cache_control
-            resp.headers['Accept-Ranges'] = 'bytes'
-            return resp
-
-        fs = current_app.config['FILE_STORE']
-        range_header = request.headers.get('Range')
-
-        if not as_download and range_header and range_header.startswith('bytes=') and hasattr(fs, 'get_range'):
-            spec = range_header.split('=', 1)[1].split(',')[0].strip()
-            start_s, _, end_s = spec.partition('-')
-            try:
-                start = int(start_s) if start_s else 0
-                provisional_end = int(end_s) if end_s else None
-                probe_end = provisional_end if provisional_end is not None else start
-                _, total, _ = fs.get_range(file_id, start, probe_end)
-                if total <= 0:
-                    raise ValueError('empty')
-                end = provisional_end if provisional_end is not None else total - 1
-                end = min(end, total - 1)
-                if start > end or start >= total:
-                    resp = make_response('', 416)
-                    resp.headers['Content-Range'] = f'bytes */{total}'
-                    resp.headers['Accept-Ranges'] = 'bytes'
-                    return resp
-                chunk, total, _ = fs.get_range(file_id, start, end)
-                resp = make_response(chunk, 206)
-                resp.headers['Content-Type'] = content_type
-                resp.headers['Content-Length'] = str(len(chunk))
-                resp.headers['Content-Range'] = f'bytes {start}-{end}/{total}'
-                resp.headers['Accept-Ranges'] = 'bytes'
-                resp.headers['ETag'] = etag
-                resp.headers['Cache-Control'] = cache_control
-                return resp
-            except Exception as e:
-                print(f"Game-optimized range fetch fell back to full body: {e}")
-
-        data = variant.read_data()
-        if data is None:
-            return jsonify({'error': 'Variant file not found'}), 404
-        data = _force_meshopt_required_for_external_fallback(data)
-
-        response = make_response(data)
-        response.headers['Content-Type'] = content_type
-        response.headers['Content-Length'] = str(len(data))
-        response.headers['Accept-Ranges'] = 'bytes'
-        response.headers['ETag'] = etag
-        response.headers['Cache-Control'] = cache_control
-        if as_download:
-            response.headers['Content-Disposition'] = f'attachment; filename="{download_name}"'
-        return response
+        return _serve_variant_file(model, variant, etag_prefix='game', filename_suffix='game')
 
     except Exception as e:
         print(f"API game-optimized fetch error: {e}")
         return jsonify({'error': 'Game-optimized fetch failed'}), 500
+
+
+@api_bp.route('/assets/model/<model_id>/game-optimized')
+def get_asset_game_optimized(model_id):
+    """Tellus-compatible alias for a model's game-optimized variant."""
+    return get_game_optimized(model_id)
+
+
+@api_bp.route('/assets/model/<model_id>/lod/<int:level>')
+def get_asset_lod(model_id, level):
+    """Serve generated LOD variants for Tellus.
+
+    LOD variants are stored under the source asset id as ModelVariant(kind='lod',
+    level=N). While the backfill pipeline is still catching up, LOD 0 falls back
+    to the existing game-optimized variant because it is the current runtime GLB.
+    """
+    if level not in {0, 1, 2}:
+        return jsonify({'error': 'LOD level must be 0, 1, or 2'}), 404
+    try:
+        model = Model3D.get_by_id_or_alias(model_id)
+        if not model:
+            return jsonify({'error': 'Model not found'}), 404
+        if not _can_access_model(model):
+            return jsonify({'error': 'Access denied'}), 403
+
+        variant = ModelVariant.get(model.id, 'lod', level=level)
+        etag_prefix = f'lod-{level}'
+        filename_suffix = f'lod-{level}'
+        if (not variant or not variant.file_id) and level == 0:
+            variant = ModelVariant.get(model.id, 'game')
+            etag_prefix = 'game'
+            filename_suffix = 'game'
+        if not variant or not variant.file_id:
+            return jsonify({'error': f'No LOD {level} variant'}), 404
+
+        return _serve_variant_file(model, variant, etag_prefix=etag_prefix, filename_suffix=filename_suffix)
+    except Exception as e:
+        print(f"API LOD fetch error: {e}")
+        return jsonify({'error': 'LOD fetch failed'}), 500
+
+
+@api_bp.route('/assets/model/<model_id>/impostor')
+def get_asset_impostor(model_id):
+    """Serve a generated impostor variant for Tellus.
+
+    The impostor may be an image atlas or another compact runtime file; its
+    stored variant file_format controls the response content type.
+    """
+    try:
+        model = Model3D.get_by_id_or_alias(model_id)
+        if not model:
+            return jsonify({'error': 'Model not found'}), 404
+        if not _can_access_model(model):
+            return jsonify({'error': 'Access denied'}), 403
+
+        variant = ModelVariant.get(model.id, 'impostor')
+        if not variant or not variant.file_id:
+            return jsonify({'error': 'No impostor variant'}), 404
+        return _serve_variant_file(model, variant, etag_prefix='impostor', filename_suffix='impostor')
+    except Exception as e:
+        print(f"API impostor fetch error: {e}")
+        return jsonify({'error': 'Impostor fetch failed'}), 500
+
+
+def _serve_variant_file(model, variant, *, etag_prefix, filename_suffix):
+    file_id = variant.file_id
+    fmt = (variant.file_format or 'glb').lower()
+    etag = f'"{etag_prefix}-{file_id}"'
+    cache_control = 'public, max-age=31536000, immutable'
+    as_download = request.args.get('download') in ('1', 'true', 'yes')
+    content_type = _mime_for(fmt)
+    download_name = f'{_safe_stem(model)}-{filename_suffix}.{fmt}'
+
+    if request.if_none_match and etag in request.if_none_match:
+        resp = make_response('', 304)
+        resp.headers['ETag'] = etag
+        resp.headers['Cache-Control'] = cache_control
+        resp.headers['Accept-Ranges'] = 'bytes'
+        return resp
+
+    fs = current_app.config['FILE_STORE']
+    range_header = request.headers.get('Range')
+
+    if not as_download and range_header and range_header.startswith('bytes=') and hasattr(fs, 'get_range'):
+        spec = range_header.split('=', 1)[1].split(',')[0].strip()
+        start_s, _, end_s = spec.partition('-')
+        try:
+            start = int(start_s) if start_s else 0
+            provisional_end = int(end_s) if end_s else None
+            probe_end = provisional_end if provisional_end is not None else start
+            _, total, _ = fs.get_range(file_id, start, probe_end)
+            if total <= 0:
+                raise ValueError('empty')
+            end = provisional_end if provisional_end is not None else total - 1
+            end = min(end, total - 1)
+            if start > end or start >= total:
+                resp = make_response('', 416)
+                resp.headers['Content-Range'] = f'bytes */{total}'
+                resp.headers['Accept-Ranges'] = 'bytes'
+                return resp
+            chunk, total, _ = fs.get_range(file_id, start, end)
+            resp = make_response(chunk, 206)
+            resp.headers['Content-Type'] = content_type
+            resp.headers['Content-Length'] = str(len(chunk))
+            resp.headers['Content-Range'] = f'bytes {start}-{end}/{total}'
+            resp.headers['Accept-Ranges'] = 'bytes'
+            resp.headers['ETag'] = etag
+            resp.headers['Cache-Control'] = cache_control
+            return resp
+        except Exception as e:
+            print(f"{etag_prefix} range fetch fell back to full body: {e}")
+
+    data = variant.read_data()
+    if data is None:
+        return jsonify({'error': 'Variant file not found'}), 404
+    if fmt in {'glb', 'vrm'}:
+        data = _force_meshopt_required_for_external_fallback(data)
+
+    response = make_response(data)
+    response.headers['Content-Type'] = content_type
+    response.headers['Content-Length'] = str(len(data))
+    response.headers['Accept-Ranges'] = 'bytes'
+    response.headers['ETag'] = etag
+    response.headers['Cache-Control'] = cache_control
+    if as_download:
+        response.headers['Content-Disposition'] = f'attachment; filename="{download_name}"'
+    return response
 
 
 # Hard cap on an uploaded baked GLB. Eyeballs add a few hundred KB at most; the
