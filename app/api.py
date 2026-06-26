@@ -39,6 +39,10 @@ MIME_TYPES = {
     'stl': 'application/octet-stream',
     'vrm': 'model/gltf-binary',
     'vrma': 'application/octet-stream',
+    'png': 'image/png',
+    'jpg': 'image/jpeg',
+    'jpeg': 'image/jpeg',
+    'webp': 'image/webp',
 }
 
 
@@ -1039,70 +1043,138 @@ def get_game_optimized(model_id):
         if not variant or not variant.file_id:
             return jsonify({'error': 'No game-optimized variant'}), 404
 
-        file_id = variant.file_id
-        etag = f'"game-{file_id}"'
-        cache_control = 'public, max-age=31536000, immutable'
-        as_download = request.args.get('download') in ('1', 'true', 'yes')
-        content_type = _mime_for('glb')
-        download_name = f'{_safe_stem(model)}-game.glb'
-
-        if request.if_none_match and etag in request.if_none_match:
-            resp = make_response('', 304)
-            resp.headers['ETag'] = etag
-            resp.headers['Cache-Control'] = cache_control
-            resp.headers['Accept-Ranges'] = 'bytes'
-            return resp
-
-        fs = current_app.config['FILE_STORE']
-        range_header = request.headers.get('Range')
-
-        if not as_download and range_header and range_header.startswith('bytes=') and hasattr(fs, 'get_range'):
-            spec = range_header.split('=', 1)[1].split(',')[0].strip()
-            start_s, _, end_s = spec.partition('-')
-            try:
-                start = int(start_s) if start_s else 0
-                provisional_end = int(end_s) if end_s else None
-                probe_end = provisional_end if provisional_end is not None else start
-                _, total, _ = fs.get_range(file_id, start, probe_end)
-                if total <= 0:
-                    raise ValueError('empty')
-                end = provisional_end if provisional_end is not None else total - 1
-                end = min(end, total - 1)
-                if start > end or start >= total:
-                    resp = make_response('', 416)
-                    resp.headers['Content-Range'] = f'bytes */{total}'
-                    resp.headers['Accept-Ranges'] = 'bytes'
-                    return resp
-                chunk, total, _ = fs.get_range(file_id, start, end)
-                resp = make_response(chunk, 206)
-                resp.headers['Content-Type'] = content_type
-                resp.headers['Content-Length'] = str(len(chunk))
-                resp.headers['Content-Range'] = f'bytes {start}-{end}/{total}'
-                resp.headers['Accept-Ranges'] = 'bytes'
-                resp.headers['ETag'] = etag
-                resp.headers['Cache-Control'] = cache_control
-                return resp
-            except Exception as e:
-                print(f"Game-optimized range fetch fell back to full body: {e}")
-
-        data = variant.read_data()
-        if data is None:
-            return jsonify({'error': 'Variant file not found'}), 404
-        data = _force_meshopt_required_for_external_fallback(data)
-
-        response = make_response(data)
-        response.headers['Content-Type'] = content_type
-        response.headers['Content-Length'] = str(len(data))
-        response.headers['Accept-Ranges'] = 'bytes'
-        response.headers['ETag'] = etag
-        response.headers['Cache-Control'] = cache_control
-        if as_download:
-            response.headers['Content-Disposition'] = f'attachment; filename="{download_name}"'
-        return response
+        return _serve_variant_file(model, variant, etag_prefix='game', filename_suffix='game')
 
     except Exception as e:
         print(f"API game-optimized fetch error: {e}")
         return jsonify({'error': 'Game-optimized fetch failed'}), 500
+
+
+@api_bp.route('/assets/model/<model_id>/game-optimized')
+def get_asset_game_optimized(model_id):
+    """Tellus-compatible alias for a model's game-optimized variant."""
+    return get_game_optimized(model_id)
+
+
+@api_bp.route('/assets/model/<model_id>/lod/<int:level>')
+def get_asset_lod(model_id, level):
+    """Serve generated LOD variants for Tellus.
+
+    LOD variants are stored under the source asset id as ModelVariant(kind='lod',
+    level=N). While the backfill pipeline is still catching up, LOD 0 falls back
+    to the existing game-optimized variant because it is the current runtime GLB.
+    """
+    if level not in {0, 1, 2}:
+        return jsonify({'error': 'LOD level must be 0, 1, or 2'}), 404
+    try:
+        model = Model3D.get_by_id_or_alias(model_id)
+        if not model:
+            return jsonify({'error': 'Model not found'}), 404
+        if not _can_access_model(model):
+            return jsonify({'error': 'Access denied'}), 403
+
+        variant = ModelVariant.get(model.id, 'lod', level=level)
+        etag_prefix = f'lod-{level}'
+        filename_suffix = f'lod-{level}'
+        if (not variant or not variant.file_id) and level == 0:
+            variant = ModelVariant.get(model.id, 'game')
+            etag_prefix = 'game'
+            filename_suffix = 'game'
+        if not variant or not variant.file_id:
+            return jsonify({'error': f'No LOD {level} variant'}), 404
+
+        return _serve_variant_file(model, variant, etag_prefix=etag_prefix, filename_suffix=filename_suffix)
+    except Exception as e:
+        print(f"API LOD fetch error: {e}")
+        return jsonify({'error': 'LOD fetch failed'}), 500
+
+
+@api_bp.route('/assets/model/<model_id>/impostor')
+def get_asset_impostor(model_id):
+    """Serve a generated impostor variant for Tellus.
+
+    The impostor may be an image atlas or another compact runtime file; its
+    stored variant file_format controls the response content type.
+    """
+    try:
+        model = Model3D.get_by_id_or_alias(model_id)
+        if not model:
+            return jsonify({'error': 'Model not found'}), 404
+        if not _can_access_model(model):
+            return jsonify({'error': 'Access denied'}), 403
+
+        variant = ModelVariant.get(model.id, 'impostor')
+        if not variant or not variant.file_id:
+            return jsonify({'error': 'No impostor variant'}), 404
+        return _serve_variant_file(model, variant, etag_prefix='impostor', filename_suffix='impostor')
+    except Exception as e:
+        print(f"API impostor fetch error: {e}")
+        return jsonify({'error': 'Impostor fetch failed'}), 500
+
+
+def _serve_variant_file(model, variant, *, etag_prefix, filename_suffix):
+    file_id = variant.file_id
+    fmt = (variant.file_format or 'glb').lower()
+    etag = f'"{etag_prefix}-{file_id}"'
+    cache_control = 'public, max-age=31536000, immutable'
+    as_download = request.args.get('download') in ('1', 'true', 'yes')
+    content_type = _mime_for(fmt)
+    download_name = f'{_safe_stem(model)}-{filename_suffix}.{fmt}'
+
+    if request.if_none_match and etag in request.if_none_match:
+        resp = make_response('', 304)
+        resp.headers['ETag'] = etag
+        resp.headers['Cache-Control'] = cache_control
+        resp.headers['Accept-Ranges'] = 'bytes'
+        return resp
+
+    fs = current_app.config['FILE_STORE']
+    range_header = request.headers.get('Range')
+
+    if not as_download and range_header and range_header.startswith('bytes=') and hasattr(fs, 'get_range'):
+        spec = range_header.split('=', 1)[1].split(',')[0].strip()
+        start_s, _, end_s = spec.partition('-')
+        try:
+            start = int(start_s) if start_s else 0
+            provisional_end = int(end_s) if end_s else None
+            probe_end = provisional_end if provisional_end is not None else start
+            _, total, _ = fs.get_range(file_id, start, probe_end)
+            if total <= 0:
+                raise ValueError('empty')
+            end = provisional_end if provisional_end is not None else total - 1
+            end = min(end, total - 1)
+            if start > end or start >= total:
+                resp = make_response('', 416)
+                resp.headers['Content-Range'] = f'bytes */{total}'
+                resp.headers['Accept-Ranges'] = 'bytes'
+                return resp
+            chunk, total, _ = fs.get_range(file_id, start, end)
+            resp = make_response(chunk, 206)
+            resp.headers['Content-Type'] = content_type
+            resp.headers['Content-Length'] = str(len(chunk))
+            resp.headers['Content-Range'] = f'bytes {start}-{end}/{total}'
+            resp.headers['Accept-Ranges'] = 'bytes'
+            resp.headers['ETag'] = etag
+            resp.headers['Cache-Control'] = cache_control
+            return resp
+        except Exception as e:
+            print(f"{etag_prefix} range fetch fell back to full body: {e}")
+
+    data = variant.read_data()
+    if data is None:
+        return jsonify({'error': 'Variant file not found'}), 404
+    if fmt in {'glb', 'vrm'}:
+        data = _force_meshopt_required_for_external_fallback(data)
+
+    response = make_response(data)
+    response.headers['Content-Type'] = content_type
+    response.headers['Content-Length'] = str(len(data))
+    response.headers['Accept-Ranges'] = 'bytes'
+    response.headers['ETag'] = etag
+    response.headers['Cache-Control'] = cache_control
+    if as_download:
+        response.headers['Content-Disposition'] = f'attachment; filename="{download_name}"'
+    return response
 
 
 # Hard cap on an uploaded baked GLB. Eyeballs add a few hundred KB at most; the
@@ -4837,6 +4909,182 @@ def _run_game_optimizer(model, owner_id, settings):
         shutil.rmtree(workdir, ignore_errors=True)
 
 
+def _optimizer_source_bytes(model):
+    """Return the best static GLB/GLTF source for derived mesh variants."""
+    src_bytes = None
+    src_fmt = None
+    source_variant_kind = 'original'
+    fixed_variant = ModelVariant.get(model.id, 'fixed_eyes')
+    if fixed_variant and fixed_variant.file_id:
+        data = fixed_variant.read_data()
+        if data:
+            src_bytes = data
+            src_fmt = (fixed_variant.file_format or 'glb').lower()
+            source_variant_kind = 'fixed_eyes'
+    if src_bytes is None:
+        src_bytes, src_fmt = model.get_viewable_data()
+        src_fmt = (src_fmt or model.file_format or '').lower()
+    if not src_bytes:
+        raise FileNotFoundError('Source file not found')
+    if src_fmt not in ('glb', 'gltf'):
+        raise ValueError('LOD generation currently supports GLB/GLTF assets.')
+    if src_fmt == 'glb':
+        src_bytes = _force_meshopt_required_for_external_fallback(src_bytes)
+    return src_bytes, src_fmt, source_variant_kind
+
+
+def _run_lod_optimizer(model, owner_id=None, levels=None):
+    """Generate Tellus-facing LOD GLBs under the original asset id.
+
+    Borrowed design choice from Hyperscape's LOD package: each level is
+    simplified from the original source, never cascaded from the previous LOD.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+
+    if _is_rigged_or_avatar(model):
+        return {
+            'success': False,
+            'skipped': True,
+            'reason': 'rigged_or_avatar',
+            'source_model_id': model.id,
+        }
+
+    gltfpack_bin = shutil.which('gltfpack')
+    if not gltfpack_bin:
+        raise RuntimeError('LOD generation is unavailable because gltfpack is not installed.')
+
+    levels = levels or LOD_OPTIMIZE_LEVELS
+    src_bytes, src_fmt, source_variant_kind = _optimizer_source_bytes(model)
+    source_runtime = _file_derived_metadata(src_bytes, src_fmt)[1]
+    source_mesh_stats = source_runtime.get('mesh_stats')
+    source_physical = source_runtime.get('physical')
+    fs = current_app.config['FILE_STORE']
+    original_size = len(src_bytes)
+    generated = []
+    workdir = tempfile.mkdtemp(prefix='lod_optimize_')
+    try:
+        in_path = os.path.join(workdir, f'input.{src_fmt}')
+        with open(in_path, 'wb') as f:
+            f.write(src_bytes)
+
+        for config in levels:
+            level = int(config['level'])
+            texture_limit = int(config.get('texture_limit') or 0)
+            simplify_ratio = float(config.get('simplify_ratio') or 1)
+            compression_mode = str(config.get('compression_mode') or 'meshopt').lower()
+            out_path = os.path.join(workdir, f'lod{level}.glb')
+            report_path = os.path.join(workdir, f'lod{level}.json')
+            cmd = [
+                gltfpack_bin,
+                '-i', in_path,
+                '-o', out_path,
+                '-si', f'{simplify_ratio:g}',
+                '-r', report_path,
+            ]
+            if compression_mode == 'meshopt':
+                cmd.append('-cc')
+            if texture_limit:
+                cmd.extend(['-tc', '-tl', str(texture_limit)])
+
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=300,
+                check=False,
+            )
+            if result.returncode != 0:
+                msg = (result.stderr or result.stdout or 'gltfpack failed.').strip()
+                raise RuntimeError(f'LOD {level}: {msg[-1000:] or "gltfpack failed."}')
+            with open(out_path, 'rb') as f:
+                out_bytes = f.read()
+            report = {}
+            if os.path.exists(report_path):
+                try:
+                    with open(report_path, 'r', encoding='utf-8') as f:
+                        report = json.load(f)
+                except Exception as e:
+                    print(f"Could not read LOD {level} gltfpack report: {e}")
+
+            runtime = _file_derived_metadata(out_bytes, 'glb')[1]
+            optimized_size = len(out_bytes)
+            savings_ratio = 0 if original_size <= 0 else 1 - (optimized_size / original_size)
+            metadata = {
+                'kind': 'lod',
+                'level': level,
+                'source_model_id': model.id,
+                'source_format': src_fmt,
+                'source_size': original_size,
+                'source_variant_kind': source_variant_kind,
+                'optimized_size': optimized_size,
+                'texture_limit': texture_limit or None,
+                'simplify_ratio': simplify_ratio,
+                'compression_mode': compression_mode,
+                'defaults_version': LOD_OPTIMIZE_DEFAULTS_VERSION,
+                'role': config.get('role'),
+                'gltfpack': {
+                    'mode': compression_mode,
+                    'texture_compression': bool(texture_limit),
+                    'report': report,
+                },
+            }
+            file_id = fs.put(
+                out_bytes,
+                filename=f'{_safe_stem(model)}-lod{level}.glb',
+                content_type=_mime_for('glb'),
+                metadata=metadata,
+            )
+            variant_settings = {
+                'defaults_version': LOD_OPTIMIZE_DEFAULTS_VERSION,
+                'level': level,
+                'role': config.get('role'),
+                'texture_limit': texture_limit,
+                'simplify_ratio': simplify_ratio,
+                'compression_mode': compression_mode,
+                'original_size': original_size,
+                'optimized_size': optimized_size,
+                'savings_ratio': savings_ratio,
+                'source_mesh_stats': source_mesh_stats,
+                'mesh_stats': runtime.get('mesh_stats'),
+                'source_physical': source_physical,
+                'optimized_physical_raw': runtime.get('physical'),
+                'physical': source_physical or runtime.get('physical'),
+                'source_variant_kind': source_variant_kind,
+                'source_runtime_cost': _gltf_runtime_cost_metadata(src_bytes, src_fmt, source_runtime, original_size),
+                'runtime_cost': _gltf_runtime_cost_metadata(out_bytes, 'glb', runtime, optimized_size),
+                'report': report,
+            }
+            variant, old_file_id = ModelVariant.upsert(
+                model.id, 'lod', str(file_id),
+                level=level, file_format='glb', size=optimized_size,
+                settings=variant_settings, status='ready',
+            )
+            if old_file_id and old_file_id != str(file_id):
+                try:
+                    fs.delete(old_file_id)
+                except Exception as e:
+                    print(f"Old LOD {level} blob {old_file_id} not deleted: {e}")
+            generated.append({
+                'level': level,
+                'variant': variant.to_api() if variant else None,
+                'optimized_size': optimized_size,
+                'savings_ratio': savings_ratio,
+                'mesh_stats': runtime.get('mesh_stats'),
+            })
+
+        return {
+            'success': True,
+            'source_model_id': model.id,
+            'source_variant_kind': source_variant_kind,
+            'original_size': original_size,
+            'levels': generated,
+        }
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
 def _process_game_optimization_job(app, job_id):
     with app.app_context():
         try:
@@ -4908,6 +5156,31 @@ GAME_OPTIMIZE_PRESETS = {
         'compression_mode': 'fallback',
     },
 }
+
+LOD_OPTIMIZE_DEFAULTS_VERSION = '2026-06-26'
+LOD_OPTIMIZE_LEVELS = [
+    {
+        'level': 0,
+        'texture_limit': 1024,
+        'simplify_ratio': 0.85,
+        'compression_mode': 'meshopt',
+        'role': 'near/game',
+    },
+    {
+        'level': 1,
+        'texture_limit': 1024,
+        'simplify_ratio': 0.50,
+        'compression_mode': 'meshopt',
+        'role': 'mid',
+    },
+    {
+        'level': 2,
+        'texture_limit': 512,
+        'simplify_ratio': 0.25,
+        'compression_mode': 'meshopt',
+        'role': 'far',
+    },
+]
 
 
 def _game_optimization_defaults_payload():
@@ -5057,6 +5330,18 @@ _conversion_backfill_state = {
     'queued': 0,
     'skipped': 0,
     'failed': 0,
+    'current': None,
+    'started_at': None,
+    'finished_at': None,
+    'last_error': None,
+}
+_LOD_BACKFILL_LOCK = threading.Lock()
+_lod_backfill_state = {
+    'running': False,
+    'total': 0,
+    'done': 0,
+    'failed': 0,
+    'skipped': 0,
     'current': None,
     'started_at': None,
     'finished_at': None,
@@ -5571,6 +5856,47 @@ def _optimize_missing_game_variants(limit=5):
     return result
 
 
+def _lod_variants_complete(model):
+    return all(
+        ModelVariant.get(model.id, 'lod', level=int(config['level']))
+        for config in LOD_OPTIMIZE_LEVELS
+    )
+
+
+def _optimize_missing_lod_variants(limit=2):
+    if os.environ.get('AUTO_LOD_OPTIMIZE', '1').lower() in {'0', 'false', 'no', 'off'}:
+        return {'optimized': 0, 'failed': 0, 'skipped': 0}
+    import shutil
+    if not shutil.which('gltfpack'):
+        return {'optimized': 0, 'failed': 0, 'skipped': 0, 'error': 'gltfpack is not installed'}
+    ids = Model3D.optimizable_ids()
+    limit = max(1, min(int(limit or 2), 25))
+    result = {'optimized': 0, 'failed': 0, 'skipped': 0, 'remaining': 0}
+    todo = []
+    for mid in ids:
+        model = Model3D.get_by_id(mid)
+        if not model:
+            result['failed'] += 1
+            continue
+        if _is_rigged_or_avatar(model):
+            result['skipped'] += 1
+            continue
+        if _lod_variants_complete(model):
+            result['skipped'] += 1
+            continue
+        todo.append(model)
+    result['remaining'] = max(0, len(todo) - limit)
+    for model in todo[:limit]:
+        try:
+            _run_lod_optimizer(model, model.user_id)
+            result['optimized'] += 1
+        except Exception as e:
+            print(f"Pipeline LOD optimize failed for {model.id}: {str(e)[:200]}", flush=True)
+            result['failed'] += 1
+            result['last_error'] = f"{model.name or model.id}: {str(e)[:200]}"
+    return result
+
+
 def _requeue_missing_conversions(limit=25):
     if not current_app.config.get('ENABLE_CONVERSION', True):
         return 0
@@ -5702,7 +6028,7 @@ def _render_missing_thumbnails(limit=10):
     return result
 
 
-def _reconcile_asset_pipeline_once(app, *, optimize_limit=None, enrich_limit=None, conversion_limit=None):
+def _reconcile_asset_pipeline_once(app, *, optimize_limit=None, lod_limit=None, enrich_limit=None, conversion_limit=None):
     with app.app_context():
         started = datetime.utcnow()
         if not _PIPELINE_RECONCILE_LOCK.acquire(blocking=False):
@@ -5716,6 +6042,9 @@ def _reconcile_asset_pipeline_once(app, *, optimize_limit=None, enrich_limit=Non
             })
             optimize = _optimize_missing_game_variants(
                 optimize_limit or int(os.environ.get('PIPELINE_OPTIMIZE_LIMIT', '3'))
+            )
+            lod = _optimize_missing_lod_variants(
+                lod_limit if lod_limit is not None else int(os.environ.get('PIPELINE_LOD_LIMIT', '2'))
             )
             conversions = _requeue_missing_conversions(
                 conversion_limit or int(os.environ.get('PIPELINE_CONVERSION_LIMIT', '20'))
@@ -5732,6 +6061,7 @@ def _reconcile_asset_pipeline_once(app, *, optimize_limit=None, enrich_limit=Non
                 'success': True,
                 'status': 'ok',
                 'optimized': optimize,
+                'lod_optimized': lod,
                 'conversion_queued': conversions,
                 'enrichment_queued': enrichment,
                 'thumbnail_render': thumbnails,
@@ -5812,6 +6142,7 @@ def admin_pipeline_reconcile():
         result = _reconcile_asset_pipeline_once(
             current_app._get_current_object(),
             optimize_limit=request.args.get('optimize_limit', type=int),
+            lod_limit=request.args.get('lod_limit', type=int),
             enrich_limit=request.args.get('enrich_limit', type=int),
             conversion_limit=request.args.get('conversion_limit', type=int),
         )
@@ -6016,6 +6347,110 @@ def admin_conversion_backfill_status():
         return jsonify({'error': 'Unauthorized'}), 401
     with _CONVERSION_BACKFILL_LOCK:
         return jsonify(dict(_conversion_backfill_state))
+
+
+def _run_lod_backfill(app, *, limit=None):
+    with app.app_context():
+        try:
+            import shutil
+            if not shutil.which('gltfpack'):
+                with _LOD_BACKFILL_LOCK:
+                    _lod_backfill_state['running'] = False
+                    _lod_backfill_state['last_error'] = 'gltfpack is not installed on the server.'
+                    _lod_backfill_state['finished_at'] = datetime.utcnow().isoformat()
+                return
+
+            ids = Model3D.optimizable_ids()
+            todo = []
+            skipped = 0
+            for mid in ids:
+                model = Model3D.get_by_id(mid)
+                if not model:
+                    skipped += 1
+                    continue
+                if _is_rigged_or_avatar(model):
+                    skipped += 1
+                    continue
+                if _lod_variants_complete(model):
+                    skipped += 1
+                    continue
+                todo.append(model)
+            if limit:
+                todo = todo[:max(1, int(limit))]
+            with _LOD_BACKFILL_LOCK:
+                _lod_backfill_state['total'] = len(todo)
+                _lod_backfill_state['skipped'] = skipped
+            for model in todo:
+                with _LOD_BACKFILL_LOCK:
+                    _lod_backfill_state['current'] = model.name or model.id
+                try:
+                    _run_lod_optimizer(model, model.user_id)
+                    with _LOD_BACKFILL_LOCK:
+                        _lod_backfill_state['done'] += 1
+                except Exception as e:
+                    print(f"LOD backfill failed for {model.id}: {e}", flush=True)
+                    with _LOD_BACKFILL_LOCK:
+                        _lod_backfill_state['failed'] += 1
+                        _lod_backfill_state['last_error'] = f"{model.name or model.id}: {str(e)[:200]}"
+        except Exception as e:
+            print(f"LOD backfill runner crashed: {e}", flush=True)
+            with _LOD_BACKFILL_LOCK:
+                _lod_backfill_state['last_error'] = str(e)[:300]
+        finally:
+            with _LOD_BACKFILL_LOCK:
+                _lod_backfill_state['running'] = False
+                _lod_backfill_state['current'] = None
+                _lod_backfill_state['finished_at'] = datetime.utcnow().isoformat()
+
+
+@api_bp.route('/admin/lod-backfill', methods=['POST', 'GET'])
+def admin_lod_backfill():
+    if not _admin_or_asset_admin_session_ok():
+        return jsonify({'error': 'Unauthorized'}), 401
+    if request.method == 'GET':
+        with _LOD_BACKFILL_LOCK:
+            return jsonify(dict(_lod_backfill_state))
+
+    sync = request.args.get('sync', 'false').lower() in {'1', 'true', 'yes'}
+    limit = request.args.get('limit', type=int)
+    with _LOD_BACKFILL_LOCK:
+        if _lod_backfill_state['running']:
+            return jsonify({'status': 'already_running', **_lod_backfill_state})
+        _lod_backfill_state.update({
+            'running': True,
+            'total': 0,
+            'done': 0,
+            'failed': 0,
+            'skipped': 0,
+            'current': None,
+            'started_at': datetime.utcnow().isoformat(),
+            'finished_at': None,
+            'last_error': None,
+        })
+
+    if sync:
+        _run_lod_backfill(current_app._get_current_object(), limit=limit)
+        with _LOD_BACKFILL_LOCK:
+            return jsonify({'status': 'finished', **_lod_backfill_state})
+
+    thread = threading.Thread(
+        target=_run_lod_backfill,
+        args=(current_app._get_current_object(),),
+        kwargs={'limit': limit},
+        name='lod-backfill',
+        daemon=True,
+    )
+    thread.start()
+    with _LOD_BACKFILL_LOCK:
+        return jsonify({'status': 'started', **_lod_backfill_state})
+
+
+@api_bp.route('/admin/lod-backfill/status', methods=['GET'])
+def admin_lod_backfill_status():
+    if not _admin_or_asset_admin_session_ok():
+        return jsonify({'error': 'Unauthorized'}), 401
+    with _LOD_BACKFILL_LOCK:
+        return jsonify(dict(_lod_backfill_state))
 
 
 def _run_backfill_optimization(app):

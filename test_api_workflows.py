@@ -114,7 +114,22 @@ def test_asset_admin_dashboard_can_start_conversion_backfill(monkeypatch):
     app = create_app()
     client = app.test_client()
     with app.app_context():
-        _ensure_user("dashboard-admin")
+        owner = _ensure_user("dashboard-admin")
+        source = _minimal_glb({"asset": {"version": "2.0"}, "scene": 0})
+        Model3D(
+            name="Dashboard LOD Target",
+            file_format="glb",
+            file_size=len(source),
+            user_id=owner.id,
+            is_public=True,
+            gridfs_file_id=app.config["FILE_STORE"].put(
+                source,
+                filename="dashboard-lod-target.glb",
+                content_type="model/gltf-binary",
+                metadata={},
+            ),
+            asset_types=[],
+        ).save()
 
     login = client.post("/auth/login", data={
         "login_field": "dashboard-admin",
@@ -123,10 +138,13 @@ def test_asset_admin_dashboard_can_start_conversion_backfill(monkeypatch):
     assert login.status_code == 200
     html = login.get_data(as_text=True)
     assert "Run conversion backfill" in html
+    assert "Run LOD backfill" in html
     assert "Repair pipeline" in html
     assert "Import FBX avatars" in html
     assert "Check media queue" in html
     assert "/api/admin/conversion-backfill?force=true" in html
+    assert "/api/admin/lod-backfill" in html
+    assert "/api/admin/lod-backfill/status" in html
     assert "/api/admin/fbx-avatar-import?tag=robot" in html
     assert "/api/admin/pipeline/status" in html
 
@@ -142,6 +160,22 @@ def test_asset_admin_dashboard_can_start_conversion_backfill(monkeypatch):
     assert "media_queue" in pipeline.get_json()
     assert "thumbnail_render" in pipeline.get_json()
     assert set(pipeline.get_json()["thumbnail_render"]) == {"enabled", "available"}
+
+    import app.api as api
+    import shutil
+
+    monkeypatch.setattr(shutil, "which", lambda name: "gltfpack" if name == "gltfpack" else None)
+    monkeypatch.setattr(api, "_run_lod_optimizer", lambda model, owner_id=None: {"success": True})
+    lod_start = client.post("/api/admin/lod-backfill?sync=true&limit=1")
+    assert lod_start.status_code == 200, lod_start.get_json()
+    lod_status = lod_start.get_json()
+    assert lod_status.get("running") is False
+    assert lod_status.get("done") == 1
+    assert "skipped" in lod_status
+
+    lod_poll = client.get("/api/admin/lod-backfill/status")
+    assert lod_poll.status_code == 200, lod_poll.get_json()
+    assert lod_poll.get_json().get("done") == 1
 
 
 def test_asset_admin_can_import_fbx_avatar_batch(monkeypatch, tmp_path):
@@ -789,6 +823,70 @@ def test_game_optimizer_prefers_uploaded_animated_roundtrip_source():
     assert result["original_size"] == len(animated)
     assert game.settings["source_variant_kind"] == "rigged"
     assert game.settings["source_is_rigged"] is True
+
+
+def test_lod_optimizer_generates_levels_from_original_asset(monkeypatch):
+    import app.api as api
+    import shutil
+    import subprocess
+
+    app = create_app()
+    calls = []
+
+    monkeypatch.setattr(shutil, "which", lambda name: "gltfpack" if name == "gltfpack" else None)
+
+    def fake_run(cmd, capture_output=True, text=True, timeout=300, check=False):
+        calls.append(list(cmd))
+        out_path = Path(cmd[cmd.index("-o") + 1])
+        ratio = cmd[cmd.index("-si") + 1]
+        out_path.write_bytes(_minimal_glb({
+            "asset": {"version": "2.0"},
+            "extras": {"ratio": ratio},
+        }))
+        report_path = Path(cmd[cmd.index("-r") + 1])
+        report_path.write_text(json.dumps({"ratio": ratio}), encoding="utf-8")
+
+        class Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return Result()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with app.app_context():
+        owner = _ensure_user("lod-opt-owner")
+        source = _minimal_glb({"asset": {"version": "2.0"}, "scene": 0})
+        model = Model3D(
+            name="LOD Optimizer Source",
+            file_format="glb",
+            file_size=len(source),
+            user_id=owner.id,
+            is_public=True,
+            gridfs_file_id=app.config["FILE_STORE"].put(
+                source,
+                filename="lod-opt-source.glb",
+                content_type="model/gltf-binary",
+                metadata={},
+            ),
+            asset_types=[],
+        ).save()
+
+        result = api._run_lod_optimizer(model, owner.id)
+        lod0 = ModelVariant.get(model.id, "lod", level=0)
+        lod1 = ModelVariant.get(model.id, "lod", level=1)
+        lod2 = ModelVariant.get(model.id, "lod", level=2)
+        stored_lod2 = app.config["FILE_STORE"].get(lod2.file_id)
+
+    assert result["success"] is True
+    assert [level["level"] for level in result["levels"]] == [0, 1, 2]
+    assert [cmd[cmd.index("-si") + 1] for cmd in calls] == ["0.85", "0.5", "0.25"]
+    assert all(cmd[cmd.index("-i") + 1].endswith("input.glb") for cmd in calls)
+    assert lod0.settings["role"] == "near/game"
+    assert lod1.settings["simplify_ratio"] == 0.5
+    assert lod2.settings["texture_limit"] == 512
+    assert stored_lod2.filename.endswith("-lod2.glb")
 
 
 def test_replacing_vrm_drops_stale_optimized_variant(monkeypatch):
@@ -1941,6 +2039,7 @@ def test_service_token_can_target_owners_search_private_metadata_and_dedupe_acro
 def test_tellus_admin_token_defaults_owner_and_generation_search_metadata(monkeypatch):
     monkeypatch.setenv("TELLUS_ADMIN_API_TOKEN", "tellus-admin-token")
     monkeypatch.setenv("TELLUS_ADMIN_USERNAME", "tellusadmin")
+    monkeypatch.setenv("AUTO_GAME_OPTIMIZE", "0")
     app = create_app()
     client = app.test_client()
 
@@ -2027,6 +2126,74 @@ def test_tellus_admin_token_defaults_owner_and_generation_search_metadata(monkey
         set(enriched_model["tags"])
     )
     assert enriched_model["asset_types"] == ["prop"]
+
+
+def test_tellus_asset_lod_routes_serve_variants_under_original_asset_id():
+    app = create_app()
+    client = app.test_client()
+    with app.app_context():
+        owner = _ensure_user("tellus-lod-owner")
+        source_id = app.config["FILE_STORE"].put(
+            _minimal_glb({"asset": {"version": "2.0"}}),
+            filename="lod_source.glb",
+            content_type="model/gltf-binary",
+            metadata={},
+        )
+        model = Model3D(
+            name="LOD Source",
+            file_format="glb",
+            file_size=64,
+            user_id=owner.id,
+            is_public=True,
+            gridfs_file_id=str(source_id),
+        ).save()
+        game_bytes = _minimal_glb({"asset": {"version": "2.0"}, "scene": 0})
+        lod1_bytes = _minimal_glb({"asset": {"version": "2.0"}, "scene": 1})
+        impostor_bytes = b"RIFFxxxxWEBP"
+        game_id = app.config["FILE_STORE"].put(
+            game_bytes,
+            filename="lod_source-game.glb",
+            content_type="model/gltf-binary",
+            metadata={"kind": "game", "source_model_id": model.id},
+        )
+        lod1_id = app.config["FILE_STORE"].put(
+            lod1_bytes,
+            filename="lod_source-lod1.glb",
+            content_type="model/gltf-binary",
+            metadata={"kind": "lod", "level": 1, "source_model_id": model.id},
+        )
+        impostor_id = app.config["FILE_STORE"].put(
+            impostor_bytes,
+            filename="lod_source-impostor.webp",
+            content_type="image/webp",
+            metadata={"kind": "impostor", "source_model_id": model.id},
+        )
+        ModelVariant.upsert(model.id, "game", str(game_id), file_format="glb", size=len(game_bytes))
+        ModelVariant.upsert(model.id, "lod", str(lod1_id), level=1, file_format="glb", size=len(lod1_bytes))
+        ModelVariant.upsert(model.id, "impostor", str(impostor_id), file_format="webp", size=len(impostor_bytes))
+
+    game = client.get(f"/api/assets/model/{model.id}/game-optimized")
+    assert game.status_code == 200
+    assert game.headers["Content-Type"] == "model/gltf-binary"
+    assert game.headers["ETag"].startswith('"game-')
+    assert game.data == game_bytes
+
+    lod0 = client.get(f"/api/assets/model/{model.id}/lod/0")
+    assert lod0.status_code == 200
+    assert lod0.data == game_bytes
+
+    lod1 = client.get(f"/api/assets/model/{model.id}/lod/1")
+    assert lod1.status_code == 200
+    assert lod1.headers["ETag"].startswith('"lod-1-')
+    assert lod1.data == lod1_bytes
+
+    lod2 = client.get(f"/api/assets/model/{model.id}/lod/2")
+    assert lod2.status_code == 404
+
+    impostor = client.get(f"/api/assets/model/{model.id}/impostor")
+    assert impostor.status_code == 200
+    assert impostor.headers["Content-Type"] == "image/webp"
+    assert impostor.data == impostor_bytes
 
 
 def test_tellus_admin_upload_can_target_player_and_world_by_headers(monkeypatch):
