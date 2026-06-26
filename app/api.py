@@ -4909,6 +4909,182 @@ def _run_game_optimizer(model, owner_id, settings):
         shutil.rmtree(workdir, ignore_errors=True)
 
 
+def _optimizer_source_bytes(model):
+    """Return the best static GLB/GLTF source for derived mesh variants."""
+    src_bytes = None
+    src_fmt = None
+    source_variant_kind = 'original'
+    fixed_variant = ModelVariant.get(model.id, 'fixed_eyes')
+    if fixed_variant and fixed_variant.file_id:
+        data = fixed_variant.read_data()
+        if data:
+            src_bytes = data
+            src_fmt = (fixed_variant.file_format or 'glb').lower()
+            source_variant_kind = 'fixed_eyes'
+    if src_bytes is None:
+        src_bytes, src_fmt = model.get_viewable_data()
+        src_fmt = (src_fmt or model.file_format or '').lower()
+    if not src_bytes:
+        raise FileNotFoundError('Source file not found')
+    if src_fmt not in ('glb', 'gltf'):
+        raise ValueError('LOD generation currently supports GLB/GLTF assets.')
+    if src_fmt == 'glb':
+        src_bytes = _force_meshopt_required_for_external_fallback(src_bytes)
+    return src_bytes, src_fmt, source_variant_kind
+
+
+def _run_lod_optimizer(model, owner_id=None, levels=None):
+    """Generate Tellus-facing LOD GLBs under the original asset id.
+
+    Borrowed design choice from Hyperscape's LOD package: each level is
+    simplified from the original source, never cascaded from the previous LOD.
+    """
+    import shutil
+    import subprocess
+    import tempfile
+
+    if _is_rigged_or_avatar(model):
+        return {
+            'success': False,
+            'skipped': True,
+            'reason': 'rigged_or_avatar',
+            'source_model_id': model.id,
+        }
+
+    gltfpack_bin = shutil.which('gltfpack')
+    if not gltfpack_bin:
+        raise RuntimeError('LOD generation is unavailable because gltfpack is not installed.')
+
+    levels = levels or LOD_OPTIMIZE_LEVELS
+    src_bytes, src_fmt, source_variant_kind = _optimizer_source_bytes(model)
+    source_runtime = _file_derived_metadata(src_bytes, src_fmt)[1]
+    source_mesh_stats = source_runtime.get('mesh_stats')
+    source_physical = source_runtime.get('physical')
+    fs = current_app.config['FILE_STORE']
+    original_size = len(src_bytes)
+    generated = []
+    workdir = tempfile.mkdtemp(prefix='lod_optimize_')
+    try:
+        in_path = os.path.join(workdir, f'input.{src_fmt}')
+        with open(in_path, 'wb') as f:
+            f.write(src_bytes)
+
+        for config in levels:
+            level = int(config['level'])
+            texture_limit = int(config.get('texture_limit') or 0)
+            simplify_ratio = float(config.get('simplify_ratio') or 1)
+            compression_mode = str(config.get('compression_mode') or 'meshopt').lower()
+            out_path = os.path.join(workdir, f'lod{level}.glb')
+            report_path = os.path.join(workdir, f'lod{level}.json')
+            cmd = [
+                gltfpack_bin,
+                '-i', in_path,
+                '-o', out_path,
+                '-si', f'{simplify_ratio:g}',
+                '-r', report_path,
+            ]
+            if compression_mode == 'meshopt':
+                cmd.append('-cc')
+            if texture_limit:
+                cmd.extend(['-tc', '-tl', str(texture_limit)])
+
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=300,
+                check=False,
+            )
+            if result.returncode != 0:
+                msg = (result.stderr or result.stdout or 'gltfpack failed.').strip()
+                raise RuntimeError(f'LOD {level}: {msg[-1000:] or "gltfpack failed."}')
+            with open(out_path, 'rb') as f:
+                out_bytes = f.read()
+            report = {}
+            if os.path.exists(report_path):
+                try:
+                    with open(report_path, 'r', encoding='utf-8') as f:
+                        report = json.load(f)
+                except Exception as e:
+                    print(f"Could not read LOD {level} gltfpack report: {e}")
+
+            runtime = _file_derived_metadata(out_bytes, 'glb')[1]
+            optimized_size = len(out_bytes)
+            savings_ratio = 0 if original_size <= 0 else 1 - (optimized_size / original_size)
+            metadata = {
+                'kind': 'lod',
+                'level': level,
+                'source_model_id': model.id,
+                'source_format': src_fmt,
+                'source_size': original_size,
+                'source_variant_kind': source_variant_kind,
+                'optimized_size': optimized_size,
+                'texture_limit': texture_limit or None,
+                'simplify_ratio': simplify_ratio,
+                'compression_mode': compression_mode,
+                'defaults_version': LOD_OPTIMIZE_DEFAULTS_VERSION,
+                'role': config.get('role'),
+                'gltfpack': {
+                    'mode': compression_mode,
+                    'texture_compression': bool(texture_limit),
+                    'report': report,
+                },
+            }
+            file_id = fs.put(
+                out_bytes,
+                filename=f'{_safe_stem(model)}-lod{level}.glb',
+                content_type=_mime_for('glb'),
+                metadata=metadata,
+            )
+            variant_settings = {
+                'defaults_version': LOD_OPTIMIZE_DEFAULTS_VERSION,
+                'level': level,
+                'role': config.get('role'),
+                'texture_limit': texture_limit,
+                'simplify_ratio': simplify_ratio,
+                'compression_mode': compression_mode,
+                'original_size': original_size,
+                'optimized_size': optimized_size,
+                'savings_ratio': savings_ratio,
+                'source_mesh_stats': source_mesh_stats,
+                'mesh_stats': runtime.get('mesh_stats'),
+                'source_physical': source_physical,
+                'optimized_physical_raw': runtime.get('physical'),
+                'physical': source_physical or runtime.get('physical'),
+                'source_variant_kind': source_variant_kind,
+                'source_runtime_cost': _gltf_runtime_cost_metadata(src_bytes, src_fmt, source_runtime, original_size),
+                'runtime_cost': _gltf_runtime_cost_metadata(out_bytes, 'glb', runtime, optimized_size),
+                'report': report,
+            }
+            variant, old_file_id = ModelVariant.upsert(
+                model.id, 'lod', str(file_id),
+                level=level, file_format='glb', size=optimized_size,
+                settings=variant_settings, status='ready',
+            )
+            if old_file_id and old_file_id != str(file_id):
+                try:
+                    fs.delete(old_file_id)
+                except Exception as e:
+                    print(f"Old LOD {level} blob {old_file_id} not deleted: {e}")
+            generated.append({
+                'level': level,
+                'variant': variant.to_api() if variant else None,
+                'optimized_size': optimized_size,
+                'savings_ratio': savings_ratio,
+                'mesh_stats': runtime.get('mesh_stats'),
+            })
+
+        return {
+            'success': True,
+            'source_model_id': model.id,
+            'source_variant_kind': source_variant_kind,
+            'original_size': original_size,
+            'levels': generated,
+        }
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
 def _process_game_optimization_job(app, job_id):
     with app.app_context():
         try:
@@ -4980,6 +5156,31 @@ GAME_OPTIMIZE_PRESETS = {
         'compression_mode': 'fallback',
     },
 }
+
+LOD_OPTIMIZE_DEFAULTS_VERSION = '2026-06-26'
+LOD_OPTIMIZE_LEVELS = [
+    {
+        'level': 0,
+        'texture_limit': 1024,
+        'simplify_ratio': 0.85,
+        'compression_mode': 'meshopt',
+        'role': 'near/game',
+    },
+    {
+        'level': 1,
+        'texture_limit': 1024,
+        'simplify_ratio': 0.50,
+        'compression_mode': 'meshopt',
+        'role': 'mid',
+    },
+    {
+        'level': 2,
+        'texture_limit': 512,
+        'simplify_ratio': 0.25,
+        'compression_mode': 'meshopt',
+        'role': 'far',
+    },
+]
 
 
 def _game_optimization_defaults_payload():
@@ -5643,6 +5844,47 @@ def _optimize_missing_game_variants(limit=5):
     return result
 
 
+def _lod_variants_complete(model):
+    return all(
+        ModelVariant.get(model.id, 'lod', level=int(config['level']))
+        for config in LOD_OPTIMIZE_LEVELS
+    )
+
+
+def _optimize_missing_lod_variants(limit=2):
+    if os.environ.get('AUTO_LOD_OPTIMIZE', '1').lower() in {'0', 'false', 'no', 'off'}:
+        return {'optimized': 0, 'failed': 0, 'skipped': 0}
+    import shutil
+    if not shutil.which('gltfpack'):
+        return {'optimized': 0, 'failed': 0, 'skipped': 0, 'error': 'gltfpack is not installed'}
+    ids = Model3D.optimizable_ids()
+    limit = max(1, min(int(limit or 2), 25))
+    result = {'optimized': 0, 'failed': 0, 'skipped': 0, 'remaining': 0}
+    todo = []
+    for mid in ids:
+        model = Model3D.get_by_id(mid)
+        if not model:
+            result['failed'] += 1
+            continue
+        if _is_rigged_or_avatar(model):
+            result['skipped'] += 1
+            continue
+        if _lod_variants_complete(model):
+            result['skipped'] += 1
+            continue
+        todo.append(model)
+    result['remaining'] = max(0, len(todo) - limit)
+    for model in todo[:limit]:
+        try:
+            _run_lod_optimizer(model, model.user_id)
+            result['optimized'] += 1
+        except Exception as e:
+            print(f"Pipeline LOD optimize failed for {model.id}: {str(e)[:200]}", flush=True)
+            result['failed'] += 1
+            result['last_error'] = f"{model.name or model.id}: {str(e)[:200]}"
+    return result
+
+
 def _requeue_missing_conversions(limit=25):
     if not current_app.config.get('ENABLE_CONVERSION', True):
         return 0
@@ -5774,7 +6016,7 @@ def _render_missing_thumbnails(limit=10):
     return result
 
 
-def _reconcile_asset_pipeline_once(app, *, optimize_limit=None, enrich_limit=None, conversion_limit=None):
+def _reconcile_asset_pipeline_once(app, *, optimize_limit=None, lod_limit=None, enrich_limit=None, conversion_limit=None):
     with app.app_context():
         started = datetime.utcnow()
         if not _PIPELINE_RECONCILE_LOCK.acquire(blocking=False):
@@ -5788,6 +6030,9 @@ def _reconcile_asset_pipeline_once(app, *, optimize_limit=None, enrich_limit=Non
             })
             optimize = _optimize_missing_game_variants(
                 optimize_limit or int(os.environ.get('PIPELINE_OPTIMIZE_LIMIT', '3'))
+            )
+            lod = _optimize_missing_lod_variants(
+                lod_limit if lod_limit is not None else int(os.environ.get('PIPELINE_LOD_LIMIT', '2'))
             )
             conversions = _requeue_missing_conversions(
                 conversion_limit or int(os.environ.get('PIPELINE_CONVERSION_LIMIT', '20'))
@@ -5804,6 +6049,7 @@ def _reconcile_asset_pipeline_once(app, *, optimize_limit=None, enrich_limit=Non
                 'success': True,
                 'status': 'ok',
                 'optimized': optimize,
+                'lod_optimized': lod,
                 'conversion_queued': conversions,
                 'enrichment_queued': enrichment,
                 'thumbnail_render': thumbnails,
@@ -5884,6 +6130,7 @@ def admin_pipeline_reconcile():
         result = _reconcile_asset_pipeline_once(
             current_app._get_current_object(),
             optimize_limit=request.args.get('optimize_limit', type=int),
+            lod_limit=request.args.get('lod_limit', type=int),
             enrich_limit=request.args.get('enrich_limit', type=int),
             conversion_limit=request.args.get('conversion_limit', type=int),
         )

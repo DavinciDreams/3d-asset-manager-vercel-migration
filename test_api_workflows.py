@@ -791,6 +791,70 @@ def test_game_optimizer_prefers_uploaded_animated_roundtrip_source():
     assert game.settings["source_is_rigged"] is True
 
 
+def test_lod_optimizer_generates_levels_from_original_asset(monkeypatch):
+    import app.api as api
+    import shutil
+    import subprocess
+
+    app = create_app()
+    calls = []
+
+    monkeypatch.setattr(shutil, "which", lambda name: "gltfpack" if name == "gltfpack" else None)
+
+    def fake_run(cmd, capture_output=True, text=True, timeout=300, check=False):
+        calls.append(list(cmd))
+        out_path = Path(cmd[cmd.index("-o") + 1])
+        ratio = cmd[cmd.index("-si") + 1]
+        out_path.write_bytes(_minimal_glb({
+            "asset": {"version": "2.0"},
+            "extras": {"ratio": ratio},
+        }))
+        report_path = Path(cmd[cmd.index("-r") + 1])
+        report_path.write_text(json.dumps({"ratio": ratio}), encoding="utf-8")
+
+        class Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return Result()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with app.app_context():
+        owner = _ensure_user("lod-opt-owner")
+        source = _minimal_glb({"asset": {"version": "2.0"}, "scene": 0})
+        model = Model3D(
+            name="LOD Optimizer Source",
+            file_format="glb",
+            file_size=len(source),
+            user_id=owner.id,
+            is_public=True,
+            gridfs_file_id=app.config["FILE_STORE"].put(
+                source,
+                filename="lod-opt-source.glb",
+                content_type="model/gltf-binary",
+                metadata={},
+            ),
+            asset_types=[],
+        ).save()
+
+        result = api._run_lod_optimizer(model, owner.id)
+        lod0 = ModelVariant.get(model.id, "lod", level=0)
+        lod1 = ModelVariant.get(model.id, "lod", level=1)
+        lod2 = ModelVariant.get(model.id, "lod", level=2)
+        stored_lod2 = app.config["FILE_STORE"].get(lod2.file_id)
+
+    assert result["success"] is True
+    assert [level["level"] for level in result["levels"]] == [0, 1, 2]
+    assert [cmd[cmd.index("-si") + 1] for cmd in calls] == ["0.85", "0.5", "0.25"]
+    assert all(cmd[cmd.index("-i") + 1].endswith("input.glb") for cmd in calls)
+    assert lod0.settings["role"] == "near/game"
+    assert lod1.settings["simplify_ratio"] == 0.5
+    assert lod2.settings["texture_limit"] == 512
+    assert stored_lod2.filename.endswith("-lod2.glb")
+
+
 def test_replacing_vrm_drops_stale_optimized_variant(monkeypatch):
     app = create_app()
     client = app.test_client()
