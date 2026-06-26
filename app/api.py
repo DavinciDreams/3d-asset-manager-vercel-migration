@@ -192,6 +192,28 @@ def _glb_is_meshopt_compressed(glb_bytes):
     return False
 
 
+def _gltf_uses_extension(file_content, file_extension, extension_name):
+    gltf = _gltf_json_from_bytes(file_content, file_extension)
+    if not isinstance(gltf, dict):
+        return False
+    used = set(gltf.get('extensionsUsed') or [])
+    required = set(gltf.get('extensionsRequired') or [])
+    if extension_name in used or extension_name in required:
+        return True
+
+    def contains_extension(value):
+        if isinstance(value, dict):
+            extensions = value.get('extensions')
+            if isinstance(extensions, dict) and extension_name in extensions:
+                return True
+            return any(contains_extension(child) for child in value.values())
+        if isinstance(value, list):
+            return any(contains_extension(child) for child in value)
+        return False
+
+    return contains_extension(gltf)
+
+
 def _gltf_json_from_bytes(file_content, file_extension):
     fmt = (file_extension or '').lower()
     try:
@@ -4933,6 +4955,51 @@ def _optimizer_source_bytes(model):
     return src_bytes, src_fmt, source_variant_kind
 
 
+def _gltf_transform_cli_path():
+    tools_dir = Path(os.environ.get('FBX2VRMA_DIR') or 'tools')
+    if not tools_dir.is_absolute():
+        tools_dir = Path(current_app.root_path).parent / tools_dir
+    return tools_dir / 'node_modules' / '@gltf-transform' / 'cli' / 'bin' / 'cli.js'
+
+
+def _prepare_lod_input_path(src_bytes, src_fmt, workdir):
+    """Write an optimizer input file, removing Draco compression if necessary."""
+    import shutil
+    import subprocess
+
+    in_path = os.path.join(workdir, f'input.{src_fmt}')
+    with open(in_path, 'wb') as f:
+        f.write(src_bytes)
+
+    uses_draco = _gltf_uses_extension(src_bytes, src_fmt, 'KHR_draco_mesh_compression')
+    if not uses_draco:
+        return in_path, {'draco_decompressed': False}
+
+    node_bin = os.environ.get('NODE_BIN') or shutil.which('node')
+    cli_path = _gltf_transform_cli_path()
+    if not node_bin or not cli_path.exists():
+        raise RuntimeError(
+            'Source uses Draco mesh compression; install Node and @gltf-transform/cli '
+            'in tools/package.json so LOD generation can decode it.'
+        )
+
+    out_path = os.path.join(workdir, 'input-dedraco.glb')
+    result = subprocess.run(
+        [node_bin, str(cli_path), 'copy', in_path, out_path],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    if result.returncode != 0 or not os.path.exists(out_path):
+        msg = (result.stderr or result.stdout or 'gltf-transform copy failed.').strip()
+        raise RuntimeError(f'Draco decode failed before LOD generation: {msg[-1000:]}')
+    return out_path, {
+        'draco_decompressed': True,
+        'draco_decoder': '@gltf-transform/cli copy',
+    }
+
+
 def _run_lod_optimizer(model, owner_id=None, levels=None):
     """Generate Tellus-facing LOD GLBs under the original asset id.
 
@@ -4965,9 +5032,7 @@ def _run_lod_optimizer(model, owner_id=None, levels=None):
     generated = []
     workdir = tempfile.mkdtemp(prefix='lod_optimize_')
     try:
-        in_path = os.path.join(workdir, f'input.{src_fmt}')
-        with open(in_path, 'wb') as f:
-            f.write(src_bytes)
+        in_path, source_prepare = _prepare_lod_input_path(src_bytes, src_fmt, workdir)
 
         for config in levels:
             level = int(config['level'])
@@ -5018,6 +5083,7 @@ def _run_lod_optimizer(model, owner_id=None, levels=None):
                 'source_format': src_fmt,
                 'source_size': original_size,
                 'source_variant_kind': source_variant_kind,
+                'source_prepare': source_prepare,
                 'optimized_size': optimized_size,
                 'texture_limit': texture_limit or None,
                 'simplify_ratio': simplify_ratio,
@@ -5052,6 +5118,7 @@ def _run_lod_optimizer(model, owner_id=None, levels=None):
                 'optimized_physical_raw': runtime.get('physical'),
                 'physical': source_physical or runtime.get('physical'),
                 'source_variant_kind': source_variant_kind,
+                'source_prepare': source_prepare,
                 'source_runtime_cost': _gltf_runtime_cost_metadata(src_bytes, src_fmt, source_runtime, original_size),
                 'runtime_cost': _gltf_runtime_cost_metadata(out_bytes, 'glb', runtime, optimized_size),
                 'report': report,

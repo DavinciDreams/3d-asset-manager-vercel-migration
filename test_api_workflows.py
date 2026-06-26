@@ -889,6 +889,90 @@ def test_lod_optimizer_generates_levels_from_original_asset(monkeypatch):
     assert stored_lod2.filename.endswith("-lod2.glb")
 
 
+def test_lod_optimizer_decodes_draco_sources_before_gltfpack(monkeypatch, tmp_path):
+    import app.api as api
+    import shutil
+    import subprocess
+
+    app = create_app()
+    calls = []
+    cli_path = tmp_path / "gltf-transform-cli.js"
+    cli_path.write_text("", encoding="utf-8")
+
+    def fake_which(name):
+        if name == "gltfpack":
+            return "gltfpack"
+        if name == "node":
+            return "node"
+        return None
+
+    def fake_run(cmd, capture_output=True, text=True, timeout=300, check=False):
+        calls.append(list(cmd))
+        if "copy" in cmd:
+            out_path = Path(cmd[cmd.index("copy") + 2])
+            out_path.write_bytes(_minimal_glb({"asset": {"version": "2.0"}, "scene": 0}))
+        else:
+            out_path = Path(cmd[cmd.index("-o") + 1])
+            ratio = cmd[cmd.index("-si") + 1]
+            out_path.write_bytes(_minimal_glb({
+                "asset": {"version": "2.0"},
+                "extras": {"ratio": ratio},
+            }))
+            report_path = Path(cmd[cmd.index("-r") + 1])
+            report_path.write_text(json.dumps({"ratio": ratio}), encoding="utf-8")
+
+        class Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return Result()
+
+    monkeypatch.setattr(shutil, "which", fake_which)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(api, "_gltf_transform_cli_path", lambda: cli_path)
+
+    with app.app_context():
+        owner = _ensure_user("lod-draco-owner")
+        source = _minimal_glb({
+            "asset": {"version": "2.0"},
+            "extensionsUsed": ["KHR_draco_mesh_compression"],
+            "meshes": [{
+                "primitives": [{
+                    "attributes": {"POSITION": 0},
+                    "extensions": {"KHR_draco_mesh_compression": {"bufferView": 0, "attributes": {"POSITION": 0}}},
+                }],
+            }],
+            "bufferViews": [{"buffer": 0, "byteOffset": 0, "byteLength": 0}],
+            "buffers": [{"byteLength": 0}],
+        })
+        model = Model3D(
+            name="LOD Draco Source",
+            file_format="glb",
+            file_size=len(source),
+            user_id=owner.id,
+            is_public=True,
+            gridfs_file_id=app.config["FILE_STORE"].put(
+                source,
+                filename="lod-draco-source.glb",
+                content_type="model/gltf-binary",
+                metadata={},
+            ),
+            asset_types=[],
+        ).save()
+
+        result = api._run_lod_optimizer(model, owner.id)
+        lod0 = ModelVariant.get(model.id, "lod", level=0)
+
+    assert result["success"] is True
+    assert calls[0][2] == "copy"
+    assert calls[0][3].endswith("input.glb")
+    assert calls[0][4].endswith("input-dedraco.glb")
+    gltfpack_inputs = [cmd[cmd.index("-i") + 1] for cmd in calls[1:]]
+    assert gltfpack_inputs == [calls[0][4], calls[0][4], calls[0][4]]
+    assert lod0.settings["source_prepare"]["draco_decompressed"] is True
+
+
 def test_replacing_vrm_drops_stale_optimized_variant(monkeypatch):
     app = create_app()
     client = app.test_client()
