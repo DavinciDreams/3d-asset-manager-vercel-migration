@@ -1074,8 +1074,34 @@ def get_game_optimized(model_id):
 
 @api_bp.route('/assets/model/<model_id>/game-optimized')
 def get_asset_game_optimized(model_id):
-    """Tellus-compatible alias for a model's game-optimized variant."""
-    return get_game_optimized(model_id)
+    """Tellus-compatible game asset URL.
+
+    Prefer the explicit game variant. If a manual/admin LOD backfill created
+    LOD0 before the older game variant exists, serve LOD0 here so Tellus'
+    stable game-optimized URL still resolves under the original asset id.
+    """
+    try:
+        model = Model3D.get_by_id_or_alias(model_id)
+        if not model:
+            return jsonify({'error': 'Model not found'}), 404
+        if not _can_access_model(model):
+            return jsonify({'error': 'Access denied'}), 403
+
+        variant = ModelVariant.get(model.id, 'game')
+        etag_prefix = 'game'
+        filename_suffix = 'game'
+        if not variant or not variant.file_id:
+            variant = ModelVariant.get(model.id, 'lod', level=0)
+            etag_prefix = 'lod-0'
+            filename_suffix = 'lod-0'
+        if not variant or not variant.file_id:
+            return jsonify({'error': 'No game-optimized variant'}), 404
+
+        return _serve_variant_file(model, variant, etag_prefix=etag_prefix, filename_suffix=filename_suffix)
+
+    except Exception as e:
+        print(f"API asset game-optimized fetch error: {e}")
+        return jsonify({'error': 'Game-optimized fetch failed'}), 500
 
 
 @api_bp.route('/assets/model/<model_id>/lod/<int:level>')

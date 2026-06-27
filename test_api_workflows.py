@@ -2280,6 +2280,44 @@ def test_tellus_asset_lod_routes_serve_variants_under_original_asset_id():
     assert impostor.data == impostor_bytes
 
 
+def test_tellus_asset_game_route_falls_back_to_lod0_variant():
+    app = create_app()
+    client = app.test_client()
+    with app.app_context():
+        owner = _ensure_user("tellus-lod0-game-owner")
+        source_id = app.config["FILE_STORE"].put(
+            _minimal_glb({"asset": {"version": "2.0"}}),
+            filename="lod0_only_source.glb",
+            content_type="model/gltf-binary",
+            metadata={},
+        )
+        model = Model3D(
+            name="LOD0 Only Source",
+            file_format="glb",
+            file_size=64,
+            user_id=owner.id,
+            is_public=True,
+            gridfs_file_id=str(source_id),
+        ).save()
+        lod0_bytes = _minimal_glb({"asset": {"version": "2.0"}, "scene": 0})
+        lod0_id = app.config["FILE_STORE"].put(
+            lod0_bytes,
+            filename="lod0_only_source-lod0.glb",
+            content_type="model/gltf-binary",
+            metadata={"kind": "lod", "level": 0, "source_model_id": model.id},
+        )
+        ModelVariant.upsert(model.id, "lod", str(lod0_id), level=0, file_format="glb", size=len(lod0_bytes))
+
+    tellus_game = client.get(f"/api/assets/model/{model.id}/game-optimized")
+    assert tellus_game.status_code == 200
+    assert tellus_game.headers["Content-Type"] == "model/gltf-binary"
+    assert tellus_game.headers["ETag"].startswith('"lod-0-')
+    assert tellus_game.data == lod0_bytes
+
+    strict_game = client.get(f"/api/model/{model.id}/game-optimized")
+    assert strict_game.status_code == 404
+
+
 def test_tellus_admin_upload_can_target_player_and_world_by_headers(monkeypatch):
     monkeypatch.setenv("TELLUS_ADMIN_API_TOKEN", "tellus-admin-token")
     monkeypatch.setenv("TELLUS_ADMIN_USERNAME", "tellusadmin")
