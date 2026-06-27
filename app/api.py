@@ -2018,6 +2018,7 @@ def _media_summary(model):
         },
         'game_optimized': go['game_optimized'],
         'has_game_optimized': go['has_game_optimized'],
+        **_asset_lod_url_fields(model),
     }
 
 
@@ -3472,6 +3473,7 @@ def _media_presence_fields(model):
         'world_ready': processing_state['world_ready'],
         'storefront_ready': processing_state['storefront_ready'],
         **game,
+        **_asset_lod_url_fields(model),
     }
 
 
@@ -3798,6 +3800,53 @@ def _game_optimized_fields(model):
             'url': url_for('api.get_game_optimized', model_id=model.id),
             'download_url': url_for('api.get_game_optimized', model_id=model.id, download=1),
         },
+    }
+
+
+def _asset_lod_url_fields(model):
+    lod_variants = []
+    for level in (0, 1, 2):
+        variant = ModelVariant.get(model.id, 'lod', level=level)
+        if not variant or not variant.file_id:
+            continue
+        runtime_cost = _variant_runtime_cost_metadata(variant)
+        lod_variants.append({
+            'level': level,
+            'size': variant.size,
+            'file_format': variant.file_format,
+            'status': variant.status,
+            'settings': variant.settings or {},
+            'mesh_stats': _variant_mesh_stats(variant),
+            'physical': _variant_physical_metadata(variant),
+            'runtime_cost': runtime_cost,
+            'url': url_for('api.get_asset_lod', model_id=model.id, level=level),
+            'download_url': url_for('api.get_asset_lod', model_id=model.id, level=level, download=1),
+            'updated_at': variant.updated_at.isoformat() if variant.updated_at else None,
+        })
+    impostor = ModelVariant.get(model.id, 'impostor')
+    impostor_payload = None
+    if impostor and impostor.file_id:
+        impostor_payload = {
+            'size': impostor.size,
+            'file_format': impostor.file_format,
+            'status': impostor.status,
+            'settings': impostor.settings or {},
+            'url': url_for('api.get_asset_impostor', model_id=model.id),
+            'download_url': url_for('api.get_asset_impostor', model_id=model.id, download=1),
+            'updated_at': impostor.updated_at.isoformat() if impostor.updated_at else None,
+        }
+    return {
+        'asset_lod_urls': {
+            'game_optimized': url_for('api.get_asset_game_optimized', model_id=model.id),
+            'lod0': url_for('api.get_asset_lod', model_id=model.id, level=0),
+            'lod1': url_for('api.get_asset_lod', model_id=model.id, level=1),
+            'lod2': url_for('api.get_asset_lod', model_id=model.id, level=2),
+            'impostor': url_for('api.get_asset_impostor', model_id=model.id),
+        },
+        'lod_variants': lod_variants,
+        'has_lod_variants': bool(lod_variants),
+        'has_impostor': bool(impostor and impostor.file_id),
+        'impostor': impostor_payload,
     }
 
 

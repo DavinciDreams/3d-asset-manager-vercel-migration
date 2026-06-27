@@ -60,6 +60,14 @@ def _model_summary_schema():
             'preview_url': {'type': 'string', 'nullable': True},
             'has_game_optimized': {'type': 'boolean'},
             'game_optimized': {'$ref': '#/components/schemas/GameOptimized'},
+            'asset_lod_urls': {'$ref': '#/components/schemas/AssetLodUrls'},
+            'lod_variants': {
+                'type': 'array',
+                'description': 'Generated LOD variants currently stored under this original asset id.',
+                'items': {'$ref': '#/components/schemas/LodVariant'},
+            },
+            'has_lod_variants': {'type': 'boolean'},
+            'has_impostor': {'type': 'boolean'},
             'ai_status': {'type': 'string', 'nullable': True, 'enum': ['pending', 'processing', 'done', 'failed', None]},
             'ai_error': {'type': 'string', 'nullable': True},
             'ai_title': {'type': 'string', 'nullable': True},
@@ -286,6 +294,42 @@ def get_openapi_spec(base_url=''):
                         'download_url': {'type': 'string', 'example': '/api/model/abc/game-optimized?download=1'},
                     },
                 },
+                'AssetLodUrls': {
+                    'type': 'object',
+                    'description': (
+                        'Stable Tellus/game backend URLs for generated runtime variants. '
+                        'These URLs are deterministic for every model id; fetch them and handle 404 '
+                        'when a specific variant has not been generated yet.'
+                    ),
+                    'properties': {
+                        'game_optimized': {
+                            'type': 'string',
+                            'example': '/api/assets/model/abc/game-optimized',
+                            'description': 'Game runtime GLB. Falls back to LOD0 when no explicit game variant exists.',
+                        },
+                        'lod0': {'type': 'string', 'example': '/api/assets/model/abc/lod/0'},
+                        'lod1': {'type': 'string', 'example': '/api/assets/model/abc/lod/1'},
+                        'lod2': {'type': 'string', 'example': '/api/assets/model/abc/lod/2'},
+                        'impostor': {'type': 'string', 'example': '/api/assets/model/abc/impostor'},
+                    },
+                },
+                'LodVariant': {
+                    'type': 'object',
+                    'description': 'Metadata for a generated ModelVariant(kind=lod) row.',
+                    'properties': {
+                        'level': {'type': 'integer', 'enum': [0, 1, 2]},
+                        'size': {'type': 'integer', 'description': 'Variant file size in bytes'},
+                        'file_format': {'type': 'string', 'example': 'glb'},
+                        'status': {'type': 'string', 'example': 'ready'},
+                        'settings': {
+                            'type': 'object',
+                            'description': 'LOD generation settings and runtime cost metadata.',
+                        },
+                        'url': {'type': 'string', 'example': '/api/assets/model/abc/lod/1'},
+                        'download_url': {'type': 'string', 'example': '/api/assets/model/abc/lod/1?download=1'},
+                        'updated_at': {'type': 'string', 'format': 'date-time', 'nullable': True},
+                    },
+                },
                 'RuntimeCost': {
                     'type': 'object',
                     'nullable': True,
@@ -351,6 +395,10 @@ def get_openapi_spec(base_url=''):
                         },
                         'game_optimized': {'$ref': '#/components/schemas/GameOptimized'},
                         'has_game_optimized': {'type': 'boolean'},
+                        'asset_lod_urls': {'$ref': '#/components/schemas/AssetLodUrls'},
+                        'lod_variants': {'type': 'array', 'items': {'$ref': '#/components/schemas/LodVariant'}},
+                        'has_lod_variants': {'type': 'boolean'},
+                        'has_impostor': {'type': 'boolean'},
                     },
                 },
                 'BrowseCard': {
@@ -1199,17 +1247,29 @@ def get_openapi_spec(base_url=''):
                 'get': {
                     'tags': ['Files'],
                     'summary': 'Tellus asset URL for the game-optimized GLB',
-                    'description': 'Alias of /model/{model_id}/game-optimized used by Tellus asset LOD URL generation.',
+                    'description': (
+                        'Stable Tellus/game backend URL for the near runtime GLB. '
+                        'Serves the explicit game variant when present; otherwise falls back to '
+                        'ModelVariant(kind=lod, level=0). Supports HTTP Range + ETag + immutable cache.'
+                    ),
                     'parameters': [
                         {'name': 'model_id', 'in': 'path', 'required': True, 'schema': {'type': 'string'}},
                         {'name': 'Range', 'in': 'header', 'required': False, 'schema': {'type': 'string'}},
                     ],
                     'responses': {
-                        '200': {'description': 'The game-optimized GLB'},
+                        '200': {
+                            'description': 'The game-optimized GLB, or LOD0 GLB fallback',
+                            'headers': {
+                                'ETag': {'schema': {'type': 'string'}},
+                                'Accept-Ranges': {'schema': {'type': 'string', 'example': 'bytes'}},
+                                'Cache-Control': {'schema': {'type': 'string'}},
+                            },
+                            'content': {'model/gltf-binary': {'schema': {'type': 'string', 'format': 'binary'}}},
+                        },
                         '206': {'description': 'Partial content (range request)'},
                         '304': {'description': 'Not modified (ETag matched)'},
                         '403': _error_response('Access denied (private model)'),
-                        '404': _error_response('No game-optimized variant'),
+                        '404': _error_response('No game-optimized or LOD0 variant'),
                     },
                 }
             },
@@ -1227,7 +1287,15 @@ def get_openapi_spec(base_url=''):
                         {'name': 'Range', 'in': 'header', 'required': False, 'schema': {'type': 'string'}},
                     ],
                     'responses': {
-                        '200': {'description': 'The LOD GLB'},
+                        '200': {
+                            'description': 'The LOD GLB',
+                            'headers': {
+                                'ETag': {'schema': {'type': 'string'}},
+                                'Accept-Ranges': {'schema': {'type': 'string', 'example': 'bytes'}},
+                                'Cache-Control': {'schema': {'type': 'string'}},
+                            },
+                            'content': {'model/gltf-binary': {'schema': {'type': 'string', 'format': 'binary'}}},
+                        },
                         '206': {'description': 'Partial content (range request)'},
                         '304': {'description': 'Not modified (ETag matched)'},
                         '403': _error_response('Access denied (private model)'),
@@ -1239,13 +1307,29 @@ def get_openapi_spec(base_url=''):
                 'get': {
                     'tags': ['Files'],
                     'summary': 'Tellus asset URL for generated impostor media',
-                    'description': 'Returns ModelVariant(kind=impostor) under the original asset id.',
+                    'description': (
+                        'Returns ModelVariant(kind=impostor) under the original asset id. '
+                        'The file may be an image atlas or another compact runtime format.'
+                    ),
                     'parameters': [
                         {'name': 'model_id', 'in': 'path', 'required': True, 'schema': {'type': 'string'}},
                         {'name': 'Range', 'in': 'header', 'required': False, 'schema': {'type': 'string'}},
                     ],
                     'responses': {
-                        '200': {'description': 'The impostor media file'},
+                        '200': {
+                            'description': 'The impostor media file',
+                            'headers': {
+                                'ETag': {'schema': {'type': 'string'}},
+                                'Accept-Ranges': {'schema': {'type': 'string', 'example': 'bytes'}},
+                                'Cache-Control': {'schema': {'type': 'string'}},
+                            },
+                            'content': {
+                                'image/webp': {'schema': {'type': 'string', 'format': 'binary'}},
+                                'image/png': {'schema': {'type': 'string', 'format': 'binary'}},
+                                'model/gltf-binary': {'schema': {'type': 'string', 'format': 'binary'}},
+                                'application/octet-stream': {'schema': {'type': 'string', 'format': 'binary'}},
+                            },
+                        },
                         '206': {'description': 'Partial content (range request)'},
                         '304': {'description': 'Not modified (ETag matched)'},
                         '403': _error_response('Access denied (private model)'),

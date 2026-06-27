@@ -2256,6 +2256,19 @@ def test_tellus_asset_lod_routes_serve_variants_under_original_asset_id():
         ModelVariant.upsert(model.id, "lod", str(lod1_id), level=1, file_format="glb", size=len(lod1_bytes))
         ModelVariant.upsert(model.id, "impostor", str(impostor_id), file_format="webp", size=len(impostor_bytes))
 
+    detail = client.get(f"/api/model/{model.id}")
+    assert detail.status_code == 200, detail.get_json()
+    detail_model = detail.get_json()["model"]
+    assert detail_model["asset_lod_urls"]["game_optimized"].endswith(f"/api/assets/model/{model.id}/game-optimized")
+    assert detail_model["asset_lod_urls"]["lod0"].endswith(f"/api/assets/model/{model.id}/lod/0")
+    assert detail_model["asset_lod_urls"]["lod1"].endswith(f"/api/assets/model/{model.id}/lod/1")
+    assert detail_model["asset_lod_urls"]["lod2"].endswith(f"/api/assets/model/{model.id}/lod/2")
+    assert detail_model["asset_lod_urls"]["impostor"].endswith(f"/api/assets/model/{model.id}/impostor")
+    assert detail_model["has_lod_variants"] is True
+    assert detail_model["has_impostor"] is True
+    assert detail_model["lod_variants"][0]["level"] == 1
+    assert detail_model["lod_variants"][0]["url"].endswith(f"/api/assets/model/{model.id}/lod/1")
+
     game = client.get(f"/api/assets/model/{model.id}/game-optimized")
     assert game.status_code == 200
     assert game.headers["Content-Type"] == "model/gltf-binary"
@@ -2521,6 +2534,17 @@ def test_openapi_documents_workflow_and_bearer_auth():
     assert "MeshStats" in spec["components"]["schemas"]
     assert "RuntimeMetadata" in spec["components"]["schemas"]
     assert "RuntimeCost" in spec["components"]["schemas"]
+    assert "AssetLodUrls" in spec["components"]["schemas"]
+    assert "LodVariant" in spec["components"]["schemas"]
+    assert "asset_lod_urls" in model_props
+    assert "lod_variants" in model_props
+    assert "has_lod_variants" in model_props
+    assert "has_impostor" in model_props
+    assert "/assets/model/{model_id}/game-optimized" in spec["paths"]
+    assert "/assets/model/{model_id}/lod/{level}" in spec["paths"]
+    assert "/assets/model/{model_id}/impostor" in spec["paths"]
+    assert "model/gltf-binary" in spec["paths"]["/assets/model/{model_id}/lod/{level}"]["get"]["responses"]["200"]["content"]
+    assert "image/webp" in spec["paths"]["/assets/model/{model_id}/impostor"]["get"]["responses"]["200"]["content"]
 
 
 def test_game_optimization_defaults_are_public_tellus_contract():
