@@ -2268,6 +2268,9 @@ def test_tellus_asset_lod_routes_serve_variants_under_original_asset_id():
     assert detail_model["has_impostor"] is True
     assert detail_model["lod_variants"][0]["level"] == 1
     assert detail_model["lod_variants"][0]["url"].endswith(f"/api/assets/model/{model.id}/lod/1")
+    assert detail_model["lod_variants"][0]["download_url"].endswith(f"/api/assets/model/{model.id}/lod/1?download=1")
+    assert detail_model["impostor"]["file_format"] == "webp"
+    assert detail_model["impostor"]["url"].endswith(f"/api/assets/model/{model.id}/impostor")
 
     game = client.get(f"/api/assets/model/{model.id}/game-optimized")
     assert game.status_code == 200
@@ -2531,15 +2534,20 @@ def test_openapi_documents_workflow_and_bearer_auth():
     assert "mesh_stats" in model_props
     assert "effective_mesh_stats" in model_props
     assert "runtime_metadata" in model_props
+    assert "asset_lod_urls" in model_props
+    assert "lod_variants" in model_props
+    assert "has_lod_variants" in model_props
+    assert "has_impostor" in model_props
+    assert "impostor" in model_props
     assert "MeshStats" in spec["components"]["schemas"]
     assert "RuntimeMetadata" in spec["components"]["schemas"]
     assert "RuntimeCost" in spec["components"]["schemas"]
     assert "AssetLodUrls" in spec["components"]["schemas"]
     assert "LodVariant" in spec["components"]["schemas"]
-    assert "asset_lod_urls" in model_props
-    assert "lod_variants" in model_props
-    assert "has_lod_variants" in model_props
-    assert "has_impostor" in model_props
+    assert "ImpostorVariant" in spec["components"]["schemas"]
+    lod_props = spec["components"]["schemas"]["LodVariant"]["properties"]
+    assert "runtime_cost" in lod_props
+    assert "mesh_stats" in lod_props
     assert "/assets/model/{model_id}/game-optimized" in spec["paths"]
     assert "/assets/model/{model_id}/lod/{level}" in spec["paths"]
     assert "/assets/model/{model_id}/impostor" in spec["paths"]
