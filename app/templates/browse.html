@@ -182,14 +182,33 @@
                         <span class="truncate">{{ model.owner_username or 'Unknown' }}</span>
                         <span><i class="fas fa-download mr-0.5"></i>{{ model.download_count }}</span>
                     </div>
-                    {% if model.tags %}
-                    <div class="flex flex-wrap gap-1 mt-2">
-                        {% for t in model.tags[:3] %}
-                        <a href="{{ url_for('main.browse', sort=sort, category=category, style=styles, type=asset_types, tag=(tags + [t]) if t not in tags else tags) }}"
-                           class="text-[10px] px-1.5 py-0.5 rounded {{ 'bg-indigo-600 text-white' if t in tags else 'bg-indigo-50 text-indigo-700 hover:bg-indigo-100' }}">{{ t }}</a>
-                        {% endfor %}
+                    <div class="mt-2">
+                        {% if is_owner %}
+                        <select data-category-select
+                                data-model-id="{{ model.id }}"
+                                data-saved-value="{{ model.asset_category or '' }}"
+                                aria-label="Category for {{ model.name }}"
+                                class="w-full rounded border border-blue-200 bg-blue-50 px-2 py-1 text-[11px] font-medium text-blue-800 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                            <option value="">Uncategorized</option>
+                            {% if model.asset_category and model.asset_category not in category_options %}
+                            <option value="{{ model.asset_category }}" selected>{{ model.asset_category|title }}</option>
+                            {% endif %}
+                            {% for c in category_options %}
+                            <option value="{{ c }}" {% if c == model.asset_category %}selected{% endif %}>{{ c|title }}</option>
+                            {% endfor %}
+                        </select>
+                        <p data-category-status class="mt-1 hidden text-[10px] text-gray-500"></p>
+                        {% elif model.asset_category %}
+                        <a href="{{ url_for('main.browse', search=search, sort=sort, tag=tags, category=model.asset_category, style=styles, type=asset_types, asset=asset_kinds) }}"
+                           class="inline-flex max-w-full items-center rounded bg-blue-50 px-2 py-1 text-[11px] font-medium text-blue-700 hover:bg-blue-100">
+                            <span class="truncate">{{ model.asset_category|title }}</span>
+                        </a>
+                        {% else %}
+                        <span class="inline-flex max-w-full items-center rounded bg-gray-100 px-2 py-1 text-[11px] font-medium text-gray-500">
+                            Uncategorized
+                        </span>
+                        {% endif %}
                     </div>
-                    {% endif %}
                     {% if is_owner %}
                     <button type="button"
                             data-admin-delete
@@ -238,6 +257,7 @@
                 assetTypes: {{ (asset_types or []) | tojson }},
                 assetKinds: {{ (asset_kinds or []) | tojson }},
             };
+            const categoryOptions = {{ category_options | tojson }};
             let page = {{ models.page }};
             let hasNext = {{ 'true' if models.has_next else 'false' }};
             let loading = false;
@@ -265,6 +285,52 @@
                 if (extraTag) tagSet.add(extraTag);
                 tagSet.forEach((t) => usp.append('tag', t));
                 return usp.toString();
+            }
+
+            function categoryQuery(categoryValue) {
+                const usp = new URLSearchParams();
+                if (params.search) usp.set('search', params.search);
+                if (params.sort) usp.set('sort', params.sort);
+                params.tags.forEach((t) => usp.append('tag', t));
+                if (categoryValue) usp.set('category', categoryValue);
+                params.styles.forEach((s) => usp.append('style', s));
+                params.assetTypes.forEach((t) => usp.append('type', t));
+                params.assetKinds.forEach((a) => usp.append('asset', a));
+                return usp.toString();
+            }
+
+            function labelForCategory(value) {
+                const text = String(value || '').replace(/[-_]/g, ' ').trim();
+                if (!text) return 'Uncategorized';
+                return text.replace(/\b\w/g, (c) => c.toUpperCase());
+            }
+
+            function categorySelectHtml(m) {
+                const current = String(m.asset_category || '');
+                const known = new Set(categoryOptions);
+                const legacy = current && !known.has(current)
+                    ? `<option value="${esc(current)}" selected>${esc(labelForCategory(current))}</option>`
+                    : '';
+                const options = categoryOptions.map((categoryValue) => {
+                    const selected = categoryValue === current ? ' selected' : '';
+                    return `<option value="${esc(categoryValue)}"${selected}>${esc(labelForCategory(categoryValue))}</option>`;
+                }).join('');
+                return `<select data-category-select data-model-id="${esc(m.id)}" data-saved-value="${esc(current)}" aria-label="Category for ${esc(m.name)}"
+                            class="w-full rounded border border-blue-200 bg-blue-50 px-2 py-1 text-[11px] font-medium text-blue-800 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                            <option value="">Uncategorized</option>${legacy}${options}
+                        </select>
+                        <p data-category-status class="mt-1 hidden text-[10px] text-gray-500"></p>`;
+            }
+
+            function categoryPillHtml(m) {
+                const current = String(m.asset_category || '');
+                if (!current) {
+                    return `<span class="inline-flex max-w-full items-center rounded bg-gray-100 px-2 py-1 text-[11px] font-medium text-gray-500">Uncategorized</span>`;
+                }
+                return `<a href="/browse?${categoryQuery(current)}"
+                           class="inline-flex max-w-full items-center rounded bg-blue-50 px-2 py-1 text-[11px] font-medium text-blue-700 hover:bg-blue-100">
+                            <span class="truncate">${esc(labelForCategory(current))}</span>
+                        </a>`;
             }
 
             function iconFor(fmt) {
@@ -297,12 +363,7 @@
                     statusBadge = `<span class="inline-flex items-center mt-1 w-fit px-1.5 py-0.5 text-[10px] font-medium bg-red-100 text-red-800 rounded"><i class="fas fa-exclamation-triangle mr-1"></i>Preview failed</span>`;
                 }
 
-                const tags = (m.tags || []).slice(0, 3).map((t) => {
-                    const active = params.tags.includes(t);
-                    const cls = active ? 'bg-indigo-600 text-white' : 'bg-indigo-50 text-indigo-700 hover:bg-indigo-100';
-                    return `<a href="/browse?${tagQuery(active ? null : t)}" class="text-[10px] px-1.5 py-0.5 rounded ${cls}">${esc(t)}</a>`;
-                }).join('');
-                const tagBlock = tags ? `<div class="flex flex-wrap gap-1 mt-2">${tags}</div>` : '';
+                const categoryBlock = `<div class="mt-2">${m.is_owner ? categorySelectHtml(m) : categoryPillHtml(m)}</div>`;
                 const deleteButton = m.is_owner ? `<button type="button"
                             data-admin-delete
                             data-model-id="${esc(m.id)}"
@@ -329,10 +390,58 @@
                             <span class="truncate">${esc(m.owner_username)}</span>
                             <span><i class="fas fa-download mr-0.5"></i>${m.download_count}</span>
                         </div>
-                        ${tagBlock}
+                        ${categoryBlock}
                         ${deleteButton}
                     </div>
                 </div>`;
+            }
+
+            async function saveCategorySelect(select) {
+                const modelId = select.dataset.modelId;
+                if (!modelId) return;
+                const card = select.closest('.model-card');
+                const status = card ? card.querySelector('[data-category-status]') : null;
+                const previous = select.dataset.savedValue || '';
+                const next = select.value || '';
+                select.disabled = true;
+                select.classList.add('opacity-70', 'cursor-not-allowed');
+                if (status) {
+                    status.textContent = 'Saving...';
+                    status.classList.remove('hidden', 'text-red-600');
+                    status.classList.add('text-gray-500');
+                }
+                try {
+                    const response = await fetch(`/api/model/${encodeURIComponent(modelId)}`, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                        body: JSON.stringify({ asset_category: next })
+                    });
+                    const data = await response.json().catch(() => ({}));
+                    if (!response.ok || !data.success) {
+                        throw new Error(data.error || `Could not save category (HTTP ${response.status}).`);
+                    }
+                    const saved = (data.model && data.model.asset_category) || '';
+                    select.value = saved;
+                    select.dataset.savedValue = saved;
+                    if (status) {
+                        status.textContent = saved ? `Saved as ${labelForCategory(saved)}` : 'Saved as Uncategorized';
+                        status.classList.remove('text-red-600');
+                        status.classList.add('text-gray-500');
+                        setTimeout(() => status.classList.add('hidden'), 1800);
+                    }
+                } catch (error) {
+                    select.value = previous;
+                    if (status) {
+                        status.textContent = error.message || 'Could not save category.';
+                        status.classList.remove('hidden', 'text-gray-500');
+                        status.classList.add('text-red-600');
+                    } else {
+                        alert(error.message || 'Could not save category.');
+                    }
+                } finally {
+                    select.disabled = false;
+                    select.classList.remove('opacity-70', 'cursor-not-allowed');
+                }
             }
 
             async function deleteModelFromCard(button) {
@@ -369,6 +478,16 @@
                 event.preventDefault();
                 event.stopPropagation();
                 deleteModelFromCard(button);
+            });
+
+            grid.addEventListener('change', (event) => {
+                const select = event.target.closest('[data-category-select]');
+                if (!select) return;
+                saveCategorySelect(select);
+            });
+
+            grid.querySelectorAll('[data-category-select]').forEach((select) => {
+                select.dataset.savedValue = select.value || '';
             });
 
             async function loadMore() {

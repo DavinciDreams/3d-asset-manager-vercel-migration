@@ -137,8 +137,8 @@
                 </div>
             </div>
 
-            <!-- Original / Game-Optimized / Fixed / VRM toggle (shown when a variant exists) -->
-            <div id="variant-toggle" class="{% if not has_game_variant and not fixed_eyes_variant and not vrm_variant %}hidden {% endif %}mt-3 inline-flex rounded-lg border border-gray-200 overflow-hidden text-sm">
+            <!-- Original / Game-Optimized / Fixed / Animated / VRM toggle (shown when a variant exists) -->
+            <div id="variant-toggle" class="{% if not has_game_variant and not fixed_eyes_variant and not rigged_variant and not vrm_variant %}hidden {% endif %}mt-3 inline-flex rounded-lg border border-gray-200 overflow-hidden text-sm">
                 <button type="button" id="variant-btn-original" onclick="switchVariant('original')"
                         class="px-4 py-2 font-medium bg-indigo-600 text-white">
                     Original
@@ -150,6 +150,10 @@
                 <button type="button" id="variant-btn-fixed_eyes" onclick="switchVariant('fixed_eyes')"
                         class="px-4 py-2 font-medium bg-white text-gray-700 hover:bg-gray-50 {% if not fixed_eyes_variant %}hidden{% endif %}">
                     <i class="fas fa-eye mr-1"></i>Fixed<span id="variant-fixed-size">{% if fixed_eyes_variant and fixed_eyes_variant.size %} ({{ "%.2f"|format(fixed_eyes_variant.size / 1024 / 1024) }} MB){% endif %}</span>
+                </button>
+                <button type="button" id="variant-btn-rigged" onclick="switchVariant('rigged')"
+                        class="px-4 py-2 font-medium bg-white text-gray-700 hover:bg-gray-50 {% if not rigged_variant %}hidden{% endif %}">
+                    <i class="fas fa-person-running mr-1"></i>Animated<span id="variant-rigged-size">{% if rigged_variant and rigged_variant.size %} ({{ "%.2f"|format(rigged_variant.size / 1024 / 1024) }} MB){% endif %}</span>
                 </button>
                 <button type="button" id="variant-btn-vrm" onclick="switchVariant('vrm')"
                         class="px-4 py-2 font-medium bg-white text-gray-700 hover:bg-gray-50 {% if not vrm_variant %}hidden{% endif %}">
@@ -1057,17 +1061,19 @@ let GAME_VARIANT_USES_FIXED = {{ game_variant_uses_fixed | tojson }};
 let GAME_VARIANT_USES_RIGGED = {{ game_variant_uses_rigged | tojson }};
 let DETAIL_LOAD_TOKEN = 0;
 
-// The best variant to show in the main preview: game-optimized (smallest AND
-// includes any baked eyes/mouth) -> fixed-eyes -> original. Matches browse +
-// galleries so the detail page shows the fixed/animated version by default.
+// The best variant to show in the main preview: game-optimized when it includes
+// the newest baked/animated source -> animated source -> fixed-eyes -> existing
+// game build -> original. Matches browse + galleries while keeping fresh
+// roundtrips visible immediately.
 function bestVariant() {
     if (GAME_VARIANT_IS_DEFAULT && (!HAS_FIXED_VARIANT || GAME_VARIANT_USES_FIXED || GAME_VARIANT_USES_RIGGED)) return 'game';
+    if (HAS_RIGGED_VARIANT) return 'rigged';
     if (HAS_FIXED_VARIANT) return 'fixed_eyes';
     if (HAS_GAME_VARIANT) return 'game';
     return 'original';
 }
 
-// Which variant is currently shown: 'original' | 'game' | 'fixed_eyes'.
+// Which variant is currently shown: 'original' | 'game' | 'fixed_eyes' | 'rigged'.
 let CURRENT_VARIANT = bestVariant();
 
 function loadDetailModel(modelId, variant, opts = {}) {
@@ -1079,14 +1085,16 @@ function loadDetailModel(modelId, variant, opts = {}) {
     const allowFallback = opts.allowFallback !== false;
     let fallbackStarted = false;
 
-    // The game-optimized + fixed-eyes variants are each served from their own
+    // The game-optimized + fixed-eyes + animated variants are served from their
     // endpoint; the original uses the default view URL (passing undefined lets
     // the viewer default it).
     const srcUrl = variant === 'game'
         ? `/api/model/${modelId}/game-optimized`
         : (variant === 'fixed_eyes'
             ? `/api/model/${modelId}/fixed-eyes`
-            : undefined);
+            : (variant === 'rigged'
+                ? `/api/model/${modelId}/rigged`
+                : undefined));
 
     try {
         const handleDetailLoad = () => {
@@ -1159,7 +1167,8 @@ function switchVariant(variant) {
     // Style each variant button; preserve a button's existing `hidden` class so
     // toggling selection never reveals a variant that doesn't exist yet.
     [['original', 'variant-btn-original'], ['game', 'variant-btn-game'],
-     ['fixed_eyes', 'variant-btn-fixed_eyes'], ['vrm', 'variant-btn-vrm']].forEach(([key, id]) => {
+     ['fixed_eyes', 'variant-btn-fixed_eyes'], ['rigged', 'variant-btn-rigged'],
+     ['vrm', 'variant-btn-vrm']].forEach(([key, id]) => {
         const btn = document.getElementById(id);
         if (!btn) return;
         const wasHidden = btn.classList.contains('hidden');
@@ -1225,7 +1234,7 @@ function hideGameOptimized() {
     if (link) link.classList.add('hidden');
     if (divider) divider.classList.add('hidden');
     if (CURRENT_VARIANT === 'game') {
-        switchVariant(HAS_FIXED_VARIANT ? 'fixed_eyes' : 'original');
+        switchVariant(bestVariant());
     }
 }
 
@@ -1249,6 +1258,23 @@ function revealFixedEyes(sizeBytes) {
     if (divider) divider.classList.remove('hidden');
     // Game-optimize will now use the fixed-eyes version as its source.
     const note = document.getElementById('game-opt-fixed-note');
+    if (note) note.classList.remove('hidden');
+}
+
+// Reveal the returned animated/rigged source after a mesh2motion roundtrip.
+function revealRiggedVariant(sizeBytes) {
+    HAS_RIGGED_VARIANT = true;
+    const toggle = document.getElementById('variant-toggle');
+    if (toggle) toggle.classList.remove('hidden');
+    const btn = document.getElementById('variant-btn-rigged');
+    if (btn) btn.classList.remove('hidden');
+    const sizeEl = document.getElementById('variant-rigged-size');
+    if (sizeEl && sizeBytes) sizeEl.textContent = ` (${(sizeBytes / 1024 / 1024).toFixed(2)} MB)`;
+    const link = document.getElementById('export-rigged-link');
+    const divider = document.getElementById('export-rigged-divider');
+    if (link) link.classList.remove('hidden');
+    if (divider) divider.classList.remove('hidden');
+    const note = document.getElementById('game-opt-rigged-note');
     if (note) note.classList.remove('hidden');
 }
 
@@ -1575,7 +1601,7 @@ document.addEventListener('DOMContentLoaded', function() {
         if (initial !== 'original') {
             const active = 'bg-indigo-600 text-white';
             const inactive = 'bg-white text-gray-700 hover:bg-gray-50';
-            ['original','game','fixed_eyes'].forEach((k) => {
+            ['original','game','fixed_eyes','rigged'].forEach((k) => {
                 const btn = document.getElementById('variant-btn-' + k);
                 if (!btn) return;
                 const wasHidden = btn.classList.contains('hidden');
@@ -1773,19 +1799,14 @@ document.addEventListener('DOMContentLoaded', function() {
                 const data = await parseAnimationSourceResponse(response);
                 if (!response.ok || !data.success) throw new Error(data.error || 'Animated source upload failed.');
 
-                HAS_RIGGED_VARIANT = true;
-                const rl = document.getElementById('export-rigged-link');
-                const rd = document.getElementById('export-rigged-divider');
-                if (rl) rl.classList.remove('hidden');
-                if (rd) rd.classList.remove('hidden');
-                const riggedNote = document.getElementById('game-opt-rigged-note');
-                if (riggedNote) riggedNote.classList.remove('hidden');
+                revealRiggedVariant(data.variant && data.variant.size);
 
                 if (data.status_url) {
                     await pollAnimationSourceOptimize(data.status_url);
                 } else {
                     const count = (data.animations || []).length;
-                    animationSourceStatus.textContent = `Animated source saved${count ? ` with ${count} clip(s)` : ''}.`;
+                    animationSourceStatus.innerHTML = `Animated source saved${count ? ` with ${count} clip(s)` : ''}. `
+                        + "<button type=\"button\" class=\"font-semibold text-cyan-700 hover:text-cyan-900 underline\" onclick=\"switchVariant('rigged')\">View it</button>";
                     hideGameOptimized();
                 }
             } catch (error) {

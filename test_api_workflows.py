@@ -257,6 +257,38 @@ def test_uncategorized_gltf_upload_appears_in_browse():
     assert "Uncategorized GLTF Probe" in browse.get_data(as_text=True)
 
 
+def test_browse_owner_cards_surface_category_dropdown_instead_of_tags():
+    app = create_app()
+    client = app.test_client()
+    with app.app_context():
+        _ensure_user("browse-owner")
+
+    login = client.post("/auth/login", data={
+        "login_field": "browse-owner",
+        "password": "pw123456",
+    }, follow_redirects=True)
+    assert login.status_code == 200
+
+    upload = client.post("/api/upload", data={
+        "name": "Category Editable Browse Probe",
+        "is_public": "true",
+        "asset_category": "fauna",
+        "tags": "legacy-tag",
+        "file": (io.BytesIO(b"glTF" + b"\x21" * 64), "category_editable.glb"),
+    }, content_type="multipart/form-data")
+    assert upload.status_code == 201, upload.get_json()
+    model_id = upload.get_json()["model"]["id"]
+
+    browse = client.get("/browse")
+    assert browse.status_code == 200
+    html = browse.get_data(as_text=True)
+    assert "Category Editable Browse Probe" in html
+    assert f'data-category-select\n                                data-model-id="{model_id}"' in html
+    assert f'data-saved-value="fauna"' in html
+    assert '<option value="fauna" selected>Fauna</option>' in html
+    assert "legacy-tag" not in html
+
+
 def test_fbx_with_vrm_variant_stays_in_model_browse():
     app = create_app()
     client = app.test_client()
@@ -459,6 +491,29 @@ def test_bearer_upload_enrich_approve_and_bundle():
     assert download.status_code == 200
     assert download.content_type == "application/zip"
     assert download.data.startswith(b"PK")
+
+
+def test_materials_category_is_not_persisted_or_listed_as_facet():
+    app = create_app()
+    client = app.test_client()
+    headers = {"Authorization": "Bearer test-token"}
+
+    upload = client.post("/api/upload", headers=headers, data={
+        "is_public": "true",
+        "asset_category": "materials",
+        "file": (io.BytesIO(b"glTF" + b"\x00" * 64), "tileable_surface.glb"),
+    }, content_type="multipart/form-data")
+    assert upload.status_code == 201, upload.get_json()
+    model_id = upload.get_json()["model"]["id"]
+    assert upload.get_json()["model"]["asset_category"] is None
+
+    with app.app_context():
+        model = Model3D.get_by_id(model_id)
+        model.asset_category = "material"
+        model.save()
+        facets = Model3D.get_public_facets()
+    assert "material" not in facets["categories"]
+    assert "materials" not in facets["categories"]
 
 
 def test_upload_derives_rig_and_animation_metadata_from_glb():
@@ -768,6 +823,16 @@ def test_owner_can_attach_animated_roundtrip_to_original_model():
     assert variant is not None
     assert variant.settings["source"] == "animation_roundtrip"
     assert variant.settings["original_filename"] == "target_wave.glb"
+
+    detail = client.get(f"/model/{model.id}")
+    assert detail.status_code == 200
+    html = detail.get_data(as_text=True)
+    assert 'id="variant-btn-rigged"' in html
+    assert "switchVariant('rigged')" in html
+    assert f"/api/model/${{modelId}}/rigged" in html
+    assert "if (HAS_RIGGED_VARIANT) return 'rigged';" in html
+    assert "{%" not in html
+    assert "{{" not in html
 
 
 def test_game_optimizer_prefers_uploaded_animated_roundtrip_source():
@@ -4087,7 +4152,7 @@ def test_ai_enrichment_enforces_subject_category_taxonomy(monkeypatch):
             "Seamless Moss Texture",
             "flora",
             "A seamless tileable moss texture material with albedo, roughness, and normal map detail.",
-            "material",
+            "flora",
         ),
     ]
 
@@ -4185,9 +4250,10 @@ def test_ai_enrichment_prompt_uses_fab_listing_copy(monkeypatch):
     assert "Keep the title under 80 characters" in user_text
     assert "Return up to 10 discoverability tags" in user_text
     assert "Animals and creatures are always fauna" in system_text
-    assert "Use material only for actual texture" in user_text
+    assert "Do not use material as a category" in user_text
     assert schema["properties"]["tags"]["maxItems"] == 10
     assert "Fab listing title under 80 characters" in schema["properties"]["title"]["description"]
     assert "Buyer-facing Fab product description" in schema["properties"]["description"]["description"]
     assert "furniture for furniture" in schema["properties"]["asset_category"]["description"]
+    assert "do not use material as a category" in schema["properties"]["asset_category"]["description"]
     assert enriched["title"] == "Classical Stone Fountain"
