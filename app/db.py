@@ -400,6 +400,7 @@ def init_database(engine):
     metadata.create_all(engine)
     _ensure_asset_file_columns(engine)
     _ensure_model_columns(engine)
+    _clear_material_categories(engine)
     _ensure_bundle_table(engine)
     _ensure_optimization_job_table(engine)
     _ensure_model_variants_table(engine)
@@ -463,6 +464,14 @@ def _ensure_model_columns(engine):
             conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_models_content_hash ON models (content_hash)"))
         else:
             conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_models_content_hash ON models (content_hash)"))
+
+
+def _clear_material_categories(engine):
+    with engine.begin() as conn:
+        conn.execute(text(
+            "UPDATE models SET asset_category = NULL "
+            "WHERE lower(asset_category) IN ('material', 'materials')"
+        ))
 
 
 def _ensure_bundle_table(engine):

@@ -21,6 +21,19 @@ from app.db import (
     world_states,
 )
 
+CATEGORY_OPTIONS = [
+    "fauna",
+    "flora",
+    "building",
+    "furniture",
+    "person",
+    "vehicle",
+    "environment",
+    "animation",
+    "prop",
+    "other",
+]
+
 
 class User(UserMixin):
     def __init__(self, username=None, email=None, password_hash=None, _id=None, created_at=None):
@@ -522,6 +535,8 @@ class Model3D:
     def normalize_category(raw):
         value = str(raw or "").strip().lower()
         value = " ".join(token for token in value.replace("_", " ").replace("-", " ").split())
+        if value in {"material", "materials"}:
+            return None
         return value or None
 
     @staticmethod
@@ -1051,7 +1066,9 @@ class Model3D:
                     if item:
                         values.add(item)
             elif value:
-                values.add(value)
+                normalized = Model3D.normalize_category(value)
+                if normalized:
+                    values.add(normalized)
         return sorted(values)
 
     @staticmethod

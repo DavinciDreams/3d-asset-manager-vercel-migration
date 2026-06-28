@@ -48,7 +48,11 @@ def create_app():
     login_manager.login_message = "Please log in to access this page."
     login_manager.login_message_category = "info"
 
-    from app.models import User
+    from app.models import CATEGORY_OPTIONS, User
+
+    @app.context_processor
+    def inject_category_options():
+        return {"category_options": CATEGORY_OPTIONS}
 
     @login_manager.user_loader
     def load_user(user_id):
