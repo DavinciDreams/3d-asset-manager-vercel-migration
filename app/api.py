@@ -2983,6 +2983,7 @@ def _serialize_browse_card(model):
     else:
         view_url = None
     processing_state = _model_processing_state(model)
+    lod_fields = _asset_lod_url_fields(model)
     return {
         'id': model.id,
         'name': model.name or 'Untitled',
@@ -3020,6 +3021,11 @@ def _serialize_browse_card(model):
         'has_vrm_variant': bool(vrm_variant and vrm_variant.file_id),
         'has_optimized_vrm_variant': bool(optimized_vrm_variant and optimized_vrm_variant.file_id),
         'game_uses_fixed': game_uses_fixed,
+        'lod_ready': lod_fields['lod_ready'],
+        'lod_status': lod_fields['lod_status'],
+        'lod_available_levels': lod_fields['lod_available_levels'],
+        'lod_missing_levels': lod_fields['lod_missing_levels'],
+        'lod_summary': lod_fields['lod_summary'],
         'camera_orbit': model.camera_orbit or None,
         'default_animation': model.default_animation or None,
     }
@@ -3448,11 +3454,15 @@ def _media_presence_fields(model):
     game = _game_optimized_fields(model)
     processing_state = _model_processing_state(model, game)
     capture_state = _media_capture_state_for_model(model)
+    viewable = bool(model.viewable_file_id) or (model.file_format or '').lower() in ('glb', 'gltf')
+    original_view_url = url_for('api.view_model', model_id=model.id) + '?viewer=2' if viewable else None
     return {
         'has_thumbnail': bool(model.thumbnail_file_id),
         'thumbnail_url': url_for('api.get_thumbnail', model_id=model.id) if model.thumbnail_file_id else None,
         'has_preview': bool(model.preview_file_id),
         'preview_url': url_for('api.get_preview', model_id=model.id) if model.preview_file_id else None,
+        'view_url': original_view_url,
+        'lod_preview_fallback_url': original_view_url,
         'mesh_stats': _model_mesh_stats(model),
         'physical_metadata': _model_physical_metadata(model),
         'effective_file_size': _effective_file_size(model, game),
@@ -3804,25 +3814,38 @@ def _game_optimized_fields(model):
 
 
 def _asset_lod_url_fields(model):
+    expected_levels = [0, 1, 2]
     lod_variants = []
-    for level in (0, 1, 2):
+    available_levels = []
+    for level in expected_levels:
         variant = ModelVariant.get(model.id, 'lod', level=level)
         if not variant or not variant.file_id:
             continue
+        available_levels.append(level)
         runtime_cost = _variant_runtime_cost_metadata(variant)
+        mesh_stats = _variant_mesh_stats(variant)
         lod_variants.append({
             'level': level,
             'size': variant.size,
+            'size_mb': round((variant.size or 0) / 1024 / 1024, 3) if variant.size else None,
+            'vertices': _lod_metric_value(mesh_stats, runtime_cost, 'vertices', 'vertex_count'),
+            'triangles': _lod_metric_value(mesh_stats, runtime_cost, 'triangles', 'triangle_count'),
             'file_format': variant.file_format,
             'status': variant.status,
             'settings': variant.settings or {},
-            'mesh_stats': _variant_mesh_stats(variant),
+            'mesh_stats': mesh_stats,
             'physical': _variant_physical_metadata(variant),
             'runtime_cost': runtime_cost,
             'url': url_for('api.get_asset_lod', model_id=model.id, level=level),
             'download_url': url_for('api.get_asset_lod', model_id=model.id, level=level, download=1),
             'updated_at': variant.updated_at.isoformat() if variant.updated_at else None,
         })
+        lod_variants[-1]['recommended_use'] = _lod_recommended_use(
+            lod_variants[-1]['vertices'],
+            lod_variants[-1]['size'],
+        )
+    missing_levels = [level for level in expected_levels if level not in available_levels]
+    lod_ready = not missing_levels
     impostor = ModelVariant.get(model.id, 'impostor')
     impostor_payload = None
     if impostor and impostor.file_id:
@@ -3845,8 +3868,77 @@ def _asset_lod_url_fields(model):
         },
         'lod_variants': lod_variants,
         'has_lod_variants': bool(lod_variants),
+        'lod_ready': lod_ready,
+        'lod_status': 'ready' if lod_ready else ('partial' if lod_variants else 'missing'),
+        'lod_available_levels': available_levels,
+        'lod_missing_levels': missing_levels,
+        'lod_summary': _lod_summary_payload(lod_variants, lod_ready, missing_levels),
         'has_impostor': bool(impostor and impostor.file_id),
         'impostor': impostor_payload,
+    }
+
+
+def _lod_metric_value(mesh_stats, runtime_cost, mesh_key, runtime_key):
+    value = None
+    if isinstance(mesh_stats, dict):
+        value = mesh_stats.get(mesh_key)
+    if value is None and isinstance(runtime_cost, dict):
+        value = runtime_cost.get(runtime_key)
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _lod_recommended_use(vertices, size):
+    """Heuristic bucket for quick asset triage. Counts stay exposed for overrides."""
+    if vertices is None and size is None:
+        return None
+    vertices = vertices if vertices is not None else 10**9
+    size = size if size is not None else 10**12
+    if vertices <= 15000 and size <= 512 * 1024:
+        return 'large_fill'
+    if vertices <= 40000 and size <= 1536 * 1024:
+        return 'general_fill'
+    if vertices <= 100000 and size <= 4 * 1024 * 1024:
+        return 'feature'
+    return 'hero_only'
+
+
+def _lod_summary_payload(lod_variants, lod_ready, missing_levels):
+    levels = []
+    for lod in lod_variants or []:
+        size = lod.get('size')
+        vertices = lod.get('vertices')
+        triangles = lod.get('triangles')
+        levels.append({
+            'level': lod.get('level'),
+            'size': size,
+            'size_mb': lod.get('size_mb'),
+            'vertices': vertices,
+            'triangles': triangles,
+            'recommended_use': _lod_recommended_use(vertices, size),
+        })
+    cheapest = None
+    if levels:
+        cheapest = min(
+            levels,
+            key=lambda item: (
+                item.get('vertices') if item.get('vertices') is not None else 10**9,
+                item.get('size') if item.get('size') is not None else 10**12,
+            ),
+        )
+    return {
+        'ready': bool(lod_ready),
+        'status': 'ready' if lod_ready else ('partial' if levels else 'missing'),
+        'missing_levels': missing_levels,
+        'levels': levels,
+        'cheapest_level': cheapest.get('level') if cheapest else None,
+        'cheapest_vertices': cheapest.get('vertices') if cheapest else None,
+        'cheapest_triangles': cheapest.get('triangles') if cheapest else None,
+        'cheapest_size': cheapest.get('size') if cheapest else None,
+        'cheapest_size_mb': cheapest.get('size_mb') if cheapest else None,
+        'recommended_use': cheapest.get('recommended_use') if cheapest else None,
     }
 
 
@@ -4634,6 +4726,13 @@ def _optimization_job_to_api(row):
         'original_size': result.get('original_size'),
         'optimized_size': result.get('optimized_size'),
         'savings_ratio': result.get('savings_ratio'),
+        'lod_result': result.get('lod_result'),
+        'lod_variants': result.get('lod_variants') or [],
+        'lod_ready': result.get('lod_ready'),
+        'lod_status': result.get('lod_status'),
+        'lod_available_levels': result.get('lod_available_levels') or [],
+        'lod_missing_levels': result.get('lod_missing_levels') or [],
+        'lod_summary': result.get('lod_summary'),
         'error': row.error,
         'created_at': row.created_at.isoformat() if row.created_at else None,
         'updated_at': row.updated_at.isoformat() if row.updated_at else None,
@@ -4839,6 +4938,7 @@ def _run_game_optimizer(model, owner_id, settings):
     workdir = tempfile.mkdtemp(prefix='game_optimize_')
     try:
         report = {}
+        source_prepare = {'draco_decompressed': False}
 
         # If the source is ALREADY a meshopt/gltfpack GLB, it is effectively
         # already game-optimized. Re-running gltfpack on it is redundant and
@@ -4850,11 +4950,9 @@ def _run_game_optimizer(model, owner_id, settings):
         else:
             if not gltfpack_bin:
                 raise RuntimeError('Game optimization is unavailable because gltfpack is not installed.')
-            in_path = os.path.join(workdir, f'input.{src_fmt}')
+            in_path, source_prepare = _prepare_lod_input_path(src_bytes, src_fmt, workdir)
             out_path = os.path.join(workdir, 'game.glb')
             report_path = os.path.join(workdir, 'report.json')
-            with open(in_path, 'wb') as f:
-                f.write(src_bytes)
 
             cmd = [
                 gltfpack_bin,
@@ -4897,6 +4995,7 @@ def _run_game_optimizer(model, owner_id, settings):
             'source_format': src_fmt,
             'source_size': len(src_bytes),
             'source_variant_kind': source_variant_kind,
+            'source_prepare': source_prepare,
             'source_is_rigged': used_rigged,
             'source_is_fixed_eyes': used_fixed_eyes,
             'optimized_size': len(out_bytes),
@@ -4964,6 +5063,7 @@ def _run_game_optimizer(model, owner_id, settings):
             'source_runtime_cost': source_runtime_cost,
             'runtime_cost': runtime_cost,
             'source_variant_kind': source_variant_kind,
+            'source_prepare': source_prepare,
             'source_is_rigged': used_rigged,
             'source_is_fixed_eyes': used_fixed_eyes,
             'report': report,
@@ -5000,6 +5100,7 @@ def _run_game_optimizer(model, owner_id, settings):
                 'texture_compression': texture_note,
             },
             'runtime_cost': runtime_cost,
+            'source_prepare': source_prepare,
             'report': report,
         }
     finally:
@@ -5238,6 +5339,9 @@ def _process_game_optimization_job(app, job_id):
             if not model:
                 raise FileNotFoundError('Model not found')
             result = _run_game_optimizer(model, job.owner_id or model.user_id, job.settings or {})
+            lod_result = _run_lod_optimizer(model, job.owner_id or model.user_id)
+            result['lod_result'] = lod_result
+            result.update(_asset_lod_url_fields(model))
             _patch_optimization_job(
                 app,
                 job_id,

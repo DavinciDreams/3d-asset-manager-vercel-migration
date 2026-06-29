@@ -209,6 +209,16 @@
                         </span>
                         {% endif %}
                     </div>
+                    {% if model.lod_summary and model.lod_summary.levels %}
+                    <div class="mt-2 rounded border border-indigo-100 bg-indigo-50 px-2 py-1 text-[11px] text-indigo-800"
+                         title="{% for level in model.lod_summary.levels %}LOD{{ level.level }}: {% if level.size_mb %}{{ "%.2f"|format(level.size_mb) }} MB{% endif %}{% if level.vertices %}, {{ "{:,}".format(level.vertices) }} vertices{% endif %}{% if level.triangles %}, {{ "{:,}".format(level.triangles) }} triangles{% endif %}{% if not loop.last %} | {% endif %}{% endfor %}">
+                        <i class="fas fa-layer-group mr-1"></i>
+                        {{ model.lod_summary.recommended_use|default('lod', true)|replace('_', ' ')|title }}
+                        · LOD{{ model.lod_summary.cheapest_level }}
+                        {% if model.lod_summary.cheapest_size_mb %} · {{ "%.2f"|format(model.lod_summary.cheapest_size_mb) }} MB{% endif %}
+                        {% if model.lod_summary.cheapest_vertices %} · {{ "{:,}".format(model.lod_summary.cheapest_vertices) }}v{% endif %}
+                    </div>
+                    {% endif %}
                     {% if is_owner %}
                     <button type="button"
                             data-admin-delete
@@ -339,6 +349,30 @@
                 return 'fa-cube';
             }
 
+            function lodSummaryHtml(m) {
+                const summary = m.lod_summary || {};
+                const levels = Array.isArray(summary.levels) ? summary.levels : [];
+                if (!levels.length) return '';
+                const label = String(summary.recommended_use || 'lod').replace(/_/g, ' ')
+                    .replace(/\b\w/g, (c) => c.toUpperCase());
+                const title = levels.map((level) => {
+                    const parts = [`LOD${level.level}`];
+                    if (level.size_mb != null) parts.push(`${Number(level.size_mb).toFixed(2)} MB`);
+                    if (level.vertices != null) parts.push(`${Number(level.vertices).toLocaleString()} vertices`);
+                    if (level.triangles != null) parts.push(`${Number(level.triangles).toLocaleString()} triangles`);
+                    return parts.join(': ');
+                }).join(' | ');
+                const bits = [
+                    label,
+                    `LOD${summary.cheapest_level}`,
+                    summary.cheapest_size_mb != null ? `${Number(summary.cheapest_size_mb).toFixed(2)} MB` : '',
+                    summary.cheapest_vertices != null ? `${Number(summary.cheapest_vertices).toLocaleString()}v` : '',
+                ].filter(Boolean);
+                return `<div class="mt-2 rounded border border-indigo-100 bg-indigo-50 px-2 py-1 text-[11px] text-indigo-800" title="${esc(title)}">
+                    <i class="fas fa-layer-group mr-1"></i>${esc(bits.join(' · '))}
+                </div>`;
+            }
+
             function cardHtml(m) {
                 let media;
                 const showAnimationPreview = !!(m.is_animated && m.has_preview && m.preview_url);
@@ -364,6 +398,7 @@
                 }
 
                 const categoryBlock = `<div class="mt-2">${m.is_owner ? categorySelectHtml(m) : categoryPillHtml(m)}</div>`;
+                const lodBlock = lodSummaryHtml(m);
                 const deleteButton = m.is_owner ? `<button type="button"
                             data-admin-delete
                             data-model-id="${esc(m.id)}"
@@ -391,6 +426,7 @@
                             <span><i class="fas fa-download mr-0.5"></i>${m.download_count}</span>
                         </div>
                         ${categoryBlock}
+                        ${lodBlock}
                         ${deleteButton}
                     </div>
                 </div>`;

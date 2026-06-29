@@ -1038,6 +1038,89 @@ def test_lod_optimizer_decodes_draco_sources_before_gltfpack(monkeypatch, tmp_pa
     assert lod0.settings["source_prepare"]["draco_decompressed"] is True
 
 
+def test_game_optimizer_decodes_draco_sources_before_gltfpack(monkeypatch, tmp_path):
+    import app.api as api
+    import shutil
+    import subprocess
+
+    app = create_app()
+    calls = []
+    cli_path = tmp_path / "gltf-transform-cli.js"
+    cli_path.write_text("", encoding="utf-8")
+
+    def fake_which(name):
+        if name == "gltfpack":
+            return "gltfpack"
+        if name == "node":
+            return "node"
+        return None
+
+    def fake_run(cmd, capture_output=True, text=True, timeout=300, check=False):
+        calls.append(list(cmd))
+        if "copy" in cmd:
+            out_path = Path(cmd[cmd.index("copy") + 2])
+            out_path.write_bytes(_minimal_glb({"asset": {"version": "2.0"}, "scene": 0}))
+        else:
+            out_path = Path(cmd[cmd.index("-o") + 1])
+            out_path.write_bytes(_minimal_glb({
+                "asset": {"version": "2.0"},
+                "extras": {"optimized": True},
+            }))
+            report_path = Path(cmd[cmd.index("-r") + 1])
+            report_path.write_text(json.dumps({"optimized": True}), encoding="utf-8")
+
+        class Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return Result()
+
+    monkeypatch.setattr(shutil, "which", fake_which)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(api, "_gltf_transform_cli_path", lambda: cli_path)
+
+    with app.app_context():
+        owner = _ensure_user("game-draco-owner")
+        source = _minimal_glb({
+            "asset": {"version": "2.0"},
+            "extensionsUsed": ["KHR_draco_mesh_compression"],
+            "meshes": [{
+                "primitives": [{
+                    "attributes": {"POSITION": 0},
+                    "extensions": {"KHR_draco_mesh_compression": {"bufferView": 0, "attributes": {"POSITION": 0}}},
+                }],
+            }],
+            "bufferViews": [{"buffer": 0, "byteOffset": 0, "byteLength": 0}],
+            "buffers": [{"byteLength": 0}],
+        })
+        model = Model3D(
+            name="Game Draco Source",
+            file_format="glb",
+            file_size=len(source),
+            user_id=owner.id,
+            is_public=True,
+            gridfs_file_id=app.config["FILE_STORE"].put(
+                source,
+                filename="game-draco-source.glb",
+                content_type="model/gltf-binary",
+                metadata={},
+            ),
+            asset_types=[],
+        ).save()
+
+        result = api._run_game_optimizer(model, owner.id, {})
+        game = ModelVariant.get(model.id, "game")
+
+    assert result["success"] is True
+    assert calls[0][2] == "copy"
+    assert calls[0][3].endswith("input.glb")
+    assert calls[0][4].endswith("input-dedraco.glb")
+    assert calls[1][calls[1].index("-i") + 1] == calls[0][4]
+    assert result["source_prepare"]["draco_decompressed"] is True
+    assert game.settings["source_prepare"]["draco_decompressed"] is True
+
+
 def test_replacing_vrm_drops_stale_optimized_variant(monkeypatch):
     app = create_app()
     client = app.test_client()
@@ -2318,7 +2401,15 @@ def test_tellus_asset_lod_routes_serve_variants_under_original_asset_id():
             metadata={"kind": "impostor", "source_model_id": model.id},
         )
         ModelVariant.upsert(model.id, "game", str(game_id), file_format="glb", size=len(game_bytes))
-        ModelVariant.upsert(model.id, "lod", str(lod1_id), level=1, file_format="glb", size=len(lod1_bytes))
+        ModelVariant.upsert(
+            model.id,
+            "lod",
+            str(lod1_id),
+            level=1,
+            file_format="glb",
+            size=len(lod1_bytes),
+            settings={"mesh_stats": {"vertices": 1234, "triangles": 2345}},
+        )
         ModelVariant.upsert(model.id, "impostor", str(impostor_id), file_format="webp", size=len(impostor_bytes))
 
     detail = client.get(f"/api/model/{model.id}")
@@ -2330,6 +2421,16 @@ def test_tellus_asset_lod_routes_serve_variants_under_original_asset_id():
     assert detail_model["asset_lod_urls"]["lod2"].endswith(f"/api/assets/model/{model.id}/lod/2")
     assert detail_model["asset_lod_urls"]["impostor"].endswith(f"/api/assets/model/{model.id}/impostor")
     assert detail_model["has_lod_variants"] is True
+    assert detail_model["lod_ready"] is False
+    assert detail_model["lod_status"] == "partial"
+    assert detail_model["lod_available_levels"] == [1]
+    assert detail_model["lod_missing_levels"] == [0, 2]
+    assert detail_model["lod_preview_fallback_url"].endswith(f"/api/view/{model.id}?viewer=2")
+    assert detail_model["lod_variants"][0]["vertices"] == 1234
+    assert detail_model["lod_variants"][0]["triangles"] == 2345
+    assert detail_model["lod_variants"][0]["recommended_use"] == "large_fill"
+    assert detail_model["lod_summary"]["cheapest_vertices"] == 1234
+    assert detail_model["lod_summary"]["recommended_use"] == "large_fill"
     assert detail_model["has_impostor"] is True
     assert detail_model["lod_variants"][0]["level"] == 1
     assert detail_model["lod_variants"][0]["url"].endswith(f"/api/assets/model/{model.id}/lod/1")
@@ -2397,6 +2498,149 @@ def test_tellus_asset_game_route_falls_back_to_lod0_variant():
 
     strict_game = client.get(f"/api/model/{model.id}/game-optimized")
     assert strict_game.status_code == 404
+
+
+def test_model_detail_renders_lod_variant_tabs():
+    app = create_app()
+    client = app.test_client()
+    with app.app_context():
+        owner = _ensure_user("detail-lod-owner")
+        source_id = app.config["FILE_STORE"].put(
+            _minimal_glb({"asset": {"version": "2.0"}}),
+            filename="detail_lod_source.glb",
+            content_type="model/gltf-binary",
+            metadata={},
+        )
+        model = Model3D(
+            name="Detail LOD Source",
+            file_format="glb",
+            file_size=64,
+            user_id=owner.id,
+            is_public=True,
+            gridfs_file_id=str(source_id),
+        ).save()
+        lod1_bytes = _minimal_glb({"asset": {"version": "2.0"}, "scene": 1})
+        lod1_id = app.config["FILE_STORE"].put(
+            lod1_bytes,
+            filename="detail_lod_source-lod1.glb",
+            content_type="model/gltf-binary",
+            metadata={"kind": "lod", "level": 1, "source_model_id": model.id},
+        )
+        ModelVariant.upsert(
+            model.id,
+            "lod",
+            str(lod1_id),
+            level=1,
+            file_format="glb",
+            size=len(lod1_bytes),
+            settings={"role": "mid", "mesh_stats": {"vertices": 1234, "triangles": 2345}},
+        )
+
+    detail = client.get(f"/model/{model.id}")
+    assert detail.status_code == 200
+    html = detail.get_data(as_text=True)
+    assert 'id="variant-btn-lod1"' in html
+    assert "switchVariant('lod1')" in html
+    assert f"/api/assets/model/{model.id}/lod/1" in html
+    assert "LOD1 GLB" in html
+    assert "LOD partial: missing 0, 2" in html
+    assert "1,234v" in html
+
+    browse = client.get("/api/models/browse?per_page=20")
+    assert browse.status_code == 200, browse.get_json()
+    card = next(item for item in browse.get_json()["models"] if item["id"] == model.id)
+    assert card["lod_summary"]["cheapest_vertices"] == 1234
+    assert card["lod_summary"]["recommended_use"] == "large_fill"
+
+
+def test_game_optimization_job_generates_lods_for_one_model(monkeypatch):
+    import app.api as api
+
+    app = create_app()
+    client = app.test_client()
+    generated = {}
+
+    def fake_game_optimizer(model, owner_id, settings):
+        generated["game_model_id"] = model.id
+        generated["game_owner_id"] = owner_id
+        return {
+            "success": True,
+            "source_model_id": model.id,
+            "original_size": 1000,
+            "optimized_size": 500,
+            "savings_ratio": 0.5,
+        }
+
+    def fake_lod_optimizer(model, owner_id=None, levels=None):
+        generated["lod_model_id"] = model.id
+        generated["lod_owner_id"] = owner_id
+        lod0_bytes = _minimal_glb({"asset": {"version": "2.0"}, "scene": 0})
+        lod0_id = app.config["FILE_STORE"].put(
+            lod0_bytes,
+            filename="single-lod-source-lod0.glb",
+            content_type="model/gltf-binary",
+            metadata={"kind": "lod", "level": 0, "source_model_id": model.id},
+        )
+        ModelVariant.upsert(
+            model.id,
+            "lod",
+            str(lod0_id),
+            level=0,
+            file_format="glb",
+            size=len(lod0_bytes),
+            settings={"mesh_stats": {"vertices": 900, "triangles": 1500}},
+        )
+        return {"success": True, "source_model_id": model.id}
+
+    monkeypatch.setattr(api, "_run_game_optimizer", fake_game_optimizer)
+    monkeypatch.setattr(api, "_run_lod_optimizer", fake_lod_optimizer)
+    monkeypatch.setattr(
+        api,
+        "_start_game_optimization_thread",
+        lambda app_obj, job_id: api._process_game_optimization_job(app_obj, job_id),
+    )
+
+    with app.app_context():
+        owner = _ensure_user("single-lod-owner")
+        source_id = app.config["FILE_STORE"].put(
+            _minimal_glb({"asset": {"version": "2.0"}}),
+            filename="single_lod_source.glb",
+            content_type="model/gltf-binary",
+            metadata={},
+        )
+        model = Model3D(
+            name="Single LOD Source",
+            file_format="glb",
+            file_size=64,
+            user_id=owner.id,
+            is_public=False,
+            gridfs_file_id=str(source_id),
+        ).save()
+
+    client.post("/auth/login", data={"login_field": "single-lod-owner", "password": "pw123456"})
+    detail = client.get(f"/model/{model.id}")
+    assert detail.status_code == 200
+    html = detail.get_data(as_text=True)
+    assert "Create Game + LODs" in html
+    assert "Generate LODs" not in html
+
+    response = client.post(f"/api/model/{model.id}/optimize-game", json={})
+    assert response.status_code == 202, response.get_json()
+    body = response.get_json()
+    assert body["success"] is True
+    status = client.get(body["status_url"])
+    assert status.status_code == 200, status.get_json()
+    job = status.get_json()["job"]
+    assert job["status"] == "done"
+    assert job["lod_available_levels"] == [0]
+    assert job["lod_variants"][0]["vertices"] == 900
+    assert job["lod_summary"]["recommended_use"] == "large_fill"
+    assert generated == {
+        "game_model_id": model.id,
+        "game_owner_id": owner.id,
+        "lod_model_id": model.id,
+        "lod_owner_id": owner.id,
+    }
 
 
 def test_tellus_admin_upload_can_target_player_and_world_by_headers(monkeypatch):
@@ -2599,9 +2843,16 @@ def test_openapi_documents_workflow_and_bearer_auth():
     assert "mesh_stats" in model_props
     assert "effective_mesh_stats" in model_props
     assert "runtime_metadata" in model_props
+    assert "view_url" in model_props
+    assert "lod_preview_fallback_url" in model_props
     assert "asset_lod_urls" in model_props
     assert "lod_variants" in model_props
     assert "has_lod_variants" in model_props
+    assert "lod_ready" in model_props
+    assert "lod_status" in model_props
+    assert "lod_available_levels" in model_props
+    assert "lod_missing_levels" in model_props
+    assert "lod_summary" in model_props
     assert "has_impostor" in model_props
     assert "impostor" in model_props
     assert "MeshStats" in spec["components"]["schemas"]
@@ -2609,10 +2860,14 @@ def test_openapi_documents_workflow_and_bearer_auth():
     assert "RuntimeCost" in spec["components"]["schemas"]
     assert "AssetLodUrls" in spec["components"]["schemas"]
     assert "LodVariant" in spec["components"]["schemas"]
+    assert "LodSummary" in spec["components"]["schemas"]
     assert "ImpostorVariant" in spec["components"]["schemas"]
     lod_props = spec["components"]["schemas"]["LodVariant"]["properties"]
     assert "runtime_cost" in lod_props
     assert "mesh_stats" in lod_props
+    assert "vertices" in lod_props
+    assert "triangles" in lod_props
+    assert "recommended_use" in lod_props
     assert "/assets/model/{model_id}/game-optimized" in spec["paths"]
     assert "/assets/model/{model_id}/lod/{level}" in spec["paths"]
     assert "/assets/model/{model_id}/impostor" in spec["paths"]

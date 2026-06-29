@@ -71,6 +71,79 @@ def _attach_preview_variant_flags(models):
         model.game_uses_fixed = _variant_uses_fixed_source(game)
         model.game_uses_rigged = _variant_uses_rigged_source(game)
         model.dashboard_game_size = game.size if model.has_game_optimized and game else None
+        model.lod_summary = _model_lod_summary(model)
+
+
+def _lod_metric_value(mesh_stats, runtime_cost, mesh_key, runtime_key):
+    value = None
+    if isinstance(mesh_stats, dict):
+        value = mesh_stats.get(mesh_key)
+    if value is None and isinstance(runtime_cost, dict):
+        value = runtime_cost.get(runtime_key)
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _lod_recommended_use(vertices, size):
+    if vertices is None and size is None:
+        return None
+    vertices = vertices if vertices is not None else 10**9
+    size = size if size is not None else 10**12
+    if vertices <= 15000 and size <= 512 * 1024:
+        return 'large_fill'
+    if vertices <= 40000 and size <= 1536 * 1024:
+        return 'general_fill'
+    if vertices <= 100000 and size <= 4 * 1024 * 1024:
+        return 'feature'
+    return 'hero_only'
+
+
+def _model_lod_summary(model):
+    levels = []
+    available = []
+    for level in (0, 1, 2):
+        variant = ModelVariant.get(model.id, 'lod', level=level)
+        if not variant or not variant.file_id or (variant.status or 'ready') != 'ready':
+            continue
+        available.append(level)
+        settings = variant.settings or {}
+        mesh_stats = settings.get('mesh_stats') if isinstance(settings, dict) else None
+        runtime_cost = settings.get('runtime_cost') if isinstance(settings, dict) else None
+        vertices = _lod_metric_value(mesh_stats, runtime_cost, 'vertices', 'vertex_count')
+        triangles = _lod_metric_value(mesh_stats, runtime_cost, 'triangles', 'triangle_count')
+        size = variant.size
+        levels.append({
+            'level': level,
+            'size': size,
+            'size_mb': round((size or 0) / 1024 / 1024, 3) if size else None,
+            'vertices': vertices,
+            'triangles': triangles,
+            'recommended_use': _lod_recommended_use(vertices, size),
+        })
+    missing = [level for level in (0, 1, 2) if level not in available]
+    cheapest = None
+    if levels:
+        cheapest = min(
+            levels,
+            key=lambda item: (
+                item.get('vertices') if item.get('vertices') is not None else 10**9,
+                item.get('size') if item.get('size') is not None else 10**12,
+            ),
+        )
+    return {
+        'ready': not missing,
+        'status': 'ready' if not missing else ('partial' if levels else 'missing'),
+        'missing_levels': missing,
+        'levels': levels,
+        'cheapest_level': cheapest.get('level') if cheapest else None,
+        'cheapest_vertices': cheapest.get('vertices') if cheapest else None,
+        'cheapest_triangles': cheapest.get('triangles') if cheapest else None,
+        'cheapest_size': cheapest.get('size') if cheapest else None,
+        'cheapest_size_mb': cheapest.get('size_mb') if cheapest else None,
+        'recommended_use': cheapest.get('recommended_use') if cheapest else None,
+    }
 
 
 def _format_bytes(size):
@@ -533,6 +606,19 @@ def model_detail(model_id):
         vrm_variant = ModelVariant.get(model.id, 'vrm')
         # Rigged variant (if any): owner-rigged GLB from the Rig Avatar editor.
         rigged_variant = ModelVariant.get(model.id, 'rigged')
+        lod_variants = [
+            variant for variant in (
+                ModelVariant.get(model.id, 'lod', level=0),
+                ModelVariant.get(model.id, 'lod', level=1),
+                ModelVariant.get(model.id, 'lod', level=2),
+            )
+            if variant and variant.file_id and (variant.status or 'ready') == 'ready'
+        ]
+        lod_available_levels = [int(variant.level) for variant in lod_variants]
+        lod_missing_levels = [level for level in (0, 1, 2) if level not in lod_available_levels]
+        lod_ready = not lod_missing_levels
+        lod_summary = _model_lod_summary(model)
+        lod_levels_by_level = {item.get('level'): item for item in lod_summary.get('levels', [])}
         model_tags = {str(tag or '').strip().lower() for tag in (model.tags or [])}
         model_types = {str(tag or '').strip().lower() for tag in (model.asset_types or [])}
         is_avatar_asset = (
@@ -568,6 +654,12 @@ def model_detail(model_id):
                                fixed_eyes_variant=fixed_eyes_variant,
                                vrm_variant=vrm_variant,
                                rigged_variant=rigged_variant,
+                               lod_variants=lod_variants,
+                               lod_ready=lod_ready,
+                               lod_available_levels=lod_available_levels,
+                               lod_missing_levels=lod_missing_levels,
+                               lod_summary=lod_summary,
+                               lod_levels_by_level=lod_levels_by_level,
                                detail_animation_preview_url=detail_animation_preview_url,
                                model_is_meshopt=model_is_meshopt,
                                can_manage_model=user_can_manage_model,
