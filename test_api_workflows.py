@@ -2597,7 +2597,7 @@ def test_game_optimization_job_generates_lods_for_one_model(monkeypatch):
     monkeypatch.setattr(
         api,
         "_start_game_optimization_thread",
-        lambda app_obj, job_id: api._process_game_optimization_job(app_obj, job_id),
+        lambda app_obj, job_id: generated.update({"job_id": job_id}),
     )
 
     with app.app_context():
@@ -2628,6 +2628,9 @@ def test_game_optimization_job_generates_lods_for_one_model(monkeypatch):
     assert response.status_code == 202, response.get_json()
     body = response.get_json()
     assert body["success"] is True
+    job_id = body["job"]["id"]
+    assert generated["job_id"] == job_id
+    api._process_game_optimization_job(app, job_id)
     status = client.get(body["status_url"])
     assert status.status_code == 200, status.get_json()
     job = status.get_json()["job"]
@@ -2640,6 +2643,7 @@ def test_game_optimization_job_generates_lods_for_one_model(monkeypatch):
         "game_owner_id": owner.id,
         "lod_model_id": model.id,
         "lod_owner_id": owner.id,
+        "job_id": job_id,
     }
 
 

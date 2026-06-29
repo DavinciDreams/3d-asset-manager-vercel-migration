@@ -4714,6 +4714,11 @@ def _optimization_job_to_api(row):
     if not row:
         return None
     result = row.result or {}
+    lod_fields = {}
+    if row.source_model_id:
+        model = Model3D.get_by_id(row.source_model_id)
+        if model:
+            lod_fields = _asset_lod_url_fields(model)
     return {
         'id': row.id,
         'source_model_id': row.source_model_id,
@@ -4727,12 +4732,12 @@ def _optimization_job_to_api(row):
         'optimized_size': result.get('optimized_size'),
         'savings_ratio': result.get('savings_ratio'),
         'lod_result': result.get('lod_result'),
-        'lod_variants': result.get('lod_variants') or [],
-        'lod_ready': result.get('lod_ready'),
-        'lod_status': result.get('lod_status'),
-        'lod_available_levels': result.get('lod_available_levels') or [],
-        'lod_missing_levels': result.get('lod_missing_levels') or [],
-        'lod_summary': result.get('lod_summary'),
+        'lod_variants': lod_fields.get('lod_variants') or result.get('lod_variants') or [],
+        'lod_ready': lod_fields.get('lod_ready', result.get('lod_ready')),
+        'lod_status': lod_fields.get('lod_status', result.get('lod_status')),
+        'lod_available_levels': lod_fields.get('lod_available_levels') or result.get('lod_available_levels') or [],
+        'lod_missing_levels': lod_fields.get('lod_missing_levels') or result.get('lod_missing_levels') or [],
+        'lod_summary': lod_fields.get('lod_summary') or result.get('lod_summary'),
         'error': row.error,
         'created_at': row.created_at.isoformat() if row.created_at else None,
         'updated_at': row.updated_at.isoformat() if row.updated_at else None,
@@ -5341,7 +5346,6 @@ def _process_game_optimization_job(app, job_id):
             result = _run_game_optimizer(model, job.owner_id or model.user_id, job.settings or {})
             lod_result = _run_lod_optimizer(model, job.owner_id or model.user_id)
             result['lod_result'] = lod_result
-            result.update(_asset_lod_url_fields(model))
             _patch_optimization_job(
                 app,
                 job_id,
