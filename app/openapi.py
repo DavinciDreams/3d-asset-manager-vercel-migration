@@ -388,6 +388,63 @@ def get_openapi_spec(base_url=''):
                         },
                     },
                 },
+                'OptimizationJob': {
+                    'type': 'object',
+                    'description': (
+                        'Background game optimization job. A completed game optimization job '
+                        'creates the game-optimized GLB and then generates LOD0/LOD1/LOD2 for '
+                        'the same source model.'
+                    ),
+                    'properties': {
+                        'id': {'type': 'string'},
+                        'source_model_id': {'type': 'string'},
+                        'status': {'type': 'string', 'enum': ['queued', 'running', 'done', 'failed']},
+                        'settings': {'type': 'object'},
+                        'result': {'type': 'object'},
+                        'result_model_id': {'type': 'string', 'nullable': True},
+                        'variant': {'type': 'object', 'nullable': True},
+                        'original_size': {'type': 'integer', 'nullable': True},
+                        'optimized_size': {'type': 'integer', 'nullable': True},
+                        'savings_ratio': {'type': 'number', 'nullable': True},
+                        'lod_result': {'type': 'object', 'nullable': True},
+                        'lod_variants': {'type': 'array', 'items': {'$ref': '#/components/schemas/LodVariant'}},
+                        'lod_ready': {'type': 'boolean', 'nullable': True},
+                        'lod_status': {'type': 'string', 'nullable': True, 'enum': ['ready', 'partial', 'missing', None]},
+                        'lod_available_levels': {'type': 'array', 'items': {'type': 'integer', 'enum': [0, 1, 2]}},
+                        'lod_missing_levels': {'type': 'array', 'items': {'type': 'integer', 'enum': [0, 1, 2]}},
+                        'lod_summary': {'$ref': '#/components/schemas/LodSummary'},
+                        'error': {'type': 'string', 'nullable': True},
+                        'created_at': {'type': 'string', 'format': 'date-time', 'nullable': True},
+                        'updated_at': {'type': 'string', 'format': 'date-time', 'nullable': True},
+                        'started_at': {'type': 'string', 'format': 'date-time', 'nullable': True},
+                        'finished_at': {'type': 'string', 'format': 'date-time', 'nullable': True},
+                    },
+                },
+                'OptimizationJobResponse': {
+                    'type': 'object',
+                    'properties': {
+                        'success': {'type': 'boolean'},
+                        'queued': {'type': 'boolean'},
+                        'job': {'$ref': '#/components/schemas/OptimizationJob'},
+                        'status_url': {'type': 'string', 'example': '/api/model/abc/optimize-game/job-id'},
+                    },
+                },
+                'LodBackfillStatus': {
+                    'type': 'object',
+                    'description': 'Admin LOD backfill progress for generating missing LOD chains in bulk.',
+                    'properties': {
+                        'status': {'type': 'string', 'nullable': True, 'example': 'started'},
+                        'running': {'type': 'boolean'},
+                        'total': {'type': 'integer'},
+                        'done': {'type': 'integer'},
+                        'failed': {'type': 'integer'},
+                        'skipped': {'type': 'integer'},
+                        'current': {'type': 'string', 'nullable': True},
+                        'started_at': {'type': 'string', 'format': 'date-time', 'nullable': True},
+                        'finished_at': {'type': 'string', 'format': 'date-time', 'nullable': True},
+                        'last_error': {'type': 'string', 'nullable': True},
+                    },
+                },
                 'ImpostorVariant': {
                     'type': 'object',
                     'nullable': True,
@@ -1674,10 +1731,81 @@ def get_openapi_spec(base_url=''):
                 'post': {
                     'tags': ['Workflows'],
                     'summary': 'Run one asset processing reconciliation pass',
-                    'description': 'Admin repair pass that optimizes missing GLB/GLTF game variants, requeues missing FBX/BVH conversions, queues thumbnail-ready AI enrichment, and reports media still waiting for capture.',
+                    'description': 'Admin repair pass that optimizes missing GLB/GLTF game variants, generates missing LOD chains, requeues missing FBX/BVH conversions, queues thumbnail-ready AI enrichment, and reports media still waiting for capture.',
                     'security': [{'sessionCookie': []}, {'bearerAuth': []}],
                     'responses': {
                         '200': {'description': 'Reconciliation result', 'content': {'application/json': {'schema': {'type': 'object'}}}},
+                        '401': _error_response('Unauthorized'),
+                    },
+                },
+            },
+            '/admin/lod-backfill': {
+                'get': {
+                    'tags': ['Workflows'],
+                    'summary': 'Get LOD backfill progress',
+                    'description': 'Admin endpoint for the current bulk LOD generation state.',
+                    'security': [{'sessionCookie': []}, {'bearerAuth': []}],
+                    'responses': {
+                        '200': {
+                            'description': 'LOD backfill status',
+                            'content': {
+                                'application/json': {
+                                    'schema': {'$ref': '#/components/schemas/LodBackfillStatus'}
+                                }
+                            },
+                        },
+                        '401': _error_response('Unauthorized'),
+                    },
+                },
+                'post': {
+                    'tags': ['Workflows'],
+                    'summary': 'Start LOD backfill',
+                    'description': (
+                        'Admin bulk repair endpoint that generates missing LOD0/LOD1/LOD2 '
+                        'variants for GLB/GLTF models. Use `sync=true` for a bounded '
+                        'foreground run during maintenance or tests.'
+                    ),
+                    'security': [{'sessionCookie': []}, {'bearerAuth': []}],
+                    'parameters': [
+                        {
+                            'name': 'sync', 'in': 'query',
+                            'schema': {'type': 'boolean', 'default': False},
+                            'description': 'Run synchronously in the request instead of spawning a background thread.',
+                        },
+                        {
+                            'name': 'limit', 'in': 'query',
+                            'schema': {'type': 'integer', 'minimum': 1},
+                            'description': 'Maximum number of assets to process in this backfill run.',
+                        },
+                    ],
+                    'responses': {
+                        '200': {
+                            'description': 'LOD backfill started, already running, or finished synchronously',
+                            'content': {
+                                'application/json': {
+                                    'schema': {'$ref': '#/components/schemas/LodBackfillStatus'}
+                                }
+                            },
+                        },
+                        '401': _error_response('Unauthorized'),
+                    },
+                },
+            },
+            '/admin/lod-backfill/status': {
+                'get': {
+                    'tags': ['Workflows'],
+                    'summary': 'Poll LOD backfill status',
+                    'description': 'Admin polling endpoint for the bulk LOD generation worker.',
+                    'security': [{'sessionCookie': []}, {'bearerAuth': []}],
+                    'responses': {
+                        '200': {
+                            'description': 'LOD backfill status',
+                            'content': {
+                                'application/json': {
+                                    'schema': {'$ref': '#/components/schemas/LodBackfillStatus'}
+                                }
+                            },
+                        },
                         '401': _error_response('Unauthorized'),
                     },
                 },
@@ -1717,8 +1845,14 @@ def get_openapi_spec(base_url=''):
                 'parameters': [{'name': 'model_id', 'in': 'path', 'required': True, 'schema': {'type': 'string'}}],
                 'post': {
                     'tags': ['Workflows'],
-                    'summary': 'Queue a game-optimized GLB copy',
-                    'description': 'Queues gltfpack optimization in the background. Select a preset, then override individual fields when needed. Choose meshopt for the smallest file or fallback for a self-contained file without mesh compression. The source asset is not replaced.',
+                    'summary': 'Queue game optimization and LOD generation',
+                    'description': (
+                        'Queues a single background job that creates the game-optimized GLB and then '
+                        'generates LOD0, LOD1, and LOD2 for the same source asset. Select a preset, '
+                        'then override individual fields when needed. Choose meshopt for the smallest '
+                        'file or fallback for a self-contained file without mesh compression. The '
+                        'source asset is not replaced.'
+                    ),
                     'security': [{'sessionCookie': []}, {'bearerAuth': []}],
                     'requestBody': {
                         'content': {
@@ -1754,7 +1888,14 @@ def get_openapi_spec(base_url=''):
                         }
                     },
                     'responses': {
-                        '202': {'description': 'Optimization job queued', 'content': {'application/json': {'schema': {'type': 'object'}}}},
+                        '202': {
+                            'description': 'Game + LOD optimization job queued',
+                            'content': {
+                                'application/json': {
+                                    'schema': {'$ref': '#/components/schemas/OptimizationJobResponse'}
+                                }
+                            },
+                        },
                         '400': _error_response('Unsupported format or invalid settings'),
                         '401': _error_response('Authentication required'),
                         '403': _error_response('Access denied'),
@@ -1770,10 +1911,28 @@ def get_openapi_spec(base_url=''):
                 ],
                 'get': {
                     'tags': ['Workflows'],
-                    'summary': 'Get game optimization job status',
+                    'summary': 'Get game optimization and LOD job status',
+                    'description': (
+                        'Polls the one-step Game + LOD job. When complete, `job.lod_ready`, '
+                        '`job.lod_variants`, and `job.lod_summary` describe generated LOD coverage, '
+                        'sizes, vertices, triangles, and recommended use buckets.'
+                    ),
                     'security': [{'sessionCookie': []}, {'bearerAuth': []}],
                     'responses': {
-                        '200': {'description': 'Optimization job status', 'content': {'application/json': {'schema': {'type': 'object'}}}},
+                        '200': {
+                            'description': 'Optimization job status',
+                            'content': {
+                                'application/json': {
+                                    'schema': {
+                                        'type': 'object',
+                                        'properties': {
+                                            'success': {'type': 'boolean'},
+                                            'job': {'$ref': '#/components/schemas/OptimizationJob'},
+                                        },
+                                    }
+                                }
+                            },
+                        },
                         '403': _error_response('Access denied'),
                         '404': _error_response('Model or optimization job not found'),
                         '500': _error_response('Optimization status failed'),

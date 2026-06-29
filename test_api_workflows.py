@@ -2828,12 +2828,21 @@ def test_openapi_documents_workflow_and_bearer_auth():
     assert "bearerAuth" in spec["components"]["securitySchemes"]
     assert "get" in spec["paths"]["/model/{model_id}"]
     assert "/optimization/defaults" in spec["paths"]
+    assert "/admin/lod-backfill" in spec["paths"]
+    assert "/admin/lod-backfill/status" in spec["paths"]
     assert "/model/{model_id}/ai/autotag" in spec["paths"]
     assert "/model/{model_id}/approval" in spec["paths"]
     assert "/bundles" in spec["paths"]
-    optimize_props = spec["paths"]["/model/{model_id}/optimize-game"]["post"]["requestBody"]["content"]["application/json"]["schema"]["properties"]
+    optimize_doc = spec["paths"]["/model/{model_id}/optimize-game"]["post"]
+    assert "LOD" in optimize_doc["summary"]
+    assert "LOD0" in optimize_doc["description"]
+    assert optimize_doc["responses"]["202"]["content"]["application/json"]["schema"]["$ref"] == "#/components/schemas/OptimizationJobResponse"
+    optimize_props = optimize_doc["requestBody"]["content"]["application/json"]["schema"]["properties"]
     assert optimize_props["preset"]["default"] == "balanced"
     assert optimize_props["simplify_ratio"]["default"] == 0.85
+    status_doc = spec["paths"]["/model/{model_id}/optimize-game/{job_id}"]["get"]
+    status_job = status_doc["responses"]["200"]["content"]["application/json"]["schema"]["properties"]["job"]
+    assert status_job["$ref"] == "#/components/schemas/OptimizationJob"
     props = spec["paths"]["/model/{model_id}/ai/autotag"]["post"]["requestBody"]["content"]["application/json"]["schema"]["properties"]
     assert "include_title" in props
     assert "async" in props
@@ -2865,7 +2874,15 @@ def test_openapi_documents_workflow_and_bearer_auth():
     assert "AssetLodUrls" in spec["components"]["schemas"]
     assert "LodVariant" in spec["components"]["schemas"]
     assert "LodSummary" in spec["components"]["schemas"]
+    assert "OptimizationJob" in spec["components"]["schemas"]
+    assert "OptimizationJobResponse" in spec["components"]["schemas"]
+    assert "LodBackfillStatus" in spec["components"]["schemas"]
     assert "ImpostorVariant" in spec["components"]["schemas"]
+    job_props = spec["components"]["schemas"]["OptimizationJob"]["properties"]
+    assert "lod_result" in job_props
+    assert "lod_variants" in job_props
+    assert "lod_ready" in job_props
+    assert "lod_summary" in job_props
     lod_props = spec["components"]["schemas"]["LodVariant"]["properties"]
     assert "runtime_cost" in lod_props
     assert "mesh_stats" in lod_props
