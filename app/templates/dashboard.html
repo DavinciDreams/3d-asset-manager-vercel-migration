@@ -782,7 +782,7 @@ async function pollOptimizeJob(statusUrl, modelId) {
     document.addEventListener('DOMContentLoaded', () => fetchStatus().catch(() => {}));
 })();
 
-// Admin LOD backfill. Generates Tellus-facing LOD0/1/2 variants under each
+// Admin LOD backfill. Generates Tellus-facing LOD0/1/2/3 variants under each
 // original model id, so Tellus can use its stable asset LOD URLs.
 (function () {
     const runBtn = document.getElementById('lod-backfill-btn');
@@ -839,7 +839,7 @@ async function pollOptimizeJob(statusUrl, modelId) {
         error.textContent = '';
         wrap.classList.remove('hidden');
         try {
-            const response = await fetch('/api/admin/lod-backfill', {
+            const response = await fetch('/api/admin/lod-backfill?force=true', {
                 method: 'POST',
                 headers: { 'Accept': 'application/json' },
             });

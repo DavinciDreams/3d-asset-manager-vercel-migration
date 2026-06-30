@@ -52,12 +52,91 @@ def _mime_for(fmt):
 
 _GLB_MAGIC = b'glTF'
 _GLB_JSON_CHUNK = 0x4E4F534A
+_GLB_BIN_CHUNK = 0x004E4942
 
 
 def _json_chunk_bytes(payload):
     raw = json.dumps(payload, separators=(',', ':')).encode('utf-8')
     padding = (-len(raw)) % 4
     return raw + (b' ' * padding)
+
+
+def _rewrite_glb_json(glb_bytes, rewrite):
+    if not glb_bytes or glb_bytes[:4] != _GLB_MAGIC or len(glb_bytes) < 20:
+        raise ValueError('Expected binary GLB bytes.')
+    magic, version, declared_length = struct.unpack_from('<4sII', glb_bytes, 0)
+    if magic != _GLB_MAGIC or version != 2 or declared_length > len(glb_bytes):
+        raise ValueError('Invalid GLB header.')
+
+    offset = 12
+    chunks = []
+    json_index = None
+    while offset + 8 <= declared_length:
+        chunk_length, chunk_type = struct.unpack_from('<II', glb_bytes, offset)
+        data_start = offset + 8
+        data_end = data_start + chunk_length
+        if data_end > declared_length:
+            raise ValueError('Invalid GLB chunk length.')
+        chunk_data = glb_bytes[data_start:data_end]
+        if chunk_type == _GLB_JSON_CHUNK and json_index is None:
+            json_index = len(chunks)
+        chunks.append((chunk_type, chunk_data))
+        offset = data_end
+    if json_index is None:
+        raise ValueError('GLB has no JSON chunk.')
+
+    gltf = json.loads(chunks[json_index][1].decode('utf-8').rstrip(' \t\r\n\0'))
+    rewritten = rewrite(gltf)
+    json_bytes = _json_chunk_bytes(rewritten if rewritten is not None else gltf)
+    chunks[json_index] = (_GLB_JSON_CHUNK, json_bytes)
+
+    rebuilt = bytearray(struct.pack('<4sII', _GLB_MAGIC, 2, 0))
+    for chunk_type, chunk_data in chunks:
+        padding = b'\0' * ((-len(chunk_data)) % 4) if chunk_type == _GLB_BIN_CHUNK else b' ' * ((-len(chunk_data)) % 4)
+        padded = chunk_data + padding
+        rebuilt.extend(struct.pack('<II', len(padded), chunk_type))
+        rebuilt.extend(padded)
+    struct.pack_into('<I', rebuilt, 8, len(rebuilt))
+    return bytes(rebuilt)
+
+
+def _flatten_lod_glb_materials(glb_bytes, *, color=None):
+    flat_color = color or [0.30, 0.42, 0.20, 1.0]
+
+    def rewrite(gltf):
+        used = [ext for ext in (gltf.get('extensionsUsed') or []) if ext not in {'KHR_texture_transform', 'KHR_materials_unlit'}]
+        required = [ext for ext in (gltf.get('extensionsRequired') or []) if ext in used]
+        if used:
+            gltf['extensionsUsed'] = used
+        else:
+            gltf.pop('extensionsUsed', None)
+        if required:
+            gltf['extensionsRequired'] = required
+        else:
+            gltf.pop('extensionsRequired', None)
+
+        gltf.pop('images', None)
+        gltf.pop('textures', None)
+        gltf.pop('samplers', None)
+        gltf['materials'] = [
+            {
+                'name': 'LOD flat silhouette',
+                'pbrMetallicRoughness': {
+                    'baseColorFactor': flat_color,
+                    'roughnessFactor': 0.95,
+                    'metallicFactor': 0.0,
+                },
+            }
+        ]
+        for mesh in gltf.get('meshes') or []:
+            if not isinstance(mesh, dict):
+                continue
+            for primitive in mesh.get('primitives') or []:
+                if isinstance(primitive, dict):
+                    primitive['material'] = 0
+        return gltf
+
+    return _rewrite_glb_json(glb_bytes, rewrite)
 
 
 def _force_meshopt_required_for_external_fallback(glb_bytes):
@@ -1112,8 +1191,8 @@ def get_asset_lod(model_id, level):
     level=N). While the backfill pipeline is still catching up, LOD 0 falls back
     to the existing game-optimized variant because it is the current runtime GLB.
     """
-    if level not in {0, 1, 2}:
-        return jsonify({'error': 'LOD level must be 0, 1, or 2'}), 404
+    if level not in {0, 1, 2, 3}:
+        return jsonify({'error': 'LOD level must be 0, 1, 2, or 3'}), 404
     try:
         model = Model3D.get_by_id_or_alias(model_id)
         if not model:
@@ -2333,6 +2412,32 @@ def _encode_thumbnail_webp(png_bytes):
     except Exception as e:
         print(f"Thumbnail WebP encode failed, storing PNG: {e}")
         return png_bytes, 'image/png', 'png'
+
+
+def _encode_impostor_webp(image_bytes, *, size=512):
+    """Encode a square far-field billboard texture as WebP."""
+    try:
+        from PIL import Image, ImageOps
+    except Exception as e:
+        raise RuntimeError('Pillow is required to generate impostor WebP textures.') from e
+
+    with Image.open(io.BytesIO(image_bytes)) as img:
+        if img.mode in ('RGBA', 'LA', 'P'):
+            img = img.convert('RGBA')
+            background = Image.new('RGB', img.size, (255, 255, 255))
+            background.paste(img, mask=img.split()[-1])
+            img = background
+        else:
+            img = img.convert('RGB')
+        target_size = max(128, min(int(size or 512), 2048))
+        img = ImageOps.contain(img, (target_size, target_size))
+        canvas = Image.new('RGB', (target_size, target_size), (255, 255, 255))
+        x = (target_size - img.width) // 2
+        y = (target_size - img.height) // 2
+        canvas.paste(img, (x, y))
+        out = io.BytesIO()
+        canvas.save(out, format='WEBP', quality=78, method=4)
+        return out.getvalue(), target_size, target_size
 
 
 @api_bp.route('/model/<model_id>/thumbnail', methods=['POST'])
@@ -3814,7 +3919,7 @@ def _game_optimized_fields(model):
 
 
 def _asset_lod_url_fields(model):
-    expected_levels = [0, 1, 2]
+    expected_levels = [int(config['level']) for config in LOD_OPTIMIZE_LEVELS]
     lod_variants = []
     available_levels = []
     for level in expected_levels:
@@ -3849,23 +3954,29 @@ def _asset_lod_url_fields(model):
     impostor = ModelVariant.get(model.id, 'impostor')
     impostor_payload = None
     if impostor and impostor.file_id:
+        settings = impostor.settings or {}
         impostor_payload = {
             'size': impostor.size,
+            'size_mb': round((impostor.size or 0) / 1024 / 1024, 3) if impostor.size else None,
             'file_format': impostor.file_format,
             'status': impostor.status,
-            'settings': impostor.settings or {},
+            'settings': settings,
+            'width': settings.get('width'),
+            'height': settings.get('height'),
+            'source': settings.get('source'),
+            'role': settings.get('role'),
             'url': url_for('api.get_asset_impostor', model_id=model.id),
             'download_url': url_for('api.get_asset_impostor', model_id=model.id, download=1),
             'updated_at': impostor.updated_at.isoformat() if impostor.updated_at else None,
         }
+    asset_lod_urls = {
+        'game_optimized': url_for('api.get_asset_game_optimized', model_id=model.id),
+        'impostor': url_for('api.get_asset_impostor', model_id=model.id),
+    }
+    for level in expected_levels:
+        asset_lod_urls[f'lod{level}'] = url_for('api.get_asset_lod', model_id=model.id, level=level)
     return {
-        'asset_lod_urls': {
-            'game_optimized': url_for('api.get_asset_game_optimized', model_id=model.id),
-            'lod0': url_for('api.get_asset_lod', model_id=model.id, level=0),
-            'lod1': url_for('api.get_asset_lod', model_id=model.id, level=1),
-            'lod2': url_for('api.get_asset_lod', model_id=model.id, level=2),
-            'impostor': url_for('api.get_asset_impostor', model_id=model.id),
-        },
+        'asset_lod_urls': asset_lod_urls,
         'lod_variants': lod_variants,
         'has_lod_variants': bool(lod_variants),
         'lod_ready': lod_ready,
@@ -3896,7 +4007,7 @@ def _lod_recommended_use(vertices, size):
         return None
     vertices = vertices if vertices is not None else 10**9
     size = size if size is not None else 10**12
-    if vertices <= 15000 and size <= 512 * 1024:
+    if vertices <= 10000 and size <= 512 * 1024:
         return 'large_fill'
     if vertices <= 40000 and size <= 1536 * 1024:
         return 'general_fill'
@@ -4738,6 +4849,9 @@ def _optimization_job_to_api(row):
         'lod_available_levels': lod_fields.get('lod_available_levels') or result.get('lod_available_levels') or [],
         'lod_missing_levels': lod_fields.get('lod_missing_levels') or result.get('lod_missing_levels') or [],
         'lod_summary': lod_fields.get('lod_summary') or result.get('lod_summary'),
+        'impostor_result': result.get('impostor_result'),
+        'has_impostor': lod_fields.get('has_impostor'),
+        'impostor': lod_fields.get('impostor'),
         'error': row.error,
         'created_at': row.created_at.isoformat() if row.created_at else None,
         'updated_at': row.updated_at.isoformat() if row.updated_at else None,
@@ -5219,7 +5333,10 @@ def _run_lod_optimizer(model, owner_id=None, levels=None):
             level = int(config['level'])
             texture_limit = int(config.get('texture_limit') or 0)
             simplify_ratio = float(config.get('simplify_ratio') or 1)
+            simplification_error = config.get('simplification_error')
             compression_mode = str(config.get('compression_mode') or 'meshopt').lower()
+            flat_material = bool(config.get('flat_material'))
+            flat_material_color = config.get('flat_material_color') or [0.30, 0.42, 0.20, 1.0]
             out_path = os.path.join(workdir, f'lod{level}.glb')
             report_path = os.path.join(workdir, f'lod{level}.json')
             cmd = [
@@ -5229,6 +5346,12 @@ def _run_lod_optimizer(model, owner_id=None, levels=None):
                 '-si', f'{simplify_ratio:g}',
                 '-r', report_path,
             ]
+            if simplification_error is not None:
+                cmd.extend(['-se', f'{float(simplification_error):g}'])
+            if config.get('permissive'):
+                cmd.append('-sp')
+            if config.get('aggressive'):
+                cmd.append('-sa')
             if compression_mode == 'meshopt':
                 cmd.append('-cc')
             if texture_limit:
@@ -5244,6 +5367,34 @@ def _run_lod_optimizer(model, owner_id=None, levels=None):
             if result.returncode != 0:
                 msg = (result.stderr or result.stdout or 'gltfpack failed.').strip()
                 raise RuntimeError(f'LOD {level}: {msg[-1000:] or "gltfpack failed."}')
+
+            if flat_material:
+                with open(out_path, 'rb') as f:
+                    simplified_bytes = f.read()
+                flat_input_path = os.path.join(workdir, f'lod{level}-flat-input.glb')
+                with open(flat_input_path, 'wb') as f:
+                    f.write(_flatten_lod_glb_materials(simplified_bytes, color=flat_material_color))
+                flat_report_path = os.path.join(workdir, f'lod{level}-flat.json')
+                flat_cmd = [
+                    gltfpack_bin,
+                    '-i', flat_input_path,
+                    '-o', out_path,
+                    '-r', flat_report_path,
+                ]
+                if compression_mode == 'meshopt':
+                    flat_cmd.append('-cc')
+                flat_result = subprocess.run(
+                    flat_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                    check=False,
+                )
+                if flat_result.returncode != 0:
+                    msg = (flat_result.stderr or flat_result.stdout or 'gltfpack failed.').strip()
+                    raise RuntimeError(f'LOD {level} flat material repack: {msg[-1000:] or "gltfpack failed."}')
+                report_path = flat_report_path
+
             with open(out_path, 'rb') as f:
                 out_bytes = f.read()
             report = {}
@@ -5268,6 +5419,13 @@ def _run_lod_optimizer(model, owner_id=None, levels=None):
                 'optimized_size': optimized_size,
                 'texture_limit': texture_limit or None,
                 'simplify_ratio': simplify_ratio,
+                'simplification_error': simplification_error,
+                'aggressive': bool(config.get('aggressive')),
+                'permissive': bool(config.get('permissive')),
+                'flat_material': flat_material,
+                'flat_material_color': flat_material_color if flat_material else None,
+                'flat_material_stage': 'post_simplification' if flat_material else None,
+                'target_vertices': config.get('target_vertices'),
                 'compression_mode': compression_mode,
                 'defaults_version': LOD_OPTIMIZE_DEFAULTS_VERSION,
                 'role': config.get('role'),
@@ -5289,6 +5447,13 @@ def _run_lod_optimizer(model, owner_id=None, levels=None):
                 'role': config.get('role'),
                 'texture_limit': texture_limit,
                 'simplify_ratio': simplify_ratio,
+                'simplification_error': simplification_error,
+                'aggressive': bool(config.get('aggressive')),
+                'permissive': bool(config.get('permissive')),
+                'flat_material': flat_material,
+                'flat_material_color': flat_material_color if flat_material else None,
+                'flat_material_stage': 'post_simplification' if flat_material else None,
+                'target_vertices': config.get('target_vertices'),
                 'compression_mode': compression_mode,
                 'original_size': original_size,
                 'optimized_size': optimized_size,
@@ -5333,6 +5498,99 @@ def _run_lod_optimizer(model, owner_id=None, levels=None):
         shutil.rmtree(workdir, ignore_errors=True)
 
 
+def _impostor_source_image_bytes(model, *, render_size=512):
+    fs = current_app.config['FILE_STORE']
+    if model.thumbnail_file_id:
+        try:
+            return fs.get(model.thumbnail_file_id).read(), 'thumbnail'
+        except Exception as e:
+            print(f"Impostor: could not read thumbnail for {model.id}: {e}")
+
+    from app import render as render_mod
+    if not render_mod.render_available():
+        raise RuntimeError('Server render stack unavailable and no thumbnail exists.')
+    try:
+        data, view_fmt = model.get_viewable_data()
+    except Exception as e:
+        raise RuntimeError('No viewable mesh available for impostor generation.') from e
+    if not data or data[:4] != b'glTF':
+        raise RuntimeError('No usable GLB bytes for impostor generation.')
+    png = render_mod.render_glb_to_png(
+        data,
+        file_type=(view_fmt or 'glb').lower() if (view_fmt or 'glb').lower() in ('glb', 'gltf') else 'glb',
+        size=render_size,
+        decompress=lambda b: _decompress_meshopt_glb_bytes(b),
+    )
+    return png, 'server_render'
+
+
+def _run_impostor_generator(model, owner_id=None, *, size=512):
+    """Generate a far-field billboard texture under ModelVariant(kind=impostor)."""
+    if os.environ.get('AUTO_IMPOSTOR_GENERATE', '1').lower() in {'0', 'false', 'no', 'off'}:
+        return {
+            'success': False,
+            'skipped': True,
+            'reason': 'disabled',
+            'source_model_id': model.id,
+        }
+    if _is_rigged_or_avatar(model):
+        return {
+            'success': False,
+            'skipped': True,
+            'reason': 'rigged_or_avatar',
+            'source_model_id': model.id,
+        }
+
+    image_bytes, source = _impostor_source_image_bytes(model, render_size=size)
+    impostor_bytes, width, height = _encode_impostor_webp(image_bytes, size=size)
+    fs = current_app.config['FILE_STORE']
+    metadata = {
+        'kind': 'impostor',
+        'source_model_id': model.id,
+        'source': source,
+        'width': width,
+        'height': height,
+        'format': 'webp',
+        'role': 'far/billboard',
+        'generated_at': datetime.utcnow().isoformat(),
+    }
+    file_id = fs.put(
+        impostor_bytes,
+        filename=f'{_safe_stem(model)}-impostor.webp',
+        content_type='image/webp',
+        metadata=metadata,
+    )
+    settings = {
+        'defaults_version': LOD_OPTIMIZE_DEFAULTS_VERSION,
+        'source': source,
+        'width': width,
+        'height': height,
+        'role': 'far/billboard',
+        'runtime_use': 'far_impostor',
+        'file_format': 'webp',
+        'source_model_id': model.id,
+    }
+    variant, old_file_id = ModelVariant.upsert(
+        model.id, 'impostor', str(file_id),
+        file_format='webp', size=len(impostor_bytes),
+        settings=settings, status='ready',
+    )
+    if old_file_id and old_file_id != str(file_id):
+        try:
+            fs.delete(old_file_id)
+        except Exception as e:
+            print(f"Old impostor blob {old_file_id} not deleted: {e}")
+    return {
+        'success': True,
+        'source_model_id': model.id,
+        'source': source,
+        'size': len(impostor_bytes),
+        'width': width,
+        'height': height,
+        'variant': variant.to_api() if variant else None,
+    }
+
+
 def _process_game_optimization_job(app, job_id):
     with app.app_context():
         try:
@@ -5346,6 +5604,14 @@ def _process_game_optimization_job(app, job_id):
             result = _run_game_optimizer(model, job.owner_id or model.user_id, job.settings or {})
             lod_result = _run_lod_optimizer(model, job.owner_id or model.user_id)
             result['lod_result'] = lod_result
+            try:
+                result['impostor_result'] = _run_impostor_generator(model, job.owner_id or model.user_id)
+            except Exception as e:
+                result['impostor_result'] = {
+                    'success': False,
+                    'source_model_id': model.id,
+                    'error': str(e)[:1000],
+                }
             _patch_optimization_job(
                 app,
                 job_id,
@@ -5407,7 +5673,7 @@ GAME_OPTIMIZE_PRESETS = {
     },
 }
 
-LOD_OPTIMIZE_DEFAULTS_VERSION = '2026-06-26'
+LOD_OPTIMIZE_DEFAULTS_VERSION = '2026-06-30-lod3-orig-flat'
 LOD_OPTIMIZE_LEVELS = [
     {
         'level': 0,
@@ -5418,17 +5684,38 @@ LOD_OPTIMIZE_LEVELS = [
     },
     {
         'level': 1,
-        'texture_limit': 1024,
-        'simplify_ratio': 0.50,
+        'texture_limit': 512,
+        'simplify_ratio': 0.18,
+        'simplification_error': 0.03,
+        'aggressive': True,
+        'permissive': True,
+        'target_vertices': 20000,
         'compression_mode': 'meshopt',
-        'role': 'mid',
+        'role': 'mid/fill',
     },
     {
         'level': 2,
-        'texture_limit': 512,
-        'simplify_ratio': 0.25,
+        'texture_limit': 128,
+        'simplify_ratio': 0.08,
+        'simplification_error': 0.04,
+        'aggressive': True,
+        'permissive': True,
+        'target_vertices': 10000,
         'compression_mode': 'meshopt',
-        'role': 'far',
+        'role': 'far/large-fill',
+    },
+    {
+        'level': 3,
+        'texture_limit': 0,
+        'simplify_ratio': 0.015,
+        'simplification_error': 0.08,
+        'aggressive': True,
+        'permissive': True,
+        'flat_material': True,
+        'flat_material_color': [0.30, 0.42, 0.20, 1.0],
+        'target_vertices': 500,
+        'compression_mode': 'meshopt',
+        'role': 'ultra-far/flat-silhouette',
     },
 ]
 
@@ -6106,14 +6393,19 @@ def _optimize_missing_game_variants(limit=5):
     return result
 
 
+def _lod_variant_current(model, config):
+    variant = ModelVariant.get(model.id, 'lod', level=int(config['level']))
+    if not variant or not variant.file_id:
+        return False
+    settings = variant.settings or {}
+    return settings.get('defaults_version') == LOD_OPTIMIZE_DEFAULTS_VERSION
+
+
 def _lod_variants_complete(model):
-    return all(
-        ModelVariant.get(model.id, 'lod', level=int(config['level']))
-        for config in LOD_OPTIMIZE_LEVELS
-    )
+    return all(_lod_variant_current(model, config) for config in LOD_OPTIMIZE_LEVELS)
 
 
-def _optimize_missing_lod_variants(limit=2):
+def _optimize_missing_lod_variants(limit=2, *, force=False):
     if os.environ.get('AUTO_LOD_OPTIMIZE', '1').lower() in {'0', 'false', 'no', 'off'}:
         return {'optimized': 0, 'failed': 0, 'skipped': 0}
     import shutil
@@ -6131,7 +6423,7 @@ def _optimize_missing_lod_variants(limit=2):
         if _is_rigged_or_avatar(model):
             result['skipped'] += 1
             continue
-        if _lod_variants_complete(model):
+        if not force and _lod_variants_complete(model):
             result['skipped'] += 1
             continue
         todo.append(model)
@@ -6142,6 +6434,41 @@ def _optimize_missing_lod_variants(limit=2):
             result['optimized'] += 1
         except Exception as e:
             print(f"Pipeline LOD optimize failed for {model.id}: {str(e)[:200]}", flush=True)
+            result['failed'] += 1
+            result['last_error'] = f"{model.name or model.id}: {str(e)[:200]}"
+    return result
+
+
+def _impostor_variant_complete(model):
+    variant = ModelVariant.get(model.id, 'impostor')
+    return bool(variant and variant.file_id)
+
+
+def _generate_missing_impostor_variants(limit=5):
+    if os.environ.get('AUTO_IMPOSTOR_GENERATE', '1').lower() in {'0', 'false', 'no', 'off'}:
+        return {'generated': 0, 'failed': 0, 'skipped': 0, 'disabled': True}
+    limit = max(1, min(int(limit or 5), 50))
+    result = {'generated': 0, 'failed': 0, 'skipped': 0, 'remaining': 0}
+    todo = []
+    for mid in Model3D.optimizable_ids():
+        model = Model3D.get_by_id(mid)
+        if not model:
+            result['failed'] += 1
+            continue
+        if _is_rigged_or_avatar(model):
+            result['skipped'] += 1
+            continue
+        if _impostor_variant_complete(model):
+            result['skipped'] += 1
+            continue
+        todo.append(model)
+    result['remaining'] = max(0, len(todo) - limit)
+    for model in todo[:limit]:
+        try:
+            _run_impostor_generator(model, model.user_id)
+            result['generated'] += 1
+        except Exception as e:
+            print(f"Pipeline impostor generation failed for {model.id}: {str(e)[:200]}", flush=True)
             result['failed'] += 1
             result['last_error'] = f"{model.name or model.id}: {str(e)[:200]}"
     return result
@@ -6278,7 +6605,7 @@ def _render_missing_thumbnails(limit=10):
     return result
 
 
-def _reconcile_asset_pipeline_once(app, *, optimize_limit=None, lod_limit=None, enrich_limit=None, conversion_limit=None):
+def _reconcile_asset_pipeline_once(app, *, optimize_limit=None, lod_limit=None, impostor_limit=None, enrich_limit=None, conversion_limit=None):
     with app.app_context():
         started = datetime.utcnow()
         if not _PIPELINE_RECONCILE_LOCK.acquire(blocking=False):
@@ -6296,6 +6623,9 @@ def _reconcile_asset_pipeline_once(app, *, optimize_limit=None, lod_limit=None, 
             lod = _optimize_missing_lod_variants(
                 lod_limit if lod_limit is not None else int(os.environ.get('PIPELINE_LOD_LIMIT', '2'))
             )
+            impostors = _generate_missing_impostor_variants(
+                impostor_limit if impostor_limit is not None else int(os.environ.get('PIPELINE_IMPOSTOR_LIMIT', '5'))
+            )
             conversions = _requeue_missing_conversions(
                 conversion_limit or int(os.environ.get('PIPELINE_CONVERSION_LIMIT', '20'))
             )
@@ -6312,6 +6642,7 @@ def _reconcile_asset_pipeline_once(app, *, optimize_limit=None, lod_limit=None, 
                 'status': 'ok',
                 'optimized': optimize,
                 'lod_optimized': lod,
+                'impostors': impostors,
                 'conversion_queued': conversions,
                 'enrichment_queued': enrichment,
                 'thumbnail_render': thumbnails,
@@ -6393,6 +6724,7 @@ def admin_pipeline_reconcile():
             current_app._get_current_object(),
             optimize_limit=request.args.get('optimize_limit', type=int),
             lod_limit=request.args.get('lod_limit', type=int),
+            impostor_limit=request.args.get('impostor_limit', type=int),
             enrich_limit=request.args.get('enrich_limit', type=int),
             conversion_limit=request.args.get('conversion_limit', type=int),
         )
@@ -6599,7 +6931,7 @@ def admin_conversion_backfill_status():
         return jsonify(dict(_conversion_backfill_state))
 
 
-def _run_lod_backfill(app, *, limit=None):
+def _run_lod_backfill(app, *, limit=None, force=False):
     with app.app_context():
         try:
             import shutil
@@ -6621,7 +6953,7 @@ def _run_lod_backfill(app, *, limit=None):
                 if _is_rigged_or_avatar(model):
                     skipped += 1
                     continue
-                if _lod_variants_complete(model):
+                if not force and _lod_variants_complete(model):
                     skipped += 1
                     continue
                 todo.append(model)
@@ -6662,6 +6994,7 @@ def admin_lod_backfill():
             return jsonify(dict(_lod_backfill_state))
 
     sync = request.args.get('sync', 'false').lower() in {'1', 'true', 'yes'}
+    force = request.args.get('force', 'false').lower() in {'1', 'true', 'yes'}
     limit = request.args.get('limit', type=int)
     with _LOD_BACKFILL_LOCK:
         if _lod_backfill_state['running']:
@@ -6676,17 +7009,18 @@ def admin_lod_backfill():
             'started_at': datetime.utcnow().isoformat(),
             'finished_at': None,
             'last_error': None,
+            'force': force,
         })
 
     if sync:
-        _run_lod_backfill(current_app._get_current_object(), limit=limit)
+        _run_lod_backfill(current_app._get_current_object(), limit=limit, force=force)
         with _LOD_BACKFILL_LOCK:
             return jsonify({'status': 'finished', **_lod_backfill_state})
 
     thread = threading.Thread(
         target=_run_lod_backfill,
         args=(current_app._get_current_object(),),
-        kwargs={'limit': limit},
+        kwargs={'limit': limit, 'force': force},
         name='lod-backfill',
         daemon=True,
     )

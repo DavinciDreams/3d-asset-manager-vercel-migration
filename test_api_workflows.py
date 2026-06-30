@@ -143,7 +143,7 @@ def test_asset_admin_dashboard_can_start_conversion_backfill(monkeypatch):
     assert "Import FBX avatars" in html
     assert "Check media queue" in html
     assert "/api/admin/conversion-backfill?force=true" in html
-    assert "/api/admin/lod-backfill" in html
+    assert "/api/admin/lod-backfill?force=true" in html
     assert "/api/admin/lod-backfill/status" in html
     assert "/api/admin/fbx-avatar-import?tag=robot" in html
     assert "/api/admin/pipeline/status" in html
@@ -166,7 +166,7 @@ def test_asset_admin_dashboard_can_start_conversion_backfill(monkeypatch):
 
     monkeypatch.setattr(shutil, "which", lambda name: "gltfpack" if name == "gltfpack" else None)
     monkeypatch.setattr(api, "_run_lod_optimizer", lambda model, owner_id=None: {"success": True})
-    lod_start = client.post("/api/admin/lod-backfill?sync=true&limit=1")
+    lod_start = client.post("/api/admin/lod-backfill?sync=true&force=true&limit=1")
     assert lod_start.status_code == 200, lod_start.get_json()
     lod_status = lod_start.get_json()
     assert lod_status.get("running") is False
@@ -176,6 +176,81 @@ def test_asset_admin_dashboard_can_start_conversion_backfill(monkeypatch):
     lod_poll = client.get("/api/admin/lod-backfill/status")
     assert lod_poll.status_code == 200, lod_poll.get_json()
     assert lod_poll.get_json().get("done") == 1
+
+
+def test_lod_backfill_refreshes_stale_defaults_version(monkeypatch):
+    import app.api as api
+    import shutil
+
+    app = create_app()
+    calls = []
+    monkeypatch.setattr(shutil, "which", lambda name: "gltfpack" if name == "gltfpack" else None)
+    monkeypatch.setattr(api, "_run_lod_optimizer", lambda model, owner_id=None: calls.append(model.id) or {"success": True})
+
+    with app.app_context():
+        owner = _ensure_user("stale-lod-owner")
+        source = _minimal_glb({"asset": {"version": "2.0"}, "scene": 0})
+        model = Model3D(
+            name="Stale LOD Target",
+            file_format="glb",
+            file_size=len(source),
+            user_id=owner.id,
+            is_public=True,
+            gridfs_file_id=app.config["FILE_STORE"].put(
+                source,
+                filename="stale-lod-target.glb",
+                content_type="model/gltf-binary",
+                metadata={},
+            ),
+            asset_types=[],
+        ).save()
+        for level in (0, 1, 2, 3):
+            file_id = app.config["FILE_STORE"].put(
+                _minimal_glb({"asset": {"version": "2.0"}, "scene": level}),
+                filename=f"stale-lod-target-lod{level}.glb",
+                content_type="model/gltf-binary",
+                metadata={"kind": "lod", "level": level, "source_model_id": model.id},
+            )
+            ModelVariant.upsert(
+                model.id,
+                "lod",
+                str(file_id),
+                level=level,
+                file_format="glb",
+                size=64,
+                settings={"defaults_version": "old-defaults"},
+            )
+
+        result = api._optimize_missing_lod_variants(limit=5)
+
+    assert result["optimized"] == 1
+    assert calls == [model.id]
+
+
+def test_pipeline_reconciler_reports_impostor_generation(monkeypatch):
+    import app.api as api
+
+    app = create_app()
+    monkeypatch.setattr(api, "_optimize_missing_game_variants", lambda limit=3: {"optimized": 0})
+    monkeypatch.setattr(api, "_optimize_missing_lod_variants", lambda limit=2: {"optimized": 0})
+    monkeypatch.setattr(api, "_generate_missing_impostor_variants", lambda limit=5: {"generated": 2, "failed": 0})
+    monkeypatch.setattr(api, "_requeue_missing_conversions", lambda limit=25: 0)
+    monkeypatch.setattr(api, "_queue_thumbnail_ready_enrichment", lambda limit=25: 0)
+    monkeypatch.setattr(api, "_sweep_stuck_media_capture", lambda: {"reset": 0, "failed": 0})
+    monkeypatch.setattr(api, "_render_missing_thumbnails", lambda limit=10: {"rendered": 0, "failed": 0, "skipped": 0})
+    monkeypatch.setattr(api, "_media_capture_queue_snapshot", lambda **kwargs: {"count": 0, "models": []})
+
+    result = api._reconcile_asset_pipeline_once(
+        app,
+        optimize_limit=1,
+        lod_limit=1,
+        impostor_limit=1,
+        enrich_limit=1,
+        conversion_limit=1,
+    )
+
+    assert result["success"] is True
+    assert result["impostors"] == {"generated": 2, "failed": 0}
 
 
 def test_asset_admin_can_import_fbx_avatar_batch(monkeypatch, tmp_path):
@@ -903,10 +978,11 @@ def test_lod_optimizer_generates_levels_from_original_asset(monkeypatch):
     def fake_run(cmd, capture_output=True, text=True, timeout=300, check=False):
         calls.append(list(cmd))
         out_path = Path(cmd[cmd.index("-o") + 1])
-        ratio = cmd[cmd.index("-si") + 1]
+        ratio = cmd[cmd.index("-si") + 1] if "-si" in cmd else "flat-repack"
         out_path.write_bytes(_minimal_glb({
             "asset": {"version": "2.0"},
             "extras": {"ratio": ratio},
+            "materials": [{"pbrMetallicRoughness": {"baseColorFactor": [1, 1, 1, 1]}}],
         }))
         report_path = Path(cmd[cmd.index("-r") + 1])
         report_path.write_text(json.dumps({"ratio": ratio}), encoding="utf-8")
@@ -942,15 +1018,47 @@ def test_lod_optimizer_generates_levels_from_original_asset(monkeypatch):
         lod0 = ModelVariant.get(model.id, "lod", level=0)
         lod1 = ModelVariant.get(model.id, "lod", level=1)
         lod2 = ModelVariant.get(model.id, "lod", level=2)
+        lod3 = ModelVariant.get(model.id, "lod", level=3)
         stored_lod2 = app.config["FILE_STORE"].get(lod2.file_id)
 
     assert result["success"] is True
-    assert [level["level"] for level in result["levels"]] == [0, 1, 2]
-    assert [cmd[cmd.index("-si") + 1] for cmd in calls] == ["0.85", "0.5", "0.25"]
-    assert all(cmd[cmd.index("-i") + 1].endswith("input.glb") for cmd in calls)
+    assert [level["level"] for level in result["levels"]] == [0, 1, 2, 3]
+    simplify_calls = [cmd for cmd in calls if "-si" in cmd]
+    repack_calls = [cmd for cmd in calls if "-si" not in cmd]
+    assert [cmd[cmd.index("-si") + 1] for cmd in simplify_calls] == ["0.85", "0.18", "0.08", "0.015"]
+    assert "-sa" in calls[1]
+    assert "-sp" in calls[1]
+    assert calls[1][calls[1].index("-se") + 1] == "0.03"
+    assert calls[1][calls[1].index("-tl") + 1] == "512"
+    assert "-sa" in calls[2]
+    assert "-sp" in calls[2]
+    assert calls[2][calls[2].index("-se") + 1] == "0.04"
+    assert calls[2][calls[2].index("-tl") + 1] == "128"
+    assert "-sa" in calls[3]
+    assert "-sp" in calls[3]
+    assert calls[3][calls[3].index("-se") + 1] == "0.08"
+    assert all(cmd[cmd.index("-i") + 1].endswith("input.glb") for cmd in simplify_calls)
+    assert len(repack_calls) == 1
+    assert repack_calls[0][repack_calls[0].index("-i") + 1].endswith("lod3-flat-input.glb")
     assert lod0.settings["role"] == "near/game"
-    assert lod1.settings["simplify_ratio"] == 0.5
-    assert lod2.settings["texture_limit"] == 512
+    assert lod1.settings["texture_limit"] == 512
+    assert lod1.settings["simplify_ratio"] == 0.18
+    assert lod1.settings["target_vertices"] == 20000
+    assert lod1.settings["aggressive"] is True
+    assert lod1.settings["permissive"] is True
+    assert lod1.settings["role"] == "mid/fill"
+    assert lod2.settings["texture_limit"] == 128
+    assert lod2.settings["simplify_ratio"] == 0.08
+    assert lod2.settings["target_vertices"] == 10000
+    assert lod2.settings["aggressive"] is True
+    assert lod2.settings["permissive"] is True
+    assert lod2.settings["role"] == "far/large-fill"
+    assert lod3.settings["texture_limit"] == 0
+    assert lod3.settings["simplify_ratio"] == 0.015
+    assert lod3.settings["target_vertices"] == 500
+    assert lod3.settings["flat_material"] is True
+    assert lod3.settings["flat_material_stage"] == "post_simplification"
+    assert lod3.settings["role"] == "ultra-far/flat-silhouette"
     assert stored_lod2.filename.endswith("-lod2.glb")
 
 
@@ -978,10 +1086,11 @@ def test_lod_optimizer_decodes_draco_sources_before_gltfpack(monkeypatch, tmp_pa
             out_path.write_bytes(_minimal_glb({"asset": {"version": "2.0"}, "scene": 0}))
         else:
             out_path = Path(cmd[cmd.index("-o") + 1])
-            ratio = cmd[cmd.index("-si") + 1]
+            ratio = cmd[cmd.index("-si") + 1] if "-si" in cmd else "flat-repack"
             out_path.write_bytes(_minimal_glb({
                 "asset": {"version": "2.0"},
                 "extras": {"ratio": ratio},
+                "materials": [{"pbrMetallicRoughness": {"baseColorFactor": [1, 1, 1, 1]}}],
             }))
             report_path = Path(cmd[cmd.index("-r") + 1])
             report_path.write_text(json.dumps({"ratio": ratio}), encoding="utf-8")
@@ -1033,9 +1142,57 @@ def test_lod_optimizer_decodes_draco_sources_before_gltfpack(monkeypatch, tmp_pa
     assert calls[0][2] == "copy"
     assert calls[0][3].endswith("input.glb")
     assert calls[0][4].endswith("input-dedraco.glb")
-    gltfpack_inputs = [cmd[cmd.index("-i") + 1] for cmd in calls[1:]]
-    assert gltfpack_inputs == [calls[0][4], calls[0][4], calls[0][4]]
+    gltfpack_inputs = [cmd[cmd.index("-i") + 1] for cmd in calls[1:] if "-si" in cmd]
+    assert gltfpack_inputs == [calls[0][4], calls[0][4], calls[0][4], calls[0][4]]
     assert lod0.settings["source_prepare"]["draco_decompressed"] is True
+
+
+def test_impostor_generator_uses_thumbnail_as_far_billboard(monkeypatch):
+    import app.api as api
+
+    app = create_app()
+    with app.app_context():
+        owner = _ensure_user("impostor-owner")
+        source = _minimal_glb({"asset": {"version": "2.0"}, "scene": 0})
+        thumbnail_id = app.config["FILE_STORE"].put(
+            b"thumbnail image bytes",
+            filename="thumb.webp",
+            content_type="image/webp",
+            metadata={"kind": "thumbnail"},
+        )
+        model = Model3D(
+            name="Impostor Source",
+            file_format="glb",
+            file_size=len(source),
+            user_id=owner.id,
+            is_public=True,
+            gridfs_file_id=app.config["FILE_STORE"].put(
+                source,
+                filename="impostor-source.glb",
+                content_type="model/gltf-binary",
+                metadata={},
+            ),
+            thumbnail_file_id=str(thumbnail_id),
+            asset_types=[],
+        ).save()
+
+        monkeypatch.setattr(
+            api,
+            "_encode_impostor_webp",
+            lambda image_bytes, size=512: (b"RIFFxxxxWEBP", 512, 512),
+        )
+        result = api._run_impostor_generator(model, owner.id)
+        variant = ModelVariant.get(model.id, "impostor")
+        stored = app.config["FILE_STORE"].get(variant.file_id)
+
+    assert result["success"] is True
+    assert result["source"] == "thumbnail"
+    assert result["width"] == 512
+    assert variant.file_format == "webp"
+    assert variant.size == len(b"RIFFxxxxWEBP")
+    assert variant.settings["role"] == "far/billboard"
+    assert stored.content_type == "image/webp"
+    assert stored.read() == b"RIFFxxxxWEBP"
 
 
 def test_game_optimizer_decodes_draco_sources_before_gltfpack(monkeypatch, tmp_path):
@@ -2410,7 +2567,14 @@ def test_tellus_asset_lod_routes_serve_variants_under_original_asset_id():
             size=len(lod1_bytes),
             settings={"mesh_stats": {"vertices": 1234, "triangles": 2345}},
         )
-        ModelVariant.upsert(model.id, "impostor", str(impostor_id), file_format="webp", size=len(impostor_bytes))
+        ModelVariant.upsert(
+            model.id,
+            "impostor",
+            str(impostor_id),
+            file_format="webp",
+            size=len(impostor_bytes),
+            settings={"width": 512, "height": 512, "source": "thumbnail", "role": "far/billboard"},
+        )
 
     detail = client.get(f"/api/model/{model.id}")
     assert detail.status_code == 200, detail.get_json()
@@ -2419,12 +2583,13 @@ def test_tellus_asset_lod_routes_serve_variants_under_original_asset_id():
     assert detail_model["asset_lod_urls"]["lod0"].endswith(f"/api/assets/model/{model.id}/lod/0")
     assert detail_model["asset_lod_urls"]["lod1"].endswith(f"/api/assets/model/{model.id}/lod/1")
     assert detail_model["asset_lod_urls"]["lod2"].endswith(f"/api/assets/model/{model.id}/lod/2")
+    assert detail_model["asset_lod_urls"]["lod3"].endswith(f"/api/assets/model/{model.id}/lod/3")
     assert detail_model["asset_lod_urls"]["impostor"].endswith(f"/api/assets/model/{model.id}/impostor")
     assert detail_model["has_lod_variants"] is True
     assert detail_model["lod_ready"] is False
     assert detail_model["lod_status"] == "partial"
     assert detail_model["lod_available_levels"] == [1]
-    assert detail_model["lod_missing_levels"] == [0, 2]
+    assert detail_model["lod_missing_levels"] == [0, 2, 3]
     assert detail_model["lod_preview_fallback_url"].endswith(f"/api/view/{model.id}?viewer=2")
     assert detail_model["lod_variants"][0]["vertices"] == 1234
     assert detail_model["lod_variants"][0]["triangles"] == 2345
@@ -2436,6 +2601,10 @@ def test_tellus_asset_lod_routes_serve_variants_under_original_asset_id():
     assert detail_model["lod_variants"][0]["url"].endswith(f"/api/assets/model/{model.id}/lod/1")
     assert detail_model["lod_variants"][0]["download_url"].endswith(f"/api/assets/model/{model.id}/lod/1?download=1")
     assert detail_model["impostor"]["file_format"] == "webp"
+    assert detail_model["impostor"]["width"] == 512
+    assert detail_model["impostor"]["height"] == 512
+    assert detail_model["impostor"]["source"] == "thumbnail"
+    assert detail_model["impostor"]["role"] == "far/billboard"
     assert detail_model["impostor"]["url"].endswith(f"/api/assets/model/{model.id}/impostor")
 
     game = client.get(f"/api/assets/model/{model.id}/game-optimized")
@@ -2592,8 +2761,21 @@ def test_game_optimization_job_generates_lods_for_one_model(monkeypatch):
         )
         return {"success": True, "source_model_id": model.id}
 
+    def fake_impostor_generator(model, owner_id=None):
+        generated["impostor_model_id"] = model.id
+        generated["impostor_owner_id"] = owner_id
+        return {
+            "success": True,
+            "source_model_id": model.id,
+            "source": "thumbnail",
+            "size": 123,
+            "width": 512,
+            "height": 512,
+        }
+
     monkeypatch.setattr(api, "_run_game_optimizer", fake_game_optimizer)
     monkeypatch.setattr(api, "_run_lod_optimizer", fake_lod_optimizer)
+    monkeypatch.setattr(api, "_run_impostor_generator", fake_impostor_generator)
     monkeypatch.setattr(
         api,
         "_start_game_optimization_thread",
@@ -2638,11 +2820,15 @@ def test_game_optimization_job_generates_lods_for_one_model(monkeypatch):
     assert job["lod_available_levels"] == [0]
     assert job["lod_variants"][0]["vertices"] == 900
     assert job["lod_summary"]["recommended_use"] == "large_fill"
+    assert job["impostor_result"]["success"] is True
+    assert job["impostor_result"]["width"] == 512
     assert generated == {
         "game_model_id": model.id,
         "game_owner_id": owner.id,
         "lod_model_id": model.id,
         "lod_owner_id": owner.id,
+        "impostor_model_id": model.id,
+        "impostor_owner_id": owner.id,
         "job_id": job_id,
     }
 
@@ -2830,12 +3016,22 @@ def test_openapi_documents_workflow_and_bearer_auth():
     assert "/optimization/defaults" in spec["paths"]
     assert "/admin/lod-backfill" in spec["paths"]
     assert "/admin/lod-backfill/status" in spec["paths"]
+    lod_backfill_params = {
+        param["name"] for param in spec["paths"]["/admin/lod-backfill"]["post"].get("parameters", [])
+    }
+    assert "force" in lod_backfill_params
+    reconcile_params = {
+        param["name"] for param in spec["paths"]["/admin/pipeline/reconcile"]["post"].get("parameters", [])
+    }
+    assert "impostor_limit" in reconcile_params
     assert "/model/{model_id}/ai/autotag" in spec["paths"]
     assert "/model/{model_id}/approval" in spec["paths"]
     assert "/bundles" in spec["paths"]
     optimize_doc = spec["paths"]["/model/{model_id}/optimize-game"]["post"]
     assert "LOD" in optimize_doc["summary"]
+    assert "impostor" in optimize_doc["summary"].lower()
     assert "LOD0" in optimize_doc["description"]
+    assert "impostor" in optimize_doc["description"].lower()
     assert optimize_doc["responses"]["202"]["content"]["application/json"]["schema"]["$ref"] == "#/components/schemas/OptimizationJobResponse"
     optimize_props = optimize_doc["requestBody"]["content"]["application/json"]["schema"]["properties"]
     assert optimize_props["preset"]["default"] == "balanced"
@@ -2883,12 +3079,20 @@ def test_openapi_documents_workflow_and_bearer_auth():
     assert "lod_variants" in job_props
     assert "lod_ready" in job_props
     assert "lod_summary" in job_props
+    assert "impostor_result" in job_props
+    assert "has_impostor" in job_props
+    assert "impostor" in job_props
     lod_props = spec["components"]["schemas"]["LodVariant"]["properties"]
     assert "runtime_cost" in lod_props
     assert "mesh_stats" in lod_props
     assert "vertices" in lod_props
     assert "triangles" in lod_props
     assert "recommended_use" in lod_props
+    impostor_props = spec["components"]["schemas"]["ImpostorVariant"]["properties"]
+    assert "width" in impostor_props
+    assert "height" in impostor_props
+    assert "source" in impostor_props
+    assert "role" in impostor_props
     assert "/assets/model/{model_id}/game-optimized" in spec["paths"]
     assert "/assets/model/{model_id}/lod/{level}" in spec["paths"]
     assert "/assets/model/{model_id}/impostor" in spec["paths"]

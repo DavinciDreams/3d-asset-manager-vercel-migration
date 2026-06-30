@@ -12,6 +12,7 @@ main_bp = Blueprint('main', __name__)
 
 # Rows per page for the dashboard table's infinite scroll.
 DASHBOARD_PER_PAGE = 30
+LOD_EXPECTED_LEVELS = (0, 1, 2, 3)
 
 _GLB_MAGIC = b'glTF'
 _GLB_JSON_CHUNK = 0x4E4F534A
@@ -91,7 +92,7 @@ def _lod_recommended_use(vertices, size):
         return None
     vertices = vertices if vertices is not None else 10**9
     size = size if size is not None else 10**12
-    if vertices <= 15000 and size <= 512 * 1024:
+    if vertices <= 10000 and size <= 512 * 1024:
         return 'large_fill'
     if vertices <= 40000 and size <= 1536 * 1024:
         return 'general_fill'
@@ -103,7 +104,7 @@ def _lod_recommended_use(vertices, size):
 def _model_lod_summary(model):
     levels = []
     available = []
-    for level in (0, 1, 2):
+    for level in LOD_EXPECTED_LEVELS:
         variant = ModelVariant.get(model.id, 'lod', level=level)
         if not variant or not variant.file_id or (variant.status or 'ready') != 'ready':
             continue
@@ -122,7 +123,7 @@ def _model_lod_summary(model):
             'triangles': triangles,
             'recommended_use': _lod_recommended_use(vertices, size),
         })
-    missing = [level for level in (0, 1, 2) if level not in available]
+    missing = [level for level in LOD_EXPECTED_LEVELS if level not in available]
     cheapest = None
     if levels:
         cheapest = min(
@@ -611,11 +612,12 @@ def model_detail(model_id):
                 ModelVariant.get(model.id, 'lod', level=0),
                 ModelVariant.get(model.id, 'lod', level=1),
                 ModelVariant.get(model.id, 'lod', level=2),
+                ModelVariant.get(model.id, 'lod', level=3),
             )
             if variant and variant.file_id and (variant.status or 'ready') == 'ready'
         ]
         lod_available_levels = [int(variant.level) for variant in lod_variants]
-        lod_missing_levels = [level for level in (0, 1, 2) if level not in lod_available_levels]
+        lod_missing_levels = [level for level in LOD_EXPECTED_LEVELS if level not in lod_available_levels]
         lod_ready = not lod_missing_levels
         lod_summary = _model_lod_summary(model)
         lod_levels_by_level = {item.get('level'): item for item in lod_summary.get('levels', [])}
