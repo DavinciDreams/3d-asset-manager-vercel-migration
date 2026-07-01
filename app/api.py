@@ -2440,6 +2440,20 @@ def _encode_impostor_webp(image_bytes, *, size=512):
         return out.getvalue(), target_size, target_size
 
 
+def _encode_impostor_atlas_webp(image_bytes):
+    """Encode an atlas image as WebP while preserving alpha."""
+    try:
+        from PIL import Image
+    except Exception as e:
+        raise RuntimeError('Pillow is required to generate impostor WebP textures.') from e
+
+    with Image.open(io.BytesIO(image_bytes)) as img:
+        img = img.convert('RGBA')
+        out = io.BytesIO()
+        img.save(out, format='WEBP', quality=82, method=4)
+        return out.getvalue(), img.width, img.height
+
+
 @api_bp.route('/model/<model_id>/thumbnail', methods=['POST'])
 def upload_thumbnail(model_id):
     """Store a client-captured thumbnail for a model (owner only).
@@ -3961,8 +3975,16 @@ def _asset_lod_url_fields(model):
             'file_format': impostor.file_format,
             'status': impostor.status,
             'settings': settings,
+            'type': settings.get('type'),
             'width': settings.get('width'),
             'height': settings.get('height'),
+            'atlas_width': settings.get('atlas_width'),
+            'atlas_height': settings.get('atlas_height'),
+            'grid_size_x': settings.get('grid_size_x'),
+            'grid_size_y': settings.get('grid_size_y'),
+            'cell_size': settings.get('cell_size'),
+            'view_count': settings.get('view_count'),
+            'octahedron_type': settings.get('octahedron_type'),
             'source': settings.get('source'),
             'role': settings.get('role'),
             'url': url_for('api.get_asset_impostor', model_id=model.id),
@@ -5524,8 +5546,29 @@ def _impostor_source_image_bytes(model, *, render_size=512):
     return png, 'server_render'
 
 
+def _octahedral_impostor_source_bytes(model, *, atlas_size=2048, grid_size=31):
+    from app import render as render_mod
+    if not render_mod.render_available():
+        raise RuntimeError('Server render stack unavailable.')
+    try:
+        data, view_fmt = model.get_viewable_data()
+    except Exception as e:
+        raise RuntimeError('No viewable mesh available for octahedral impostor generation.') from e
+    if not data or data[:4] != b'glTF':
+        raise RuntimeError('No usable GLB bytes for octahedral impostor generation.')
+    png, bake_metadata = render_mod.render_glb_to_octahedral_atlas(
+        data,
+        file_type=(view_fmt or 'glb').lower() if (view_fmt or 'glb').lower() in ('glb', 'gltf') else 'glb',
+        atlas_size=atlas_size,
+        grid_size=grid_size,
+        oct_type='hemi',
+        decompress=lambda b: _decompress_meshopt_glb_bytes(b),
+    )
+    return png, 'octahedral_server_render', bake_metadata
+
+
 def _run_impostor_generator(model, owner_id=None, *, size=512):
-    """Generate a far-field billboard texture under ModelVariant(kind=impostor)."""
+    """Generate a far-field impostor texture under ModelVariant(kind=impostor)."""
     if os.environ.get('AUTO_IMPOSTOR_GENERATE', '1').lower() in {'0', 'false', 'no', 'off'}:
         return {
             'success': False,
@@ -5541,34 +5584,46 @@ def _run_impostor_generator(model, owner_id=None, *, size=512):
             'source_model_id': model.id,
         }
 
-    image_bytes, source = _impostor_source_image_bytes(model, render_size=size)
-    impostor_bytes, width, height = _encode_impostor_webp(image_bytes, size=size)
+    impostor_type = 'octahedral_atlas'
+    bake_metadata = {}
+    try:
+        image_bytes, source, bake_metadata = _octahedral_impostor_source_bytes(model)
+        impostor_bytes, width, height = _encode_impostor_atlas_webp(image_bytes)
+    except Exception as e:
+        print(f"Octahedral impostor generation failed for {model.id}, falling back to billboard: {e}")
+        impostor_type = 'billboard'
+        image_bytes, source = _impostor_source_image_bytes(model, render_size=size)
+        impostor_bytes, width, height = _encode_impostor_webp(image_bytes, size=size)
     fs = current_app.config['FILE_STORE']
     metadata = {
         'kind': 'impostor',
+        'type': impostor_type,
         'source_model_id': model.id,
         'source': source,
         'width': width,
         'height': height,
         'format': 'webp',
-        'role': 'far/billboard',
+        'role': 'far/octahedral' if impostor_type == 'octahedral_atlas' else 'far/billboard',
+        **bake_metadata,
         'generated_at': datetime.utcnow().isoformat(),
     }
     file_id = fs.put(
         impostor_bytes,
-        filename=f'{_safe_stem(model)}-impostor.webp',
+        filename=f'{_safe_stem(model)}-{"octahedral-impostor" if impostor_type == "octahedral_atlas" else "impostor"}.webp',
         content_type='image/webp',
         metadata=metadata,
     )
     settings = {
         'defaults_version': LOD_OPTIMIZE_DEFAULTS_VERSION,
+        'type': impostor_type,
         'source': source,
         'width': width,
         'height': height,
-        'role': 'far/billboard',
-        'runtime_use': 'far_impostor',
+        'role': metadata['role'],
+        'runtime_use': 'far_octahedral_impostor' if impostor_type == 'octahedral_atlas' else 'far_impostor',
         'file_format': 'webp',
         'source_model_id': model.id,
+        **bake_metadata,
     }
     variant, old_file_id = ModelVariant.upsert(
         model.id, 'impostor', str(file_id),
@@ -5583,10 +5638,12 @@ def _run_impostor_generator(model, owner_id=None, *, size=512):
     return {
         'success': True,
         'source_model_id': model.id,
+        'type': impostor_type,
         'source': source,
         'size': len(impostor_bytes),
         'width': width,
         'height': height,
+        **bake_metadata,
         'variant': variant.to_api() if variant else None,
     }
 

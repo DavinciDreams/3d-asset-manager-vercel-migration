@@ -451,17 +451,25 @@ def get_openapi_spec(base_url=''):
                 'ImpostorVariant': {
                     'type': 'object',
                     'nullable': True,
-                    'description': 'Metadata for a generated impostor variant stored under the original asset id.',
+                    'description': 'Metadata for a generated impostor variant stored under the original asset id. Octahedral atlases expose grid metadata for far-distance runtime selection.',
                     'properties': {
                         'size': {'type': 'integer', 'description': 'Variant file size in bytes'},
                         'size_mb': {'type': 'number', 'nullable': True},
                         'file_format': {'type': 'string', 'example': 'webp'},
                         'status': {'type': 'string', 'example': 'ready'},
                         'settings': {'type': 'object'},
+                        'type': {'type': 'string', 'nullable': True, 'enum': ['octahedral_atlas', 'billboard', None]},
                         'width': {'type': 'integer', 'nullable': True},
                         'height': {'type': 'integer', 'nullable': True},
-                        'source': {'type': 'string', 'nullable': True, 'example': 'thumbnail'},
-                        'role': {'type': 'string', 'nullable': True, 'example': 'far/billboard'},
+                        'atlas_width': {'type': 'integer', 'nullable': True},
+                        'atlas_height': {'type': 'integer', 'nullable': True},
+                        'grid_size_x': {'type': 'integer', 'nullable': True, 'example': 31},
+                        'grid_size_y': {'type': 'integer', 'nullable': True, 'example': 31},
+                        'cell_size': {'type': 'integer', 'nullable': True, 'example': 66},
+                        'view_count': {'type': 'integer', 'nullable': True, 'example': 961},
+                        'octahedron_type': {'type': 'string', 'nullable': True, 'example': 'hemi'},
+                        'source': {'type': 'string', 'nullable': True, 'example': 'octahedral_server_render'},
+                        'role': {'type': 'string', 'nullable': True, 'example': 'far/octahedral'},
                         'url': {'type': 'string', 'example': '/api/assets/model/abc/impostor'},
                         'download_url': {'type': 'string', 'example': '/api/assets/model/abc/impostor?download=1'},
                         'updated_at': {'type': 'string', 'format': 'date-time', 'nullable': True},
@@ -1870,7 +1878,8 @@ def get_openapi_spec(base_url=''):
                     'description': (
                         'Queues a single background job that creates the game-optimized GLB and then '
                         'generates LOD0, LOD1, LOD2, and LOD3, followed by a WebP far-field impostor '
-                        'billboard for the same source asset. Select a preset, then override individual '
+                        'for the same source asset. The impostor is an octahedral atlas when the server '
+                        'render stack is available, with thumbnail billboard fallback. Select a preset, then override individual '
                         'fields when needed. Choose meshopt for the smallest file or fallback for a '
                         'self-contained file without mesh compression. The source asset is not replaced.'
                     ),

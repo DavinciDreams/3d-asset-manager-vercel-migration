@@ -1147,19 +1147,37 @@ def test_lod_optimizer_decodes_draco_sources_before_gltfpack(monkeypatch, tmp_pa
     assert lod0.settings["source_prepare"]["draco_decompressed"] is True
 
 
-def test_impostor_generator_uses_thumbnail_as_far_billboard(monkeypatch):
+def test_impostor_generator_prefers_octahedral_atlas(monkeypatch):
     import app.api as api
+    from app import render as render_mod
 
     app = create_app()
+    monkeypatch.setattr(render_mod, "render_available", lambda: True)
+    monkeypatch.setattr(
+        render_mod,
+        "render_glb_to_octahedral_atlas",
+        lambda *args, **kwargs: (
+            b"atlas png bytes",
+            {
+                "atlas_width": 2048,
+                "atlas_height": 2048,
+                "grid_size_x": 31,
+                "grid_size_y": 31,
+                "cell_size": 66,
+                "view_count": 961,
+                "octahedron_type": "hemi",
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        api,
+        "_encode_impostor_atlas_webp",
+        lambda image_bytes: (b"RIFFatlasWEBP", 2048, 2048),
+    )
+
     with app.app_context():
         owner = _ensure_user("impostor-owner")
         source = _minimal_glb({"asset": {"version": "2.0"}, "scene": 0})
-        thumbnail_id = app.config["FILE_STORE"].put(
-            b"thumbnail image bytes",
-            filename="thumb.webp",
-            content_type="image/webp",
-            metadata={"kind": "thumbnail"},
-        )
         model = Model3D(
             name="Impostor Source",
             file_format="glb",
@@ -1172,27 +1190,70 @@ def test_impostor_generator_uses_thumbnail_as_far_billboard(monkeypatch):
                 content_type="model/gltf-binary",
                 metadata={},
             ),
-            thumbnail_file_id=str(thumbnail_id),
             asset_types=[],
         ).save()
 
-        monkeypatch.setattr(
-            api,
-            "_encode_impostor_webp",
-            lambda image_bytes, size=512: (b"RIFFxxxxWEBP", 512, 512),
-        )
         result = api._run_impostor_generator(model, owner.id)
         variant = ModelVariant.get(model.id, "impostor")
         stored = app.config["FILE_STORE"].get(variant.file_id)
 
     assert result["success"] is True
+    assert result["type"] == "octahedral_atlas"
+    assert result["source"] == "octahedral_server_render"
+    assert result["width"] == 2048
+    assert result["view_count"] == 961
+    assert variant.file_format == "webp"
+    assert variant.size == len(b"RIFFatlasWEBP")
+    assert variant.settings["role"] == "far/octahedral"
+    assert variant.settings["grid_size_x"] == 31
+    assert variant.settings["octahedron_type"] == "hemi"
+    assert stored.content_type == "image/webp"
+    assert stored.read() == b"RIFFatlasWEBP"
+
+
+def test_impostor_generator_falls_back_to_thumbnail_billboard(monkeypatch):
+    import app.api as api
+
+    app = create_app()
+    monkeypatch.setattr(api, "_octahedral_impostor_source_bytes", lambda model: (_ for _ in ()).throw(RuntimeError("no renderer")))
+    monkeypatch.setattr(
+        api,
+        "_encode_impostor_webp",
+        lambda image_bytes, size=512: (b"RIFFxxxxWEBP", 512, 512),
+    )
+    with app.app_context():
+        owner = _ensure_user("impostor-fallback-owner")
+        source = _minimal_glb({"asset": {"version": "2.0"}, "scene": 0})
+        thumbnail_id = app.config["FILE_STORE"].put(
+            b"thumbnail image bytes",
+            filename="thumb.webp",
+            content_type="image/webp",
+            metadata={"kind": "thumbnail"},
+        )
+        model = Model3D(
+            name="Impostor Fallback Source",
+            file_format="glb",
+            file_size=len(source),
+            user_id=owner.id,
+            is_public=True,
+            gridfs_file_id=app.config["FILE_STORE"].put(
+                source,
+                filename="impostor-fallback-source.glb",
+                content_type="model/gltf-binary",
+                metadata={},
+            ),
+            thumbnail_file_id=str(thumbnail_id),
+            asset_types=[],
+        ).save()
+
+        result = api._run_impostor_generator(model, owner.id)
+        variant = ModelVariant.get(model.id, "impostor")
+
+    assert result["success"] is True
+    assert result["type"] == "billboard"
     assert result["source"] == "thumbnail"
     assert result["width"] == 512
-    assert variant.file_format == "webp"
-    assert variant.size == len(b"RIFFxxxxWEBP")
     assert variant.settings["role"] == "far/billboard"
-    assert stored.content_type == "image/webp"
-    assert stored.read() == b"RIFFxxxxWEBP"
 
 
 def test_game_optimizer_decodes_draco_sources_before_gltfpack(monkeypatch, tmp_path):
@@ -2573,7 +2634,20 @@ def test_tellus_asset_lod_routes_serve_variants_under_original_asset_id():
             str(impostor_id),
             file_format="webp",
             size=len(impostor_bytes),
-            settings={"width": 512, "height": 512, "source": "thumbnail", "role": "far/billboard"},
+            settings={
+                "type": "octahedral_atlas",
+                "width": 2048,
+                "height": 2048,
+                "atlas_width": 2048,
+                "atlas_height": 2048,
+                "grid_size_x": 31,
+                "grid_size_y": 31,
+                "cell_size": 66,
+                "view_count": 961,
+                "octahedron_type": "hemi",
+                "source": "octahedral_server_render",
+                "role": "far/octahedral",
+            },
         )
 
     detail = client.get(f"/api/model/{model.id}")
@@ -2601,10 +2675,15 @@ def test_tellus_asset_lod_routes_serve_variants_under_original_asset_id():
     assert detail_model["lod_variants"][0]["url"].endswith(f"/api/assets/model/{model.id}/lod/1")
     assert detail_model["lod_variants"][0]["download_url"].endswith(f"/api/assets/model/{model.id}/lod/1?download=1")
     assert detail_model["impostor"]["file_format"] == "webp"
-    assert detail_model["impostor"]["width"] == 512
-    assert detail_model["impostor"]["height"] == 512
-    assert detail_model["impostor"]["source"] == "thumbnail"
-    assert detail_model["impostor"]["role"] == "far/billboard"
+    assert detail_model["impostor"]["type"] == "octahedral_atlas"
+    assert detail_model["impostor"]["width"] == 2048
+    assert detail_model["impostor"]["height"] == 2048
+    assert detail_model["impostor"]["grid_size_x"] == 31
+    assert detail_model["impostor"]["grid_size_y"] == 31
+    assert detail_model["impostor"]["view_count"] == 961
+    assert detail_model["impostor"]["octahedron_type"] == "hemi"
+    assert detail_model["impostor"]["source"] == "octahedral_server_render"
+    assert detail_model["impostor"]["role"] == "far/octahedral"
     assert detail_model["impostor"]["url"].endswith(f"/api/assets/model/{model.id}/impostor")
 
     game = client.get(f"/api/assets/model/{model.id}/game-optimized")
@@ -3089,8 +3168,13 @@ def test_openapi_documents_workflow_and_bearer_auth():
     assert "triangles" in lod_props
     assert "recommended_use" in lod_props
     impostor_props = spec["components"]["schemas"]["ImpostorVariant"]["properties"]
+    assert "type" in impostor_props
     assert "width" in impostor_props
     assert "height" in impostor_props
+    assert "grid_size_x" in impostor_props
+    assert "grid_size_y" in impostor_props
+    assert "view_count" in impostor_props
+    assert "octahedron_type" in impostor_props
     assert "source" in impostor_props
     assert "role" in impostor_props
     assert "/assets/model/{model_id}/game-optimized" in spec["paths"]
