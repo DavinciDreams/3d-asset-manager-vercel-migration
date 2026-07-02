@@ -5279,8 +5279,51 @@ def _gltf_transform_cli_path():
     return tools_dir / 'node_modules' / '@gltf-transform' / 'cli' / 'bin' / 'cli.js'
 
 
+def _meshopt_decode_script_path():
+    tools_dir = Path(os.environ.get('FBX2VRMA_DIR') or 'tools')
+    if not tools_dir.is_absolute():
+        tools_dir = Path(current_app.root_path).parent / tools_dir
+    return tools_dir / 'decode-meshopt-glb.mjs'
+
+
+def _decode_meshopt_input_path(src_bytes, workdir):
+    """Decode EXT_meshopt_compression to a self-contained GLB for gltfpack.
+
+    Some gltfpack outputs keep an external fallback buffer URI even when the
+    compressed stream is embedded in the GLB. The app stores only one file, so
+    that fallback is missing and gltfpack reports "resource not found". The
+    helper strips the fallback metadata, decodes meshopt, and writes plain GLB.
+    """
+    import shutil
+    import subprocess
+
+    node_bin = os.environ.get('NODE_BIN') or shutil.which('node')
+    script_path = _meshopt_decode_script_path()
+    if not node_bin or not script_path.exists():
+        raise RuntimeError(
+            'Source uses meshopt compression; install Node and tools/decode-meshopt-glb.mjs '
+            'dependencies so LOD generation can decode it.'
+        )
+
+    in_path = os.path.join(workdir, 'input-meshopt.glb')
+    out_path = os.path.join(workdir, 'input-demeshopt.glb')
+    with open(in_path, 'wb') as f:
+        f.write(src_bytes)
+    result = subprocess.run(
+        [node_bin, str(script_path), in_path, out_path],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    if result.returncode != 0 or not os.path.exists(out_path):
+        msg = (result.stderr or result.stdout or 'meshopt decode failed.').strip()
+        raise RuntimeError(f'Meshopt decode failed before LOD generation: {msg[-1000:]}')
+    return out_path
+
+
 def _prepare_lod_input_path(src_bytes, src_fmt, workdir):
-    """Write an optimizer input file, removing Draco compression if necessary."""
+    """Write an optimizer input file, removing meshopt/Draco compression if necessary."""
     import shutil
     import subprocess
 
@@ -5288,9 +5331,23 @@ def _prepare_lod_input_path(src_bytes, src_fmt, workdir):
     with open(in_path, 'wb') as f:
         f.write(src_bytes)
 
+    source_prepare = {
+        'meshopt_decompressed': False,
+        'draco_decompressed': False,
+    }
+    if src_fmt == 'glb' and _gltf_uses_extension(src_bytes, src_fmt, 'EXT_meshopt_compression'):
+        in_path = _decode_meshopt_input_path(src_bytes, workdir)
+        with open(in_path, 'rb') as f:
+            src_bytes = f.read()
+        src_fmt = 'glb'
+        source_prepare.update({
+            'meshopt_decompressed': True,
+            'meshopt_decoder': 'tools/decode-meshopt-glb.mjs',
+        })
+
     uses_draco = _gltf_uses_extension(src_bytes, src_fmt, 'KHR_draco_mesh_compression')
     if not uses_draco:
-        return in_path, {'draco_decompressed': False}
+        return in_path, source_prepare
 
     node_bin = os.environ.get('NODE_BIN') or shutil.which('node')
     cli_path = _gltf_transform_cli_path()
@@ -5311,10 +5368,11 @@ def _prepare_lod_input_path(src_bytes, src_fmt, workdir):
     if result.returncode != 0 or not os.path.exists(out_path):
         msg = (result.stderr or result.stdout or 'gltf-transform copy failed.').strip()
         raise RuntimeError(f'Draco decode failed before LOD generation: {msg[-1000:]}')
-    return out_path, {
+    source_prepare.update({
         'draco_decompressed': True,
         'draco_decoder': '@gltf-transform/cli copy',
-    }
+    })
+    return out_path, source_prepare
 
 
 def _run_lod_optimizer(model, owner_id=None, levels=None):

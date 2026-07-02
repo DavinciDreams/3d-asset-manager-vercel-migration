@@ -34,11 +34,19 @@ def _ensure_user(username):
     return user.save()
 
 
-def _minimal_glb(gltf):
+def _minimal_glb(gltf, bin_chunk=None):
     raw = json.dumps(gltf, separators=(",", ":")).encode("utf-8")
     json_chunk = raw + (b" " * ((4 - len(raw) % 4) % 4))
-    length = 12 + 8 + len(json_chunk)
-    return b"glTF" + struct.pack("<II", 2, length) + struct.pack("<II", len(json_chunk), 0x4E4F534A) + json_chunk
+    chunks = [(0x4E4F534A, json_chunk)]
+    if bin_chunk is not None:
+        padded_bin = bin_chunk + (b"\0" * ((4 - len(bin_chunk) % 4) % 4))
+        chunks.append((0x004E4942, padded_bin))
+    length = 12 + sum(8 + len(chunk) for _, chunk in chunks)
+    out = bytearray(b"glTF" + struct.pack("<II", 2, length))
+    for chunk_type, chunk in chunks:
+        out.extend(struct.pack("<II", len(chunk), chunk_type))
+        out.extend(chunk)
+    return bytes(out)
 
 
 def test_derived_conversion_files_are_reused_by_content_hash():
@@ -1145,6 +1153,121 @@ def test_lod_optimizer_decodes_draco_sources_before_gltfpack(monkeypatch, tmp_pa
     gltfpack_inputs = [cmd[cmd.index("-i") + 1] for cmd in calls[1:] if "-si" in cmd]
     assert gltfpack_inputs == [calls[0][4], calls[0][4], calls[0][4], calls[0][4]]
     assert lod0.settings["source_prepare"]["draco_decompressed"] is True
+
+
+def test_lod_optimizer_decodes_meshopt_external_fallback_before_gltfpack(monkeypatch, tmp_path):
+    import app.api as api
+    import shutil
+    import subprocess
+
+    app = create_app()
+    calls = []
+    decode_script = tmp_path / "decode-meshopt-glb.mjs"
+    decode_script.write_text("", encoding="utf-8")
+
+    def fake_which(name):
+        if name == "gltfpack":
+            return "gltfpack"
+        if name == "node":
+            return "node"
+        return None
+
+    def fake_run(cmd, capture_output=True, text=True, timeout=300, check=False):
+        calls.append(list(cmd))
+        if str(decode_script) in cmd:
+            out_path = Path(cmd[-1])
+            out_path.write_bytes(_minimal_glb({"asset": {"version": "2.0"}, "scene": 0}))
+        else:
+            out_path = Path(cmd[cmd.index("-o") + 1])
+            ratio = cmd[cmd.index("-si") + 1] if "-si" in cmd else "flat-repack"
+            out_path.write_bytes(_minimal_glb({
+                "asset": {"version": "2.0"},
+                "extras": {"ratio": ratio},
+                "materials": [{"pbrMetallicRoughness": {"baseColorFactor": [1, 1, 1, 1]}}],
+            }))
+            report_path = Path(cmd[cmd.index("-r") + 1])
+            report_path.write_text(json.dumps({"ratio": ratio}), encoding="utf-8")
+
+        class Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return Result()
+
+    monkeypatch.setattr(shutil, "which", fake_which)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(api, "_meshopt_decode_script_path", lambda: decode_script)
+
+    with app.app_context():
+        owner = _ensure_user("lod-meshopt-owner")
+        source = _minimal_glb({
+            "asset": {"version": "2.0"},
+            "extensionsUsed": ["EXT_meshopt_compression"],
+            "extensionsRequired": ["EXT_meshopt_compression"],
+            "meshes": [{
+                "primitives": [{
+                    "attributes": {"POSITION": 0},
+                }],
+            }],
+            "accessors": [{
+                "bufferView": 0,
+                "componentType": 5126,
+                "count": 3,
+                "type": "VEC3",
+            }],
+            "bufferViews": [{
+                "buffer": 1,
+                "byteOffset": 0,
+                "byteLength": 36,
+                "extensions": {
+                    "EXT_meshopt_compression": {
+                        "buffer": 0,
+                        "byteOffset": 0,
+                        "byteLength": 16,
+                        "byteStride": 12,
+                        "mode": "ATTRIBUTES",
+                        "count": 3,
+                    },
+                },
+            }],
+            "buffers": [
+                {"byteLength": 16},
+                {
+                    "uri": "missing.optimized.fallback.bin",
+                    "byteLength": 36,
+                    "extensions": {"EXT_meshopt_compression": {"fallback": True}},
+                },
+            ],
+        }, bin_chunk=b"\0" * 16)
+        model = Model3D(
+            name="LOD Meshopt Fallback Source",
+            file_format="glb",
+            file_size=len(source),
+            user_id=owner.id,
+            is_public=True,
+            gridfs_file_id=app.config["FILE_STORE"].put(
+                source,
+                filename="lod-meshopt-fallback-source.glb",
+                content_type="model/gltf-binary",
+                metadata={},
+            ),
+            asset_types=[],
+        ).save()
+
+        result = api._run_lod_optimizer(model, owner.id)
+        lod0 = ModelVariant.get(model.id, "lod", level=0)
+
+    assert result["success"] is True
+    assert calls[0][0] == "node"
+    assert calls[0][1] == str(decode_script)
+    assert calls[0][2].endswith("input-meshopt.glb")
+    assert calls[0][3].endswith("input-demeshopt.glb")
+    gltfpack_inputs = [cmd[cmd.index("-i") + 1] for cmd in calls[1:] if "-si" in cmd]
+    assert gltfpack_inputs == [calls[0][3], calls[0][3], calls[0][3], calls[0][3]]
+    assert lod0.settings["source_prepare"]["meshopt_decompressed"] is True
+    assert lod0.settings["source_prepare"]["meshopt_decoder"] == "tools/decode-meshopt-glb.mjs"
+    assert lod0.settings["source_prepare"]["draco_decompressed"] is False
 
 
 def test_impostor_generator_prefers_octahedral_atlas(monkeypatch):

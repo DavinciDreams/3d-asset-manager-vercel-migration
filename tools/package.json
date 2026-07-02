@@ -18,7 +18,8 @@
     "@gltf-transform/cli": "^4.4.0",
     "commander": "^11.1.0",
     "draco3d": "^1.5.7",
-    "fs-extra": "^11.2.0"
+    "fs-extra": "^11.2.0",
+    "meshoptimizer": "^1.2.0"
   },
   "comment_puppeteer": "download-mixamo.js needs puppeteer, but it is intentionally NOT a dependency: it is a heavy (~Chromium) local/admin-only tool and must stay out of the server Docker image. Install on demand: cd tools && npm install puppeteer"
 }
