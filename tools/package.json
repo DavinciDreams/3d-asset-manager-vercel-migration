@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@gltf-transform/cli": "^4.4.0",
+    "@gltf-transform/functions": "^4.4.1",
     "commander": "^11.1.0",
     "draco3d": "^1.5.7",
     "fs-extra": "^11.2.0",

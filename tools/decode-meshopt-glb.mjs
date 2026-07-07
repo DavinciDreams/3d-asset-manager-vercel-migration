@@ -2,6 +2,7 @@
 import fs from 'node:fs/promises';
 import { NodeIO } from '@gltf-transform/core';
 import { ALL_EXTENSIONS } from '@gltf-transform/extensions';
+import { unpartition } from '@gltf-transform/functions';
 import { MeshoptDecoder } from 'meshoptimizer';
 
 const GLB_JSON_CHUNK = 0x4e4f534a;
@@ -96,4 +97,5 @@ for (const extension of document.getRoot().listExtensionsUsed()) {
   }
 }
 
+await document.transform(unpartition());
 await io.write(outputPath, document);
