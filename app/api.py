@@ -5788,7 +5788,7 @@ GAME_OPTIMIZE_PRESETS = {
     },
 }
 
-LOD_OPTIMIZE_DEFAULTS_VERSION = '2026-07-07-lod2-texture-preserve'
+LOD_OPTIMIZE_DEFAULTS_VERSION = '2026-07-07-lod2-uv-preserve'
 LOD_OPTIMIZE_LEVELS = [
     {
         'level': 0,
@@ -5810,12 +5810,11 @@ LOD_OPTIMIZE_LEVELS = [
     },
     {
         'level': 2,
-        # Keep LOD2 as the aggressively simplified far-fill mesh, but preserve
-        # enough atlas detail for leaf/prop assets where the silhouette survives
-        # and the texture becomes the visible failure mode.
+        # Keep LOD2 lighter than mid/fill while avoiding the UV/material
+        # smearing seen when leaf/prop assets are simplified too aggressively.
         'texture_limit': 512,
-        'simplify_ratio': 0.08,
-        'simplification_error': 0.04,
+        'simplify_ratio': 0.12,
+        'simplification_error': 0.02,
         'aggressive': True,
         'permissive': True,
         'target_vertices': 10000,
