@@ -5788,7 +5788,7 @@ GAME_OPTIMIZE_PRESETS = {
     },
 }
 
-LOD_OPTIMIZE_DEFAULTS_VERSION = '2026-07-07-lod-visible-uv'
+LOD_OPTIMIZE_DEFAULTS_VERSION = '2026-07-07-known-good-lod2-small-lod3'
 LOD_OPTIMIZE_LEVELS = [
     {
         'level': 0,
@@ -5810,21 +5810,26 @@ LOD_OPTIMIZE_LEVELS = [
     },
     {
         'level': 2,
-        # Keep LOD2 lighter than mid/fill while preserving enough UV/material
-        # readability for visible in-world placement.
+        # LOD1's gltfpack profile is the known-good textured result for
+        # leaf-heavy generated meshes. Keep LOD2 visually safe; true far
+        # distance should use the impostor variant.
         'texture_limit': 512,
-        'simplify_ratio': 0.16,
-        'simplification_error': 0.01,
-        'target_vertices': 15000,
+        'simplify_ratio': 0.18,
+        'simplification_error': 0.03,
+        'aggressive': True,
+        'permissive': True,
+        'target_vertices': 20000,
         'compression_mode': 'meshopt',
         'role': 'far/large-fill',
     },
     {
         'level': 3,
-        'texture_limit': 128,
-        'simplify_ratio': 0.04,
-        'simplification_error': 0.04,
-        'target_vertices': 3000,
+        'texture_limit': 512,
+        'simplify_ratio': 0.14,
+        'simplification_error': 0.015,
+        'aggressive': True,
+        'permissive': True,
+        'target_vertices': 5000,
         'compression_mode': 'meshopt',
         'role': 'ultra-far/textured-proxy',
     },
