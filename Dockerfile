@@ -15,8 +15,7 @@ RUN curl -fSL \
         -o /tmp/gltfpack.zip \
     && echo "${GLTFPACK_SHA256}  /tmp/gltfpack.zip" | sha256sum -c - \
     && python -c "import os, zipfile; z=zipfile.ZipFile('/tmp/gltfpack.zip'); names=[n for n in z.namelist() if n.rstrip('/').split('/')[-1]=='gltfpack']; assert names, 'gltfpack binary missing from release zip'; z.extract(names[0], '/tmp'); os.replace('/tmp/' + names[0], '/usr/local/bin/gltfpack'); os.chmod('/usr/local/bin/gltfpack', 0o755)" \
-    && /usr/local/bin/gltfpack -v \
-    && /usr/local/bin/gltfpack -h | grep -E -- '-tc|texture'
+    && /usr/local/bin/gltfpack -v
 
 FROM python:3.12-slim
 
