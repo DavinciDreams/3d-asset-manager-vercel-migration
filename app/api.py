@@ -5788,7 +5788,7 @@ GAME_OPTIMIZE_PRESETS = {
     },
 }
 
-LOD_OPTIMIZE_DEFAULTS_VERSION = '2026-07-07-lod2-uv-preserve'
+LOD_OPTIMIZE_DEFAULTS_VERSION = '2026-07-07-lod2-balance-lod3-textured'
 LOD_OPTIMIZE_LEVELS = [
     {
         'level': 0,
@@ -5810,29 +5810,27 @@ LOD_OPTIMIZE_LEVELS = [
     },
     {
         'level': 2,
-        # Keep LOD2 lighter than mid/fill while avoiding the UV/material
-        # smearing seen when leaf/prop assets are simplified too aggressively.
+        # Keep LOD2 lighter than mid/fill while preserving enough UV/material
+        # readability for visible in-world placement.
         'texture_limit': 512,
-        'simplify_ratio': 0.12,
-        'simplification_error': 0.02,
+        'simplify_ratio': 0.14,
+        'simplification_error': 0.015,
         'aggressive': True,
         'permissive': True,
-        'target_vertices': 10000,
+        'target_vertices': 15000,
         'compression_mode': 'meshopt',
         'role': 'far/large-fill',
     },
     {
         'level': 3,
-        'texture_limit': 0,
+        'texture_limit': 128,
         'simplify_ratio': 0.015,
         'simplification_error': 0.08,
         'aggressive': True,
         'permissive': True,
-        'flat_material': True,
-        'flat_material_color': [0.30, 0.42, 0.20, 1.0],
         'target_vertices': 500,
         'compression_mode': 'meshopt',
-        'role': 'ultra-far/flat-silhouette',
+        'role': 'ultra-far/textured-proxy',
     },
 ]
 

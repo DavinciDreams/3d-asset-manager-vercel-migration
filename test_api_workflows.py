@@ -1033,21 +1033,21 @@ def test_lod_optimizer_generates_levels_from_original_asset(monkeypatch):
     assert [level["level"] for level in result["levels"]] == [0, 1, 2, 3]
     simplify_calls = [cmd for cmd in calls if "-si" in cmd]
     repack_calls = [cmd for cmd in calls if "-si" not in cmd]
-    assert [cmd[cmd.index("-si") + 1] for cmd in simplify_calls] == ["0.85", "0.18", "0.12", "0.015"]
+    assert [cmd[cmd.index("-si") + 1] for cmd in simplify_calls] == ["0.85", "0.18", "0.14", "0.015"]
     assert "-sa" in calls[1]
     assert "-sp" in calls[1]
     assert calls[1][calls[1].index("-se") + 1] == "0.03"
     assert calls[1][calls[1].index("-tl") + 1] == "512"
     assert "-sa" in calls[2]
     assert "-sp" in calls[2]
-    assert calls[2][calls[2].index("-se") + 1] == "0.02"
+    assert calls[2][calls[2].index("-se") + 1] == "0.015"
     assert calls[2][calls[2].index("-tl") + 1] == "512"
     assert "-sa" in calls[3]
     assert "-sp" in calls[3]
     assert calls[3][calls[3].index("-se") + 1] == "0.08"
+    assert calls[3][calls[3].index("-tl") + 1] == "128"
     assert all(cmd[cmd.index("-i") + 1].endswith("input.glb") for cmd in simplify_calls)
-    assert len(repack_calls) == 1
-    assert repack_calls[0][repack_calls[0].index("-i") + 1].endswith("lod3-flat-input.glb")
+    assert len(repack_calls) == 0
     assert lod0.settings["role"] == "near/game"
     assert lod1.settings["texture_limit"] == 512
     assert lod1.settings["simplify_ratio"] == 0.18
@@ -1056,17 +1056,17 @@ def test_lod_optimizer_generates_levels_from_original_asset(monkeypatch):
     assert lod1.settings["permissive"] is True
     assert lod1.settings["role"] == "mid/fill"
     assert lod2.settings["texture_limit"] == 512
-    assert lod2.settings["simplify_ratio"] == 0.12
-    assert lod2.settings["target_vertices"] == 10000
+    assert lod2.settings["simplify_ratio"] == 0.14
+    assert lod2.settings["target_vertices"] == 15000
     assert lod2.settings["aggressive"] is True
     assert lod2.settings["permissive"] is True
     assert lod2.settings["role"] == "far/large-fill"
-    assert lod3.settings["texture_limit"] == 0
+    assert lod3.settings["texture_limit"] == 128
     assert lod3.settings["simplify_ratio"] == 0.015
     assert lod3.settings["target_vertices"] == 500
-    assert lod3.settings["flat_material"] is True
-    assert lod3.settings["flat_material_stage"] == "post_simplification"
-    assert lod3.settings["role"] == "ultra-far/flat-silhouette"
+    assert lod3.settings["flat_material"] is False
+    assert lod3.settings["flat_material_stage"] is None
+    assert lod3.settings["role"] == "ultra-far/textured-proxy"
     assert stored_lod2.filename.endswith("-lod2.glb")
 
 
