@@ -2,22 +2,21 @@ FROM python:3.12-slim AS gltfpack-builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
-        cmake \
-        g++ \
-        git \
-        make \
+        curl \
     && rm -rf /var/lib/apt/lists/*
 
-RUN git clone --depth 1 https://github.com/BinomialLLC/basis_universal.git /tmp/basis_universal \
-    && git clone --depth 1 https://github.com/zeux/meshoptimizer.git /tmp/meshoptimizer \
-    && cmake -S /tmp/meshoptimizer -B /tmp/meshoptimizer/build \
-        -DMESHOPT_BUILD_GLTFPACK=ON \
-        -DMESHOPT_GLTFPACK_BASISU_PATH=/tmp/basis_universal \
-        -DMESHOPT_INSTALL=OFF \
-        -DCMAKE_BUILD_TYPE=Release \
-    && cmake --build /tmp/meshoptimizer/build --target gltfpack -j$(nproc) \
-    && install -m 0755 /tmp/meshoptimizer/build/gltfpack /usr/local/bin/gltfpack \
-    && /usr/local/bin/gltfpack -v
+ARG GLTFPACK_VERSION=v1.2
+ARG GLTFPACK_SHA256=ebc236f5f6c08c7e5c5750476a187d24805d44d8c680449c4b7369c333f817b1
+# Use the official release binary instead of compiling moving upstream repos
+# during deploy; Coolify logs then fail at checksum/download/install, not a
+# bundled clone/cmake/build command.
+RUN curl -fSL \
+        "https://github.com/zeux/meshoptimizer/releases/download/${GLTFPACK_VERSION}/gltfpack-ubuntu.zip" \
+        -o /tmp/gltfpack.zip \
+    && echo "${GLTFPACK_SHA256}  /tmp/gltfpack.zip" | sha256sum -c - \
+    && python -c "import os, zipfile; z=zipfile.ZipFile('/tmp/gltfpack.zip'); names=[n for n in z.namelist() if n.rstrip('/').split('/')[-1]=='gltfpack']; assert names, 'gltfpack binary missing from release zip'; z.extract(names[0], '/tmp'); os.replace('/tmp/' + names[0], '/usr/local/bin/gltfpack'); os.chmod('/usr/local/bin/gltfpack', 0o755)" \
+    && /usr/local/bin/gltfpack -v \
+    && /usr/local/bin/gltfpack -h | grep -E -- '-tc|texture'
 
 FROM python:3.12-slim
 
