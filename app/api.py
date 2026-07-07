@@ -7269,6 +7269,42 @@ def optimize_model_for_game(model_id):
         return jsonify({'error': 'Game optimization could not be queued'}), 500
 
 
+@api_bp.route('/model/<model_id>/lod/rebuild', methods=['POST'])
+def rebuild_model_lods(model_id):
+    """Rebuild only this model's LOD chain using the current defaults."""
+    try:
+        model = Model3D.get_by_id(model_id)
+        if not model:
+            return jsonify({'error': 'Model not found'}), 404
+
+        principal, service = _api_principal()
+        if not (principal or service):
+            return jsonify({'error': 'Authentication required'}), 401
+        if not (service or can_manage_model(principal, model)):
+            return jsonify({'error': 'Access denied'}), 403
+
+        if (model.file_format or '').lower() not in ('glb', 'gltf'):
+            return jsonify({'error': 'LOD rebuild currently supports GLB/GLTF assets.'}), 400
+
+        owner_id = principal.id if principal else model.user_id
+        result = _run_lod_optimizer(model, owner_id)
+        lod_fields = _asset_lod_url_fields(model)
+        return jsonify({
+            'success': True,
+            'lod_result': result,
+            'lod_variants': lod_fields.get('lod_variants') or [],
+            'lod_summary': lod_fields.get('lod_summary'),
+            'lod_ready': lod_fields.get('lod_ready'),
+            'lod_status': lod_fields.get('lod_status'),
+            'defaults_version': LOD_OPTIMIZE_DEFAULTS_VERSION,
+        })
+    except Exception as e:
+        print(f"API LOD rebuild error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)[:500] or 'LOD rebuild failed'}), 500
+
+
 @api_bp.route('/model/<model_id>/optimize-game/<job_id>', methods=['GET'])
 def game_optimization_status(model_id, job_id):
     try:

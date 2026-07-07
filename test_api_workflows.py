@@ -3008,6 +3008,7 @@ def test_game_optimization_job_generates_lods_for_one_model(monkeypatch):
     assert detail.status_code == 200
     html = detail.get_data(as_text=True)
     assert "Create Game + LODs" in html
+    assert "Rebuild LODs" in html
     assert "Generate LODs" not in html
 
     response = client.post(f"/api/model/{model.id}/optimize-game", json={})
@@ -3035,6 +3036,66 @@ def test_game_optimization_job_generates_lods_for_one_model(monkeypatch):
         "impostor_owner_id": owner.id,
         "job_id": job_id,
     }
+
+
+def test_owner_can_rebuild_single_model_lods(monkeypatch):
+    import app.api as api
+
+    app = create_app()
+    client = app.test_client()
+    generated = {}
+
+    def fake_lod_optimizer(model, owner_id=None):
+        generated["model_id"] = model.id
+        generated["owner_id"] = owner_id
+        lod2_id = app.config["FILE_STORE"].put(
+            b"single rebuilt lod2",
+            filename="single-lod-source-lod2.glb",
+            content_type="model/gltf-binary",
+            metadata={"kind": "lod", "level": 2, "source_model_id": model.id},
+        )
+        ModelVariant.upsert(
+            model.id,
+            "lod",
+            str(lod2_id),
+            level=2,
+            file_format="glb",
+            size=1234,
+            settings={
+                "defaults_version": api.LOD_OPTIMIZE_DEFAULTS_VERSION,
+                "mesh_stats": {"vertices": 3210, "triangles": 5000},
+            },
+        )
+        return {"success": True, "source_model_id": model.id}
+
+    monkeypatch.setattr(api, "_run_lod_optimizer", fake_lod_optimizer)
+
+    with app.app_context():
+        owner = _ensure_user("single-lod-rebuild-owner")
+        source_id = app.config["FILE_STORE"].put(
+            _minimal_glb({"asset": {"version": "2.0"}}),
+            filename="single_lod_rebuild_source.glb",
+            content_type="model/gltf-binary",
+            metadata={},
+        )
+        model = Model3D(
+            name="Single LOD Rebuild Source",
+            file_format="glb",
+            file_size=64,
+            user_id=owner.id,
+            is_public=False,
+            gridfs_file_id=str(source_id),
+        ).save()
+
+    client.post("/auth/login", data={"login_field": "single-lod-rebuild-owner", "password": "pw123456"})
+    response = client.post(f"/api/model/{model.id}/lod/rebuild", json={})
+    assert response.status_code == 200, response.get_json()
+    body = response.get_json()
+    assert body["success"] is True
+    assert body["defaults_version"] == api.LOD_OPTIMIZE_DEFAULTS_VERSION
+    assert body["lod_variants"][0]["level"] == 2
+    assert body["lod_variants"][0]["vertices"] == 3210
+    assert generated == {"model_id": model.id, "owner_id": owner.id}
 
 
 def test_tellus_admin_upload_can_target_player_and_world_by_headers(monkeypatch):
@@ -3240,6 +3301,11 @@ def test_openapi_documents_workflow_and_bearer_auth():
     optimize_props = optimize_doc["requestBody"]["content"]["application/json"]["schema"]["properties"]
     assert optimize_props["preset"]["default"] == "balanced"
     assert optimize_props["simplify_ratio"]["default"] == 0.85
+    lod_rebuild_doc = spec["paths"]["/model/{model_id}/lod/rebuild"]["post"]
+    assert "LOD" in lod_rebuild_doc["summary"]
+    lod_rebuild_props = lod_rebuild_doc["responses"]["200"]["content"]["application/json"]["schema"]["properties"]
+    assert "defaults_version" in lod_rebuild_props
+    assert "lod_variants" in lod_rebuild_props
     status_doc = spec["paths"]["/model/{model_id}/optimize-game/{job_id}"]["get"]
     status_job = status_doc["responses"]["200"]["content"]["application/json"]["schema"]["properties"]["job"]
     assert status_job["$ref"] == "#/components/schemas/OptimizationJob"

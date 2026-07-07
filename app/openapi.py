@@ -1934,6 +1934,45 @@ def get_openapi_spec(base_url=''):
                     },
                 },
             },
+            '/model/{model_id}/lod/rebuild': {
+                'parameters': [{'name': 'model_id', 'in': 'path', 'required': True, 'schema': {'type': 'string'}}],
+                'post': {
+                    'tags': ['Workflows'],
+                    'summary': 'Rebuild LOD variants for one model',
+                    'description': (
+                        'Synchronously rebuilds only this model\'s LOD0, LOD1, LOD2, and LOD3 variants '
+                        'using the current LOD defaults. Use this to refresh stale LOD assets without '
+                        'running the full bulk backfill or regenerating the game-optimized variant.'
+                    ),
+                    'security': [{'sessionCookie': []}, {'bearerAuth': []}],
+                    'responses': {
+                        '200': {
+                            'description': 'LOD variants rebuilt',
+                            'content': {
+                                'application/json': {
+                                    'schema': {
+                                        'type': 'object',
+                                        'properties': {
+                                            'success': {'type': 'boolean'},
+                                            'defaults_version': {'type': 'string'},
+                                            'lod_result': {'type': 'object'},
+                                            'lod_variants': {'type': 'array', 'items': {'$ref': '#/components/schemas/LodVariant'}},
+                                            'lod_summary': {'$ref': '#/components/schemas/LodSummary'},
+                                            'lod_ready': {'type': 'boolean'},
+                                            'lod_status': {'type': 'string'},
+                                        },
+                                    }
+                                }
+                            },
+                        },
+                        '400': _error_response('Unsupported format'),
+                        '401': _error_response('Authentication required'),
+                        '403': _error_response('Access denied'),
+                        '404': _error_response('Model not found'),
+                        '500': _error_response('LOD rebuild failed'),
+                    },
+                },
+            },
             '/model/{model_id}/optimize-game/{job_id}': {
                 'parameters': [
                     {'name': 'model_id', 'in': 'path', 'required': True, 'schema': {'type': 'string'}},

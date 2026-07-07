@@ -388,6 +388,12 @@
                             Create Game + LODs
                         </button>
                     </div>
+                    <div class="flex items-end">
+                        <button type="button" id="lod-rebuild-run"
+                                class="w-full bg-indigo-700 text-white px-4 py-2 rounded hover:bg-indigo-800 transition">
+                            Rebuild LODs
+                        </button>
+                    </div>
                 </div>
                 <p id="game-opt-status" class="mt-3 text-sm text-gray-600"></p>
             </div>
@@ -1779,6 +1785,42 @@ document.addEventListener('DOMContentLoaded', function() {
                 gameOptRun.classList.remove('opacity-70', 'cursor-not-allowed');
             }
         });
+
+        const lodRebuildRun = document.getElementById('lod-rebuild-run');
+        if (lodRebuildRun) {
+            lodRebuildRun.addEventListener('click', async () => {
+                lodRebuildRun.disabled = true;
+                lodRebuildRun.classList.add('opacity-70', 'cursor-not-allowed');
+                gameOptStatus.textContent = 'Rebuilding LODs for this asset...';
+                try {
+                    const response = await fetch('/api/model/{{ model.id }}/lod/rebuild', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                        body: JSON.stringify({})
+                    });
+                    const data = await parseGameOptimizeResponse(response);
+                    if (!response.ok) {
+                        throw new Error(data.error || 'LOD rebuild failed.');
+                    }
+                    const levels = Array.isArray(data.lod_variants) ? data.lod_variants : [];
+                    const lodText = levels.length
+                        ? levels.map((level) => {
+                            const bits = [`LOD${level.level}`];
+                            if (level.size_mb != null) bits.push(`${Number(level.size_mb).toFixed(2)} MB`);
+                            if (level.vertices != null) bits.push(`${Number(level.vertices).toLocaleString()}v`);
+                            return bits.join(' ');
+                        }).join(', ')
+                        : 'complete';
+                    gameOptStatus.textContent = `LOD rebuild complete: ${lodText}. Reloading...`;
+                    setTimeout(() => window.location.reload(), 900);
+                } catch (error) {
+                    gameOptStatus.textContent = error.message;
+                } finally {
+                    lodRebuildRun.disabled = false;
+                    lodRebuildRun.classList.remove('opacity-70', 'cursor-not-allowed');
+                }
+            });
+        }
     }
 
     const animationSourceToggle = document.getElementById('animation-source-toggle');
