@@ -1041,7 +1041,7 @@ def test_lod_optimizer_generates_levels_from_original_asset(monkeypatch):
     assert "-sa" in calls[2]
     assert "-sp" in calls[2]
     assert calls[2][calls[2].index("-se") + 1] == "0.04"
-    assert calls[2][calls[2].index("-tl") + 1] == "128"
+    assert calls[2][calls[2].index("-tl") + 1] == "512"
     assert "-sa" in calls[3]
     assert "-sp" in calls[3]
     assert calls[3][calls[3].index("-se") + 1] == "0.08"
@@ -1055,7 +1055,7 @@ def test_lod_optimizer_generates_levels_from_original_asset(monkeypatch):
     assert lod1.settings["aggressive"] is True
     assert lod1.settings["permissive"] is True
     assert lod1.settings["role"] == "mid/fill"
-    assert lod2.settings["texture_limit"] == 128
+    assert lod2.settings["texture_limit"] == 512
     assert lod2.settings["simplify_ratio"] == 0.08
     assert lod2.settings["target_vertices"] == 10000
     assert lod2.settings["aggressive"] is True

@@ -5788,7 +5788,7 @@ GAME_OPTIMIZE_PRESETS = {
     },
 }
 
-LOD_OPTIMIZE_DEFAULTS_VERSION = '2026-06-30-lod3-orig-flat'
+LOD_OPTIMIZE_DEFAULTS_VERSION = '2026-07-07-lod2-texture-preserve'
 LOD_OPTIMIZE_LEVELS = [
     {
         'level': 0,
@@ -5810,7 +5810,10 @@ LOD_OPTIMIZE_LEVELS = [
     },
     {
         'level': 2,
-        'texture_limit': 128,
+        # Keep LOD2 as the aggressively simplified far-fill mesh, but preserve
+        # enough atlas detail for leaf/prop assets where the silhouette survives
+        # and the texture becomes the visible failure mode.
+        'texture_limit': 512,
         'simplify_ratio': 0.08,
         'simplification_error': 0.04,
         'aggressive': True,
