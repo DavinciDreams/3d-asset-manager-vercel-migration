@@ -1033,7 +1033,7 @@ def test_lod_optimizer_generates_levels_from_original_asset(monkeypatch):
     assert [level["level"] for level in result["levels"]] == [0, 1, 2, 3]
     simplify_calls = [cmd for cmd in calls if "-si" in cmd]
     repack_calls = [cmd for cmd in calls if "-si" not in cmd]
-    assert [cmd[cmd.index("-si") + 1] for cmd in simplify_calls] == ["0.85", "0.18", "0.18", "0.14"]
+    assert [cmd[cmd.index("-si") + 1] for cmd in simplify_calls] == ["0.85", "0.18", "0.16", "0.14"]
     assert "-sa" in calls[1]
     assert "-sp" in calls[1]
     assert calls[1][calls[1].index("-se") + 1] == "0.03"
@@ -1056,8 +1056,8 @@ def test_lod_optimizer_generates_levels_from_original_asset(monkeypatch):
     assert lod1.settings["permissive"] is True
     assert lod1.settings["role"] == "mid/fill"
     assert lod2.settings["texture_limit"] == 512
-    assert lod2.settings["simplify_ratio"] == 0.18
-    assert lod2.settings["target_vertices"] == 20000
+    assert lod2.settings["simplify_ratio"] == 0.16
+    assert lod2.settings["target_vertices"] == 16000
     assert lod2.settings["aggressive"] is True
     assert lod2.settings["permissive"] is True
     assert lod2.settings["role"] == "far/large-fill"

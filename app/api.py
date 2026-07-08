@@ -5791,7 +5791,7 @@ GAME_OPTIMIZE_PRESETS = {
     },
 }
 
-LOD_OPTIMIZE_DEFAULTS_VERSION = '2026-07-07-known-good-lod2-small-lod3'
+LOD_OPTIMIZE_DEFAULTS_VERSION = '2026-07-07-lod2-tune-016'
 LOD_OPTIMIZE_LEVELS = [
     {
         'level': 0,
@@ -5813,15 +5813,14 @@ LOD_OPTIMIZE_LEVELS = [
     },
     {
         'level': 2,
-        # LOD1's gltfpack profile is the known-good textured result for
-        # leaf-heavy generated meshes. Keep LOD2 visually safe; true far
-        # distance should use the impostor variant.
+        # Tune down gently from LOD1's known-good textured profile. Keep the
+        # aggressive/permissive UV-friendly simplifier path and texture budget.
         'texture_limit': 512,
-        'simplify_ratio': 0.18,
+        'simplify_ratio': 0.16,
         'simplification_error': 0.03,
         'aggressive': True,
         'permissive': True,
-        'target_vertices': 20000,
+        'target_vertices': 16000,
         'compression_mode': 'meshopt',
         'role': 'far/large-fill',
     },
