@@ -1068,9 +1068,11 @@ def test_lod_optimizer_generates_levels_from_original_asset(monkeypatch):
     assert lod3.settings["aggressive"] is True
     assert lod3.settings["permissive"] is True
     assert lod3.settings["flat_material"] is True
+    assert lod3.settings["flat_material_mode"] == "texture_color_buckets"
     assert lod3.settings["flat_material_color"] == [0.30, 0.42, 0.20, 1.0]
+    assert lod3.settings["flat_material_accent_color"] == [0xd9 / 255, 0x6a / 255, 0x28 / 255, 1.0]
     assert lod3.settings["flat_material_stage"] == "post_simplification"
-    assert lod3.settings["role"] == "ultra-far/flat-proxy"
+    assert lod3.settings["role"] == "ultra-far/two-color-flat-proxy"
     assert stored_lod2.filename.endswith("-lod2.glb")
 
 
@@ -1087,6 +1089,63 @@ def test_lod_flat_material_color_can_be_configured(monkeypatch):
 
     monkeypatch.setenv("LOD3_FLAT_COLOR", "80, 120, 40")
     assert api._lod_flat_material_color() == [80 / 255, 120 / 255, 40 / 255, 1.0]
+
+
+def test_color_bucket_flatten_splits_textured_triangles():
+    import app.api as api
+    from PIL import Image
+
+    image = Image.new("RGBA", (2, 1))
+    image.putpixel((0, 0), (40, 180, 40, 255))
+    image.putpixel((1, 0), (230, 90, 20, 255))
+    image_io = io.BytesIO()
+    image.save(image_io, format="PNG")
+    image_bytes = image_io.getvalue()
+
+    positions = struct.pack(
+        "<18f",
+        0, 0, 0, 1, 0, 0, 0, 1, 0,
+        1, 0, 0, 2, 0, 0, 1, 1, 0,
+    )
+    uvs = struct.pack(
+        "<12f",
+        0.1, 0.5, 0.2, 0.5, 0.1, 0.5,
+        0.8, 0.5, 0.9, 0.5, 0.8, 0.5,
+    )
+    indices = struct.pack("<6H", 0, 1, 2, 3, 4, 5)
+    bin_chunk = positions + uvs + indices + image_bytes
+    image_offset = len(positions) + len(uvs) + len(indices)
+    gltf = {
+        "asset": {"version": "2.0"},
+        "buffers": [{"byteLength": len(bin_chunk)}],
+        "bufferViews": [
+            {"buffer": 0, "byteOffset": 0, "byteLength": len(positions), "target": 34962},
+            {"buffer": 0, "byteOffset": len(positions), "byteLength": len(uvs), "target": 34962},
+            {"buffer": 0, "byteOffset": len(positions) + len(uvs), "byteLength": len(indices), "target": 34963},
+            {"buffer": 0, "byteOffset": image_offset, "byteLength": len(image_bytes)},
+        ],
+        "accessors": [
+            {"bufferView": 0, "componentType": 5126, "count": 6, "type": "VEC3"},
+            {"bufferView": 1, "componentType": 5126, "count": 6, "type": "VEC2"},
+            {"bufferView": 2, "componentType": 5123, "count": 6, "type": "SCALAR"},
+        ],
+        "images": [{"bufferView": 3, "mimeType": "image/png"}],
+        "textures": [{"source": 0}],
+        "materials": [{"pbrMetallicRoughness": {"baseColorTexture": {"index": 0}}}],
+        "meshes": [{"primitives": [{"attributes": {"POSITION": 0, "TEXCOORD_0": 1}, "indices": 2, "material": 0}]}],
+    }
+
+    out = api._flatten_lod_glb_materials(
+        _minimal_glb(gltf, bin_chunk),
+        color=[0.2, 0.6, 0.2, 1],
+        accent_color=[0.9, 0.3, 0.1, 1],
+        color_buckets=True,
+    )
+    out_gltf = api._gltf_json_from_bytes(out, "glb")
+    assert len(out_gltf["materials"]) == 2
+    assert len(out_gltf["meshes"][0]["primitives"]) == 2
+    assert {primitive["material"] for primitive in out_gltf["meshes"][0]["primitives"]} == {0, 1}
+    assert "images" not in out_gltf
 
 
 def test_lod_optimizer_decodes_draco_sources_before_gltfpack(monkeypatch, tmp_path):
@@ -2973,6 +3032,7 @@ def test_game_optimization_job_generates_lods_for_one_model(monkeypatch):
         generated["lod_model_id"] = model.id
         generated["lod_owner_id"] = owner_id
         generated["lod3_color"] = levels[3]["flat_material_color"]
+        generated["lod3_accent_color"] = levels[3]["flat_material_accent_color"]
         lod0_bytes = _minimal_glb({"asset": {"version": "2.0"}, "scene": 0})
         lod0_id = app.config["FILE_STORE"].put(
             lod0_bytes,
@@ -3036,11 +3096,12 @@ def test_game_optimization_job_generates_lods_for_one_model(monkeypatch):
     assert "Create Game + LODs" in html
     assert "Rebuild LODs" in html
     assert 'id="lod3-flat-color"' in html
+    assert 'id="lod3-flat-accent-color"' in html
     assert "Generate LODs" not in html
 
     response = client.post(
         f"/api/model/{model.id}/optimize-game",
-        json={"lod3_flat_color": "#663300"},
+        json={"lod3_flat_color": "#663300", "lod3_flat_accent_color": "#d96a28"},
     )
     assert response.status_code == 202, response.get_json()
     body = response.get_json()
@@ -3063,6 +3124,7 @@ def test_game_optimization_job_generates_lods_for_one_model(monkeypatch):
         "lod_model_id": model.id,
         "lod_owner_id": owner.id,
         "lod3_color": [0x66 / 255, 0x33 / 255, 0, 1.0],
+        "lod3_accent_color": [0xd9 / 255, 0x6a / 255, 0x28 / 255, 1.0],
         "impostor_model_id": model.id,
         "impostor_owner_id": owner.id,
         "job_id": job_id,
@@ -3080,6 +3142,7 @@ def test_owner_can_rebuild_single_model_lods(monkeypatch):
         generated["model_id"] = model.id
         generated["owner_id"] = owner_id
         generated["lod3_color"] = levels[3]["flat_material_color"]
+        generated["lod3_accent_color"] = levels[3]["flat_material_accent_color"]
         lod2_id = app.config["FILE_STORE"].put(
             b"single rebuilt lod2",
             filename="single-lod-source-lod2.glb",
@@ -3122,7 +3185,7 @@ def test_owner_can_rebuild_single_model_lods(monkeypatch):
     client.post("/auth/login", data={"login_field": "single-lod-rebuild-owner", "password": "pw123456"})
     response = client.post(
         f"/api/model/{model.id}/lod/rebuild",
-        json={"lod3_flat_color": "#663300"},
+        json={"lod3_flat_color": "#663300", "lod3_flat_accent_color": "#d96a28"},
     )
     assert response.status_code == 200, response.get_json()
     body = response.get_json()
@@ -3134,6 +3197,7 @@ def test_owner_can_rebuild_single_model_lods(monkeypatch):
         "model_id": model.id,
         "owner_id": owner.id,
         "lod3_color": [0x66 / 255, 0x33 / 255, 0, 1.0],
+        "lod3_accent_color": [0xd9 / 255, 0x6a / 255, 0x28 / 255, 1.0],
     }
 
 
@@ -3341,10 +3405,12 @@ def test_openapi_documents_workflow_and_bearer_auth():
     assert optimize_props["preset"]["default"] == "balanced"
     assert optimize_props["simplify_ratio"]["default"] == 0.85
     assert optimize_props["lod3_flat_color"]["default"] == "#4d6b33"
+    assert optimize_props["lod3_flat_accent_color"]["default"] == "#d96a28"
     lod_rebuild_doc = spec["paths"]["/model/{model_id}/lod/rebuild"]["post"]
     assert "LOD" in lod_rebuild_doc["summary"]
     lod_rebuild_request = lod_rebuild_doc["requestBody"]["content"]["application/json"]["schema"]["properties"]
     assert lod_rebuild_request["lod3_flat_color"]["default"] == "#4d6b33"
+    assert lod_rebuild_request["lod3_flat_accent_color"]["default"] == "#d96a28"
     lod_rebuild_props = lod_rebuild_doc["responses"]["200"]["content"]["application/json"]["schema"]["properties"]
     assert "defaults_version" in lod_rebuild_props
     assert "lod_variants" in lod_rebuild_props

@@ -100,7 +100,241 @@ def _rewrite_glb_json(glb_bytes, rewrite):
     return bytes(rebuilt)
 
 
-def _flatten_lod_glb_materials(glb_bytes, *, color=None):
+def _glb_json_and_bin(glb_bytes):
+    if not glb_bytes or glb_bytes[:4] != _GLB_MAGIC or len(glb_bytes) < 20:
+        raise ValueError('Expected binary GLB bytes.')
+    magic, version, declared_length = struct.unpack_from('<4sII', glb_bytes, 0)
+    if magic != _GLB_MAGIC or version != 2 or declared_length > len(glb_bytes):
+        raise ValueError('Invalid GLB header.')
+    offset = 12
+    gltf = None
+    bin_chunk = b''
+    while offset + 8 <= declared_length:
+        chunk_length, chunk_type = struct.unpack_from('<II', glb_bytes, offset)
+        data_start = offset + 8
+        data_end = data_start + chunk_length
+        chunk_data = glb_bytes[data_start:data_end]
+        if chunk_type == _GLB_JSON_CHUNK and gltf is None:
+            gltf = json.loads(chunk_data.decode('utf-8').rstrip(' \t\r\n\0'))
+        elif chunk_type == _GLB_BIN_CHUNK and not bin_chunk:
+            bin_chunk = chunk_data
+        offset = data_end
+    if gltf is None:
+        raise ValueError('GLB has no JSON chunk.')
+    return gltf, bin_chunk
+
+
+def _component_reader(component_type, normalized=False):
+    formats = {
+        5120: ('b', 1, -128, 127),
+        5121: ('B', 1, 0, 255),
+        5122: ('h', 2, -32768, 32767),
+        5123: ('H', 2, 0, 65535),
+        5125: ('I', 4, 0, 4294967295),
+        5126: ('f', 4, None, None),
+    }
+    fmt, size, lo, hi = formats[component_type]
+
+    def read(data, offset):
+        value = struct.unpack_from('<' + fmt, data, offset)[0]
+        if normalized and component_type != 5126:
+            if lo < 0:
+                return max(-1.0, value / abs(lo))
+            return value / hi if hi else value
+        return value
+
+    return read, size
+
+
+def _accessor_values(gltf, bin_chunk, accessor_index):
+    accessors = gltf.get('accessors') or []
+    buffer_views = gltf.get('bufferViews') or []
+    accessor = accessors[int(accessor_index)]
+    view = buffer_views[int(accessor.get('bufferView'))]
+    if view.get('extensions'):
+        raise ValueError('Compressed accessors are not supported for color bucketing.')
+    component_type = int(accessor.get('componentType'))
+    type_name = accessor.get('type') or 'SCALAR'
+    components = {'SCALAR': 1, 'VEC2': 2, 'VEC3': 3, 'VEC4': 4}.get(type_name, 1)
+    normalized = bool(accessor.get('normalized'))
+    reader, component_size = _component_reader(component_type, normalized=normalized)
+    stride = int(view.get('byteStride') or (component_size * components))
+    start = int(view.get('byteOffset') or 0) + int(accessor.get('byteOffset') or 0)
+    count = int(accessor.get('count') or 0)
+    values = []
+    for item in range(count):
+        base = start + item * stride
+        item_values = [reader(bin_chunk, base + component * component_size) for component in range(components)]
+        values.append(item_values[0] if components == 1 else item_values)
+    return values, component_type
+
+
+def _image_from_gltf_texture(gltf, bin_chunk, material_index):
+    try:
+        material = (gltf.get('materials') or [])[int(material_index or 0)]
+        texture_info = ((material.get('pbrMetallicRoughness') or {}).get('baseColorTexture') or {})
+        texture = (gltf.get('textures') or [])[int(texture_info.get('index'))]
+        image = (gltf.get('images') or [])[int(texture.get('source'))]
+        view = (gltf.get('bufferViews') or [])[int(image.get('bufferView'))]
+        start = int(view.get('byteOffset') or 0)
+        end = start + int(view.get('byteLength') or 0)
+        from PIL import Image
+        return Image.open(io.BytesIO(bin_chunk[start:end])).convert('RGBA')
+    except Exception as e:
+        raise ValueError(f'No embedded base color texture for color bucketing: {e}')
+
+
+def _texture_bucket_name(rgb):
+    r, g, b = [channel / 255.0 for channel in rgb[:3]]
+    warm = max(r, 0.85 * g) - b
+    green = g - max(r, b)
+    saturated = max(r, g, b) - min(r, g, b)
+    if green > 0.08 and g > 0.18:
+        return 'foliage'
+    if saturated > 0.12 and warm > 0.12:
+        return 'accent'
+    return 'foliage'
+
+
+def _color_bucket_flatten_lod_glb_materials(glb_bytes, *, foliage_color=None, accent_color=None):
+    gltf, bin_chunk = _glb_json_and_bin(glb_bytes)
+    meshes = gltf.get('meshes') or []
+    if not meshes:
+        raise ValueError('No meshes for color bucketing.')
+    foliage_color = foliage_color or [0.30, 0.42, 0.20, 1.0]
+    accent_color = accent_color or [0.85, 0.28, 0.12, 1.0]
+
+    new_bin = bytearray(bin_chunk)
+    new_views = list(gltf.get('bufferViews') or [])
+    new_accessors = list(gltf.get('accessors') or [])
+    changed = False
+
+    for mesh in meshes:
+        new_primitives = []
+        for primitive in mesh.get('primitives') or []:
+            attributes = primitive.get('attributes') or {}
+            if 'TEXCOORD_0' not in attributes:
+                new_primitives.append(primitive)
+                continue
+            uvs, _uv_component_type = _accessor_values(gltf, bin_chunk, attributes['TEXCOORD_0'])
+            positions, _position_component_type = _accessor_values(gltf, bin_chunk, attributes['POSITION'])
+            if primitive.get('indices') is not None:
+                indices, index_component_type = _accessor_values(gltf, bin_chunk, primitive.get('indices'))
+                indices = [int(index) for index in indices]
+            else:
+                indices = list(range(len(positions)))
+                index_component_type = 5125
+            image = _image_from_gltf_texture(gltf, bin_chunk, primitive.get('material') or 0)
+            width, height = image.size
+            buckets = {'foliage': [], 'accent': []}
+            for tri_start in range(0, len(indices) - 2, 3):
+                tri = indices[tri_start:tri_start + 3]
+                uv = [0.0, 0.0]
+                for index in tri:
+                    uv_value = uvs[index]
+                    uv[0] += float(uv_value[0])
+                    uv[1] += float(uv_value[1])
+                uv[0] = (uv[0] / 3.0) % 1.0
+                uv[1] = (uv[1] / 3.0) % 1.0
+                pixel = image.getpixel((
+                    min(width - 1, max(0, int(uv[0] * width))),
+                    min(height - 1, max(0, int((1.0 - uv[1]) * height))),
+                ))
+                buckets[_texture_bucket_name(pixel)].extend(tri)
+            for bucket_name, bucket_indices in buckets.items():
+                if not bucket_indices:
+                    continue
+                material_index = 1 if bucket_name == 'accent' else 0
+                component_type = 5123 if max(bucket_indices) <= 65535 else 5125
+                fmt = '<' + ('H' if component_type == 5123 else 'I') * len(bucket_indices)
+                offset = len(new_bin)
+                new_bin.extend(struct.pack(fmt, *bucket_indices))
+                while len(new_bin) % 4:
+                    new_bin.append(0)
+                view_index = len(new_views)
+                new_views.append({
+                    'buffer': 0,
+                    'byteOffset': offset,
+                    'byteLength': len(bucket_indices) * (2 if component_type == 5123 else 4),
+                    'target': 34963,
+                })
+                accessor_index = len(new_accessors)
+                new_accessors.append({
+                    'bufferView': view_index,
+                    'componentType': component_type,
+                    'count': len(bucket_indices),
+                    'type': 'SCALAR',
+                })
+                new_primitive = dict(primitive)
+                new_primitive['indices'] = accessor_index
+                new_primitive['material'] = material_index
+                new_primitives.append(new_primitive)
+                changed = True
+        if new_primitives:
+            mesh['primitives'] = new_primitives
+
+    if not changed:
+        raise ValueError('No textured triangles could be color bucketed.')
+
+    used = [ext for ext in (gltf.get('extensionsUsed') or []) if ext not in {'KHR_texture_transform', 'KHR_materials_unlit'}]
+    required = [ext for ext in (gltf.get('extensionsRequired') or []) if ext in used]
+    gltf['buffers'] = [{'byteLength': len(new_bin)}]
+    gltf['bufferViews'] = new_views
+    gltf['accessors'] = new_accessors
+    gltf.pop('images', None)
+    gltf.pop('textures', None)
+    gltf.pop('samplers', None)
+    gltf['materials'] = [
+        {
+            'name': 'LOD flat foliage',
+            'pbrMetallicRoughness': {
+                'baseColorFactor': foliage_color,
+                'roughnessFactor': 0.95,
+                'metallicFactor': 0.0,
+            },
+        },
+        {
+            'name': 'LOD flat accent',
+            'pbrMetallicRoughness': {
+                'baseColorFactor': accent_color,
+                'roughnessFactor': 0.95,
+                'metallicFactor': 0.0,
+            },
+        },
+    ]
+    if used:
+        gltf['extensionsUsed'] = used
+    else:
+        gltf.pop('extensionsUsed', None)
+    if required:
+        gltf['extensionsRequired'] = required
+    else:
+        gltf.pop('extensionsRequired', None)
+    return _minimal_glb_bytes(gltf, bytes(new_bin))
+
+
+def _minimal_glb_bytes(gltf, bin_chunk=None):
+    raw = json.dumps(gltf, separators=(',', ':')).encode('utf-8')
+    json_chunk = raw + (b' ' * ((4 - len(raw) % 4) % 4))
+    chunks = [(_GLB_JSON_CHUNK, json_chunk)]
+    if bin_chunk is not None:
+        padded_bin = bin_chunk + (b'\0' * ((4 - len(bin_chunk) % 4) % 4))
+        chunks.append((_GLB_BIN_CHUNK, padded_bin))
+    length = 12 + sum(8 + len(chunk) for _, chunk in chunks)
+    out = bytearray(_GLB_MAGIC + struct.pack('<II', 2, length))
+    for chunk_type, chunk in chunks:
+        out.extend(struct.pack('<II', len(chunk), chunk_type))
+        out.extend(chunk)
+    return bytes(out)
+
+
+def _flatten_lod_glb_materials(glb_bytes, *, color=None, accent_color=None, color_buckets=False):
+    if color_buckets:
+        return _color_bucket_flatten_lod_glb_materials(
+            glb_bytes,
+            foliage_color=color,
+            accent_color=accent_color,
+        )
     flat_color = color or [0.30, 0.42, 0.20, 1.0]
 
     def rewrite(gltf):
@@ -159,12 +393,14 @@ def _lod_flat_material_color(raw=None):
     return fallback
 
 
-def _lod_levels_with_flat_color(color=None):
+def _lod_levels_with_flat_color(color=None, accent_color=None):
     levels = [dict(config) for config in LOD_OPTIMIZE_LEVELS]
     flat_color = _lod_flat_material_color(color)
+    flat_accent_color = _lod_flat_material_color(accent_color or os.environ.get('LOD3_FLAT_ACCENT_COLOR') or '#d96a28')
     for config in levels:
         if int(config.get('level') or -1) == 3 and config.get('flat_material'):
             config['flat_material_color'] = flat_color
+            config['flat_material_accent_color'] = flat_accent_color
     return levels
 
 
@@ -5448,12 +5684,32 @@ def _run_lod_optimizer(model, owner_id=None, levels=None):
             simplification_error = config.get('simplification_error')
             compression_mode = str(config.get('compression_mode') or 'meshopt').lower()
             flat_material = bool(config.get('flat_material'))
+            flat_material_mode = str(config.get('flat_material_mode') or '').strip().lower()
             flat_material_color = config.get('flat_material_color') or [0.30, 0.42, 0.20, 1.0]
+            flat_material_accent_color = config.get('flat_material_accent_color') or [0.85, 0.28, 0.12, 1.0]
             out_path = os.path.join(workdir, f'lod{level}.glb')
             report_path = os.path.join(workdir, f'lod{level}.json')
+            command_input_path = in_path
+            flat_material_stage = None
+            if flat_material and flat_material_mode == 'texture_color_buckets':
+                try:
+                    with open(in_path, 'rb') as f:
+                        bucket_source_bytes = f.read()
+                    bucket_input_path = os.path.join(workdir, f'lod{level}-color-bucket-input.glb')
+                    with open(bucket_input_path, 'wb') as f:
+                        f.write(_flatten_lod_glb_materials(
+                            bucket_source_bytes,
+                            color=flat_material_color,
+                            accent_color=flat_material_accent_color,
+                            color_buckets=True,
+                        ))
+                    command_input_path = bucket_input_path
+                    flat_material_stage = 'pre_simplification_color_buckets'
+                except Exception as e:
+                    print(f"LOD {level} color bucket flatten fell back to single flat material: {e}", flush=True)
             cmd = [
                 gltfpack_bin,
-                '-i', in_path,
+                '-i', command_input_path,
                 '-o', out_path,
                 '-si', f'{simplify_ratio:g}',
                 '-r', report_path,
@@ -5480,12 +5736,13 @@ def _run_lod_optimizer(model, owner_id=None, levels=None):
                 msg = (result.stderr or result.stdout or 'gltfpack failed.').strip()
                 raise RuntimeError(f'LOD {level}: {msg[-1000:] or "gltfpack failed."}')
 
-            if flat_material:
+            if flat_material and flat_material_stage is None:
                 with open(out_path, 'rb') as f:
                     simplified_bytes = f.read()
                 flat_input_path = os.path.join(workdir, f'lod{level}-flat-input.glb')
                 with open(flat_input_path, 'wb') as f:
                     f.write(_flatten_lod_glb_materials(simplified_bytes, color=flat_material_color))
+                flat_material_stage = 'post_simplification'
                 flat_report_path = os.path.join(workdir, f'lod{level}-flat.json')
                 flat_cmd = [
                     gltfpack_bin,
@@ -5535,8 +5792,10 @@ def _run_lod_optimizer(model, owner_id=None, levels=None):
                 'aggressive': bool(config.get('aggressive')),
                 'permissive': bool(config.get('permissive')),
                 'flat_material': flat_material,
+                'flat_material_mode': flat_material_mode or None,
                 'flat_material_color': flat_material_color if flat_material else None,
-                'flat_material_stage': 'post_simplification' if flat_material else None,
+                'flat_material_accent_color': flat_material_accent_color if flat_material else None,
+                'flat_material_stage': flat_material_stage if flat_material else None,
                 'target_vertices': config.get('target_vertices'),
                 'compression_mode': compression_mode,
                 'defaults_version': LOD_OPTIMIZE_DEFAULTS_VERSION,
@@ -5563,8 +5822,10 @@ def _run_lod_optimizer(model, owner_id=None, levels=None):
                 'aggressive': bool(config.get('aggressive')),
                 'permissive': bool(config.get('permissive')),
                 'flat_material': flat_material,
+                'flat_material_mode': flat_material_mode or None,
                 'flat_material_color': flat_material_color if flat_material else None,
-                'flat_material_stage': 'post_simplification' if flat_material else None,
+                'flat_material_accent_color': flat_material_accent_color if flat_material else None,
+                'flat_material_stage': flat_material_stage if flat_material else None,
                 'target_vertices': config.get('target_vertices'),
                 'compression_mode': compression_mode,
                 'original_size': original_size,
@@ -5752,7 +6013,10 @@ def _process_game_optimization_job(app, job_id):
             lod_result = _run_lod_optimizer(
                 model,
                 job.owner_id or model.user_id,
-                levels=_lod_levels_with_flat_color((job.settings or {}).get('lod3_flat_color')),
+                levels=_lod_levels_with_flat_color(
+                    (job.settings or {}).get('lod3_flat_color'),
+                    (job.settings or {}).get('lod3_flat_accent_color'),
+                ),
             )
             result['lod_result'] = lod_result
             try:
@@ -5866,10 +6130,12 @@ LOD_OPTIMIZE_LEVELS = [
         'aggressive': True,
         'permissive': True,
         'flat_material': True,
+        'flat_material_mode': 'texture_color_buckets',
         'flat_material_color': _lod_flat_material_color(),
+        'flat_material_accent_color': _lod_flat_material_color(os.environ.get('LOD3_FLAT_ACCENT_COLOR') or '#d96a28'),
         'target_vertices': 500,
         'compression_mode': 'meshopt',
-        'role': 'ultra-far/flat-proxy',
+        'role': 'ultra-far/two-color-flat-proxy',
     },
 ]
 
@@ -5914,6 +6180,9 @@ def _normalize_game_optimization_settings(data):
     if data.get('lod3_flat_color') is not None:
         settings['lod3_flat_color'] = data.get('lod3_flat_color')
         settings['lod3_flat_material_color'] = _lod_flat_material_color(data.get('lod3_flat_color'))
+    if data.get('lod3_flat_accent_color') is not None:
+        settings['lod3_flat_accent_color'] = data.get('lod3_flat_accent_color')
+        settings['lod3_flat_material_accent_color'] = _lod_flat_material_color(data.get('lod3_flat_accent_color'))
     return settings
 
 
@@ -7337,7 +7606,10 @@ def rebuild_model_lods(model_id):
         result = _run_lod_optimizer(
             model,
             owner_id,
-            levels=_lod_levels_with_flat_color(data.get('lod3_flat_color')),
+            levels=_lod_levels_with_flat_color(
+                data.get('lod3_flat_color'),
+                data.get('lod3_flat_accent_color'),
+            ),
         )
         lod_fields = _asset_lod_url_fields(model)
         return jsonify({

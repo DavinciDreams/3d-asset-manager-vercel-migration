@@ -1914,7 +1914,12 @@ def get_openapi_spec(base_url=''):
                                         'lod3_flat_color': {
                                             'type': 'string',
                                             'default': '#4d6b33',
-                                            'description': 'Hex or RGB/RGBA color for the tiny flat LOD3 proxy.',
+                                            'description': 'Hex or RGB/RGBA foliage color for the tiny flat LOD3 proxy.',
+                                        },
+                                        'lod3_flat_accent_color': {
+                                            'type': 'string',
+                                            'default': '#d96a28',
+                                            'description': 'Hex or RGB/RGBA accent color for flowers, fruit, or other warm texture regions in the tiny flat LOD3 proxy.',
                                         },
                                         'name': {'type': 'string'},
                                     },
@@ -1959,7 +1964,12 @@ def get_openapi_spec(base_url=''):
                                         'lod3_flat_color': {
                                             'type': 'string',
                                             'default': '#4d6b33',
-                                            'description': 'Hex or RGB/RGBA color for the tiny flat LOD3 proxy.',
+                                            'description': 'Hex or RGB/RGBA foliage color for the tiny flat LOD3 proxy.',
+                                        },
+                                        'lod3_flat_accent_color': {
+                                            'type': 'string',
+                                            'default': '#d96a28',
+                                            'description': 'Hex or RGB/RGBA accent color for flowers, fruit, or other warm texture regions in the tiny flat LOD3 proxy.',
                                         },
                                     },
                                 }
