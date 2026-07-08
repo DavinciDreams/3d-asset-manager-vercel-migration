@@ -1130,8 +1130,11 @@ def test_color_bucket_flatten_splits_textured_triangles():
             {"bufferView": 2, "componentType": 5123, "count": 6, "type": "SCALAR"},
         ],
         "images": [{"bufferView": 3, "mimeType": "image/png"}],
-        "textures": [{"source": 0}],
-        "materials": [{"pbrMetallicRoughness": {"baseColorTexture": {"index": 0}}}],
+        "textures": [{"extensions": {"EXT_texture_webp": {"source": 0}}}],
+        "materials": [{"pbrMetallicRoughness": {"baseColorTexture": {
+            "index": 0,
+            "extensions": {"KHR_texture_transform": {"offset": [0, 0], "scale": [1, 1]}},
+        }}}],
         "meshes": [{"primitives": [{"attributes": {"POSITION": 0, "TEXCOORD_0": 1}, "indices": 2, "material": 0}]}],
     }
 

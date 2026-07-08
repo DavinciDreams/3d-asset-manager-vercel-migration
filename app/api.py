@@ -14,6 +14,7 @@ import hashlib
 import hmac
 import io
 import json
+import math
 import os
 import re
 import struct
@@ -169,17 +170,54 @@ def _accessor_values(gltf, bin_chunk, accessor_index):
     return values, component_type
 
 
+def _texture_source_index(texture):
+    if texture.get('source') is not None:
+        return int(texture.get('source'))
+    extensions = texture.get('extensions') or {}
+    for extension_name in ('EXT_texture_webp', 'KHR_texture_basisu'):
+        extension = extensions.get(extension_name) or {}
+        if extension.get('source') is not None:
+            return int(extension.get('source'))
+    raise ValueError('Texture has no source image.')
+
+
+def _texture_transform(texture_info):
+    transform = ((texture_info or {}).get('extensions') or {}).get('KHR_texture_transform') or {}
+    offset = transform.get('offset') or [0.0, 0.0]
+    scale = transform.get('scale') or [1.0, 1.0]
+    rotation = float(transform.get('rotation') or 0.0)
+    return {
+        'offset': [float(offset[0] if len(offset) > 0 else 0.0), float(offset[1] if len(offset) > 1 else 0.0)],
+        'scale': [float(scale[0] if len(scale) > 0 else 1.0), float(scale[1] if len(scale) > 1 else 1.0)],
+        'rotation': rotation,
+    }
+
+
+def _apply_texture_transform(uv, transform):
+    u = float(uv[0]) * transform['scale'][0]
+    v = float(uv[1]) * transform['scale'][1]
+    rotation = transform.get('rotation') or 0.0
+    if rotation:
+        cos_r = math.cos(rotation)
+        sin_r = math.sin(rotation)
+        u, v = (u * cos_r - v * sin_r), (u * sin_r + v * cos_r)
+    return [
+        (u + transform['offset'][0]) % 1.0,
+        (v + transform['offset'][1]) % 1.0,
+    ]
+
+
 def _image_from_gltf_texture(gltf, bin_chunk, material_index):
     try:
         material = (gltf.get('materials') or [])[int(material_index or 0)]
         texture_info = ((material.get('pbrMetallicRoughness') or {}).get('baseColorTexture') or {})
         texture = (gltf.get('textures') or [])[int(texture_info.get('index'))]
-        image = (gltf.get('images') or [])[int(texture.get('source'))]
+        image = (gltf.get('images') or [])[_texture_source_index(texture)]
         view = (gltf.get('bufferViews') or [])[int(image.get('bufferView'))]
         start = int(view.get('byteOffset') or 0)
         end = start + int(view.get('byteLength') or 0)
         from PIL import Image
-        return Image.open(io.BytesIO(bin_chunk[start:end])).convert('RGBA')
+        return Image.open(io.BytesIO(bin_chunk[start:end])).convert('RGBA'), _texture_transform(texture_info)
     except Exception as e:
         raise ValueError(f'No embedded base color texture for color bucketing: {e}')
 
@@ -224,7 +262,7 @@ def _color_bucket_flatten_lod_glb_materials(glb_bytes, *, foliage_color=None, ac
             else:
                 indices = list(range(len(positions)))
                 index_component_type = 5125
-            image = _image_from_gltf_texture(gltf, bin_chunk, primitive.get('material') or 0)
+            image, texture_transform = _image_from_gltf_texture(gltf, bin_chunk, primitive.get('material') or 0)
             width, height = image.size
             buckets = {'foliage': [], 'accent': []}
             for tri_start in range(0, len(indices) - 2, 3):
@@ -234,8 +272,7 @@ def _color_bucket_flatten_lod_glb_materials(glb_bytes, *, foliage_color=None, ac
                     uv_value = uvs[index]
                     uv[0] += float(uv_value[0])
                     uv[1] += float(uv_value[1])
-                uv[0] = (uv[0] / 3.0) % 1.0
-                uv[1] = (uv[1] / 3.0) % 1.0
+                uv = _apply_texture_transform([uv[0] / 3.0, uv[1] / 3.0], texture_transform)
                 pixel = image.getpixel((
                     min(width - 1, max(0, int(uv[0] * width))),
                     min(height - 1, max(0, int((1.0 - uv[1]) * height))),
