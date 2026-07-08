@@ -5691,22 +5691,7 @@ def _run_lod_optimizer(model, owner_id=None, levels=None):
             report_path = os.path.join(workdir, f'lod{level}.json')
             command_input_path = in_path
             flat_material_stage = None
-            if flat_material and flat_material_mode == 'texture_color_buckets':
-                try:
-                    with open(in_path, 'rb') as f:
-                        bucket_source_bytes = f.read()
-                    bucket_input_path = os.path.join(workdir, f'lod{level}-color-bucket-input.glb')
-                    with open(bucket_input_path, 'wb') as f:
-                        f.write(_flatten_lod_glb_materials(
-                            bucket_source_bytes,
-                            color=flat_material_color,
-                            accent_color=flat_material_accent_color,
-                            color_buckets=True,
-                        ))
-                    command_input_path = bucket_input_path
-                    flat_material_stage = 'pre_simplification_color_buckets'
-                except Exception as e:
-                    print(f"LOD {level} color bucket flatten fell back to single flat material: {e}", flush=True)
+            needs_color_bucket_repack = flat_material and flat_material_mode == 'texture_color_buckets'
             cmd = [
                 gltfpack_bin,
                 '-i', command_input_path,
@@ -5720,7 +5705,7 @@ def _run_lod_optimizer(model, owner_id=None, levels=None):
                 cmd.append('-sp')
             if config.get('aggressive'):
                 cmd.append('-sa')
-            if compression_mode == 'meshopt':
+            if compression_mode == 'meshopt' and not needs_color_bucket_repack:
                 cmd.append('-cc')
             if texture_limit:
                 cmd.extend(['-tc', '-tl', str(texture_limit)])
@@ -5735,6 +5720,42 @@ def _run_lod_optimizer(model, owner_id=None, levels=None):
             if result.returncode != 0:
                 msg = (result.stderr or result.stdout or 'gltfpack failed.').strip()
                 raise RuntimeError(f'LOD {level}: {msg[-1000:] or "gltfpack failed."}')
+
+            if needs_color_bucket_repack:
+                try:
+                    with open(out_path, 'rb') as f:
+                        simplified_bytes = f.read()
+                    bucket_flat_input_path = os.path.join(workdir, f'lod{level}-color-bucket-flat-input.glb')
+                    with open(bucket_flat_input_path, 'wb') as f:
+                        f.write(_flatten_lod_glb_materials(
+                            simplified_bytes,
+                            color=flat_material_color,
+                            accent_color=flat_material_accent_color,
+                            color_buckets=True,
+                        ))
+                    flat_material_stage = 'post_simplification_color_buckets'
+                    flat_report_path = os.path.join(workdir, f'lod{level}-color-bucket-flat.json')
+                    flat_cmd = [
+                        gltfpack_bin,
+                        '-i', bucket_flat_input_path,
+                        '-o', out_path,
+                        '-r', flat_report_path,
+                    ]
+                    if compression_mode == 'meshopt':
+                        flat_cmd.append('-cc')
+                    flat_result = subprocess.run(
+                        flat_cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=300,
+                        check=False,
+                    )
+                    if flat_result.returncode != 0:
+                        msg = (flat_result.stderr or flat_result.stdout or 'gltfpack failed.').strip()
+                        raise RuntimeError(f'LOD {level} color bucket repack: {msg[-1000:] or "gltfpack failed."}')
+                    report_path = flat_report_path
+                except Exception as e:
+                    print(f"LOD {level} color bucket flatten fell back to single flat material: {e}", flush=True)
 
             if flat_material and flat_material_stage is None:
                 with open(out_path, 'rb') as f:
