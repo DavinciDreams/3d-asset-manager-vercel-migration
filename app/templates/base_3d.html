@@ -2180,6 +2180,7 @@
                         try { renderer.forceContextLoss(); } catch (e) {}
                         const gl = renderer.domElement;
                         if (gl && gl.parentNode) gl.parentNode.removeChild(gl);
+                        if (container.__threeViewer === api) delete container.__threeViewer;
                     }
                 };
                 container.__threeViewer = api;
