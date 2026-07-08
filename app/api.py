@@ -224,14 +224,57 @@ def _image_from_gltf_texture(gltf, bin_chunk, material_index):
 
 def _texture_bucket_name(rgb):
     r, g, b = [channel / 255.0 for channel in rgb[:3]]
-    warm = max(r, 0.85 * g) - b
-    green = g - max(r, b)
+    warm = max(r, 0.75 * g) - b
+    green = g - max(r * 0.72, b)
     saturated = max(r, g, b) - min(r, g, b)
-    if green > 0.08 and g > 0.18:
+    if green > 0.05 and g > 0.16:
         return 'foliage'
-    if saturated > 0.12 and warm > 0.12:
+    if saturated > 0.16 and warm > 0.14:
         return 'accent'
     return 'foliage'
+
+
+def _texture_bucket_accent_score(rgb):
+    r, g, b = [channel / 255.0 for channel in rgb[:3]]
+    warm = max(r, 0.75 * g) - b
+    saturated = max(r, g, b) - min(r, g, b)
+    return max(0.0, warm) * max(0.0, saturated)
+
+
+def _texture_bucket_votes_for_triangle(image, width, height, triangle_uvs, texture_transform):
+    sample_points = []
+    grid_steps = 6
+    for a_step in range(grid_steps + 1):
+        for b_step in range(grid_steps + 1 - a_step):
+            c_step = grid_steps - a_step - b_step
+            a = a_step / grid_steps
+            b = b_step / grid_steps
+            c = c_step / grid_steps
+            sample_points.append([
+                triangle_uvs[0][0] * a + triangle_uvs[1][0] * b + triangle_uvs[2][0] * c,
+                triangle_uvs[0][1] * a + triangle_uvs[1][1] * b + triangle_uvs[2][1] * c,
+            ])
+    votes = {'foliage': 0, 'accent': 0}
+    accent_score = 0.0
+    for sample_uv in sample_points:
+        uv = _apply_texture_transform(sample_uv, texture_transform)
+        pixel = image.getpixel((
+            min(width - 1, max(0, int(uv[0] * width))),
+            min(height - 1, max(0, int((1.0 - uv[1]) * height))),
+        ))
+        bucket_name = _texture_bucket_name(pixel)
+        votes[bucket_name] += 1
+        if bucket_name == 'accent':
+            accent_score += _texture_bucket_accent_score(pixel)
+
+    return votes, accent_score / max(1, votes['accent'])
+
+
+def _color_bucket_accent_max_ratio():
+    try:
+        return max(0.0, min(1.0, float(os.environ.get('LOD_COLOR_BUCKET_ACCENT_MAX_RATIO') or 0.22)))
+    except (TypeError, ValueError):
+        return 0.22
 
 
 def _color_bucket_flatten_lod_glb_materials(glb_bytes, *, foliage_color=None, accent_color=None):
@@ -265,19 +308,31 @@ def _color_bucket_flatten_lod_glb_materials(glb_bytes, *, foliage_color=None, ac
             image, texture_transform = _image_from_gltf_texture(gltf, bin_chunk, primitive.get('material') or 0)
             width, height = image.size
             buckets = {'foliage': [], 'accent': []}
+            triangle_records = []
             for tri_start in range(0, len(indices) - 2, 3):
                 tri = indices[tri_start:tri_start + 3]
-                uv = [0.0, 0.0]
-                for index in tri:
-                    uv_value = uvs[index]
-                    uv[0] += float(uv_value[0])
-                    uv[1] += float(uv_value[1])
-                uv = _apply_texture_transform([uv[0] / 3.0, uv[1] / 3.0], texture_transform)
-                pixel = image.getpixel((
-                    min(width - 1, max(0, int(uv[0] * width))),
-                    min(height - 1, max(0, int((1.0 - uv[1]) * height))),
-                ))
-                buckets[_texture_bucket_name(pixel)].extend(tri)
+                triangle_uvs = [[float(uvs[index][0]), float(uvs[index][1])] for index in tri]
+                votes, accent_score = _texture_bucket_votes_for_triangle(image, width, height, triangle_uvs, texture_transform)
+                triangle_records.append((tri, votes, accent_score))
+            accent_candidates = [
+                (tri, votes, accent_score)
+                for tri, votes, accent_score in triangle_records
+                if votes['accent'] > votes['foliage']
+            ]
+            accent_candidates.sort(
+                key=lambda record: (
+                    record[1]['accent'] - record[1]['foliage'],
+                    record[2],
+                ),
+                reverse=True,
+            )
+            accent_limit = int(round(len(triangle_records) * _color_bucket_accent_max_ratio()))
+            if accent_candidates:
+                accent_limit = max(1, accent_limit)
+            accent_ids = {id(record[0]) for record in accent_candidates[:accent_limit]}
+            for tri, _votes, _accent_score in triangle_records:
+                bucket_name = 'accent' if id(tri) in accent_ids else 'foliage'
+                buckets[bucket_name].extend(tri)
             for bucket_name, bucket_indices in buckets.items():
                 if not bucket_indices:
                     continue
