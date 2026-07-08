@@ -711,6 +711,15 @@ class Model3D:
                     }
                 except (TypeError, ValueError):
                     continue
+                texture_uv = sample.get("texture_uv")
+                if isinstance(texture_uv, list) and len(texture_uv) >= 2:
+                    try:
+                        cleaned["texture_uv"] = [
+                            round(float(texture_uv[0]), 6),
+                            round(float(texture_uv[1]), 6),
+                        ]
+                    except (TypeError, ValueError):
+                        pass
                 point = sample.get("point")
                 if isinstance(point, dict):
                     try:

@@ -693,10 +693,18 @@
                     });
                     const hit = pickRaycaster.intersectObjects(meshes, false)[0];
                     if (!hit || !hit.uv) return null;
+                    const materialIndex = hit.face ? (hit.face.materialIndex || 0) : 0;
+                    const materials = Array.isArray(hit.object.material) ? hit.object.material : [hit.object.material];
+                    const material = materials[materialIndex] || materials[0] || null;
+                    const textureUv = hit.uv.clone();
+                    if (material && material.map && typeof material.map.transformUv === 'function') {
+                        material.map.transformUv(textureUv);
+                    }
                     return {
                         point: { x: hit.point.x, y: hit.point.y, z: hit.point.z },
                         uv: { x: hit.uv.x, y: hit.uv.y },
-                        materialIndex: hit.face ? (hit.face.materialIndex || 0) : 0,
+                        textureUv: { x: textureUv.x, y: textureUv.y },
+                        materialIndex,
                         objectName: hit.object ? (hit.object.name || '') : '',
                     };
                 }

@@ -1204,7 +1204,7 @@ def test_color_bucket_flatten_uses_saved_segment_samples():
         color=[0.2, 0.6, 0.2, 1],
         accent_color=[0.9, 0.3, 0.1, 1],
         color_buckets=True,
-        segment_samples=[{"uv": [0.85, 0.5], "material_index": 0, "radius": 0.08}],
+        segment_samples=[{"uv": [0.2, 0.5], "texture_uv": [0.85, 0.5], "material_index": 0, "radius": 0.08}],
     )
     out_gltf = api._gltf_json_from_bytes(out, "glb")
     assert len(out_gltf["meshes"][0]["primitives"]) == 2

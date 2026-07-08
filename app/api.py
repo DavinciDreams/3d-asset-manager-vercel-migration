@@ -295,11 +295,15 @@ def _lod_color_segment_samples(model):
         if not isinstance(uv, (list, tuple)) or len(uv) < 2:
             continue
         try:
-            clean.append({
+            cleaned = {
                 'uv': [float(uv[0]), float(uv[1])],
                 'material_index': int(sample.get('material_index') or 0),
                 'radius': max(0.005, min(0.25, float(sample.get('radius') or 0.045))),
-            })
+            }
+            texture_uv = sample.get('texture_uv')
+            if isinstance(texture_uv, (list, tuple)) and len(texture_uv) >= 2:
+                cleaned['texture_uv'] = [float(texture_uv[0]), float(texture_uv[1])]
+            clean.append(cleaned)
         except (TypeError, ValueError):
             continue
     return clean[:24]
@@ -324,7 +328,9 @@ def _triangle_near_segment_sample(triangle_uvs, texture_transform, material_inde
     for sample in segment_samples:
         if int(sample.get('material_index') or 0) != int(material_index or 0):
             continue
-        sample_uv = _apply_texture_transform(sample['uv'], texture_transform)
+        sample_uv = sample.get('texture_uv')
+        if sample_uv is None:
+            sample_uv = _apply_texture_transform(sample['uv'], texture_transform)
         radius = float(sample.get('radius') or 0.045)
         if _wrapped_uv_distance(centroid, sample_uv) <= radius:
             return True

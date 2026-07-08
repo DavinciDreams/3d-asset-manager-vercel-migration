@@ -1895,6 +1895,9 @@ document.addEventListener('DOMContentLoaded', function() {
                 }
                 const sample = {
                     uv: [Number(hit.uv.x.toFixed(6)), Number(hit.uv.y.toFixed(6))],
+                    texture_uv: hit.textureUv
+                        ? [Number(hit.textureUv.x.toFixed(6)), Number(hit.textureUv.y.toFixed(6))]
+                        : [Number(hit.uv.x.toFixed(6)), Number(hit.uv.y.toFixed(6))],
                     point: hit.point,
                     material_index: hit.materialIndex || 0,
                     object_name: hit.objectName || '',
