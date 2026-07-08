@@ -358,7 +358,7 @@ def get_openapi_spec(base_url=''):
                         'status': {'type': 'string', 'example': 'ready'},
                         'settings': {
                             'type': 'object',
-                            'description': 'LOD generation settings and runtime cost metadata. LOD1 targets mid/fill use with target_vertices=20000; LOD2 uses the known-good textured simplification profile for visible world placement; LOD3 is a tiny flat-color proxy with color controlled by LOD3_FLAT_COLOR / LOD_FLAT_COLOR. The impostor variant remains the preferred true far-distance representation.',
+                            'description': 'LOD generation settings and runtime cost metadata. LOD1 targets mid/fill use with target_vertices=20000; LOD2 is a two-color flat fill for visible world placement when tiny textures break down; LOD3 is a tiny two-color flat proxy. Flat foliage color is controlled by LOD3_FLAT_COLOR / LOD_FLAT_COLOR. The impostor variant remains the preferred true far-distance representation.',
                         },
                         'mesh_stats': {'$ref': '#/components/schemas/MeshStats'},
                         'physical': {'type': 'object', 'nullable': True},
@@ -1914,12 +1914,12 @@ def get_openapi_spec(base_url=''):
                                         'lod3_flat_color': {
                                             'type': 'string',
                                             'default': '#4d6b33',
-                                            'description': 'Hex or RGB/RGBA foliage color for the tiny flat LOD3 proxy.',
+                                            'description': 'Hex or RGB/RGBA foliage color for the flat LOD2/LOD3 proxies.',
                                         },
                                         'lod3_flat_accent_color': {
                                             'type': 'string',
                                             'default': '#d96a28',
-                                            'description': 'Hex or RGB/RGBA accent color for flowers, fruit, or other warm texture regions in the tiny flat LOD3 proxy.',
+                                            'description': 'Hex or RGB/RGBA accent color for flowers, fruit, or other warm texture regions in the flat LOD2/LOD3 proxies.',
                                         },
                                         'name': {'type': 'string'},
                                     },
@@ -1964,12 +1964,12 @@ def get_openapi_spec(base_url=''):
                                         'lod3_flat_color': {
                                             'type': 'string',
                                             'default': '#4d6b33',
-                                            'description': 'Hex or RGB/RGBA foliage color for the tiny flat LOD3 proxy.',
+                                            'description': 'Hex or RGB/RGBA foliage color for the flat LOD2/LOD3 proxies.',
                                         },
                                         'lod3_flat_accent_color': {
                                             'type': 'string',
                                             'default': '#d96a28',
-                                            'description': 'Hex or RGB/RGBA accent color for flowers, fruit, or other warm texture regions in the tiny flat LOD3 proxy.',
+                                            'description': 'Hex or RGB/RGBA accent color for flowers, fruit, or other warm texture regions in the flat LOD2/LOD3 proxies.',
                                         },
                                     },
                                 }

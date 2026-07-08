@@ -435,7 +435,7 @@ def _lod_levels_with_flat_color(color=None, accent_color=None):
     flat_color = _lod_flat_material_color(color)
     flat_accent_color = _lod_flat_material_color(accent_color or os.environ.get('LOD3_FLAT_ACCENT_COLOR') or '#d96a28')
     for config in levels:
-        if int(config.get('level') or -1) == 3 and config.get('flat_material'):
+        if int(config.get('level') or -1) in {2, 3} and config.get('flat_material'):
             config['flat_material_color'] = flat_color
             config['flat_material_accent_color'] = flat_accent_color
     return levels
@@ -6146,7 +6146,7 @@ GAME_OPTIMIZE_PRESETS = {
     },
 }
 
-LOD_OPTIMIZE_DEFAULTS_VERSION = '2026-07-07-lod2-safe-lod3-flat-color'
+LOD_OPTIMIZE_DEFAULTS_VERSION = '2026-07-08-lod2-lod3-color-buckets'
 LOD_OPTIMIZE_LEVELS = [
     {
         'level': 0,
@@ -6168,17 +6168,20 @@ LOD_OPTIMIZE_LEVELS = [
     },
     {
         'level': 2,
-        # LOD1's gltfpack profile is the known-good textured result for
-        # leaf-heavy generated meshes. Keep LOD2 visually safe; true far
-        # distance should use the impostor variant.
-        'texture_limit': 512,
+        # Keep the LOD1 geometry profile, but flatten by sampled texture color
+        # after simplification so broken tiny textures do not show in-world.
+        'texture_limit': 0,
         'simplify_ratio': 0.18,
         'simplification_error': 0.03,
         'aggressive': True,
         'permissive': True,
+        'flat_material': True,
+        'flat_material_mode': 'texture_color_buckets',
+        'flat_material_color': _lod_flat_material_color(),
+        'flat_material_accent_color': _lod_flat_material_color(os.environ.get('LOD3_FLAT_ACCENT_COLOR') or '#d96a28'),
         'target_vertices': 20000,
         'compression_mode': 'meshopt',
-        'role': 'far/large-fill',
+        'role': 'far/two-color-flat-fill',
     },
     {
         'level': 3,

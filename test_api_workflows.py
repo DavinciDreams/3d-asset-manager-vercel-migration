@@ -1041,14 +1041,15 @@ def test_lod_optimizer_generates_levels_from_original_asset(monkeypatch):
     assert "-sa" in calls[2]
     assert "-sp" in calls[2]
     assert calls[2][calls[2].index("-se") + 1] == "0.03"
-    assert calls[2][calls[2].index("-tl") + 1] == "512"
-    assert "-sa" in calls[3]
-    assert "-sp" in calls[3]
-    assert calls[3][calls[3].index("-se") + 1] == "0.08"
-    assert "-tl" not in calls[3]
+    assert "-tl" not in calls[2]
+    assert "-sa" in simplify_calls[3]
+    assert "-sp" in simplify_calls[3]
+    assert simplify_calls[3][simplify_calls[3].index("-se") + 1] == "0.08"
+    assert "-tl" not in simplify_calls[3]
     assert all(cmd[cmd.index("-i") + 1].endswith("input.glb") for cmd in simplify_calls)
-    assert len(repack_calls) == 1
-    assert repack_calls[0][repack_calls[0].index("-i") + 1].endswith("lod3-flat-input.glb")
+    assert len(repack_calls) == 2
+    assert repack_calls[0][repack_calls[0].index("-i") + 1].endswith("lod2-flat-input.glb")
+    assert repack_calls[1][repack_calls[1].index("-i") + 1].endswith("lod3-flat-input.glb")
     assert lod0.settings["role"] == "near/game"
     assert lod1.settings["texture_limit"] == 512
     assert lod1.settings["simplify_ratio"] == 0.18
@@ -1056,12 +1057,17 @@ def test_lod_optimizer_generates_levels_from_original_asset(monkeypatch):
     assert lod1.settings["aggressive"] is True
     assert lod1.settings["permissive"] is True
     assert lod1.settings["role"] == "mid/fill"
-    assert lod2.settings["texture_limit"] == 512
+    assert lod2.settings["texture_limit"] == 0
     assert lod2.settings["simplify_ratio"] == 0.18
     assert lod2.settings["target_vertices"] == 20000
     assert lod2.settings["aggressive"] is True
     assert lod2.settings["permissive"] is True
-    assert lod2.settings["role"] == "far/large-fill"
+    assert lod2.settings["flat_material"] is True
+    assert lod2.settings["flat_material_mode"] == "texture_color_buckets"
+    assert lod2.settings["flat_material_color"] == [0.30, 0.42, 0.20, 1.0]
+    assert lod2.settings["flat_material_accent_color"] == [0xd9 / 255, 0x6a / 255, 0x28 / 255, 1.0]
+    assert lod2.settings["flat_material_stage"] == "post_simplification"
+    assert lod2.settings["role"] == "far/two-color-flat-fill"
     assert lod3.settings["texture_limit"] == 0
     assert lod3.settings["simplify_ratio"] == 0.015
     assert lod3.settings["target_vertices"] == 500
@@ -3034,6 +3040,8 @@ def test_game_optimization_job_generates_lods_for_one_model(monkeypatch):
     def fake_lod_optimizer(model, owner_id=None, levels=None):
         generated["lod_model_id"] = model.id
         generated["lod_owner_id"] = owner_id
+        generated["lod2_color"] = levels[2]["flat_material_color"]
+        generated["lod2_accent_color"] = levels[2]["flat_material_accent_color"]
         generated["lod3_color"] = levels[3]["flat_material_color"]
         generated["lod3_accent_color"] = levels[3]["flat_material_accent_color"]
         lod0_bytes = _minimal_glb({"asset": {"version": "2.0"}, "scene": 0})
@@ -3126,6 +3134,8 @@ def test_game_optimization_job_generates_lods_for_one_model(monkeypatch):
         "game_owner_id": owner.id,
         "lod_model_id": model.id,
         "lod_owner_id": owner.id,
+        "lod2_color": [0x66 / 255, 0x33 / 255, 0, 1.0],
+        "lod2_accent_color": [0xd9 / 255, 0x6a / 255, 0x28 / 255, 1.0],
         "lod3_color": [0x66 / 255, 0x33 / 255, 0, 1.0],
         "lod3_accent_color": [0xd9 / 255, 0x6a / 255, 0x28 / 255, 1.0],
         "impostor_model_id": model.id,
@@ -3144,6 +3154,8 @@ def test_owner_can_rebuild_single_model_lods(monkeypatch):
     def fake_lod_optimizer(model, owner_id=None, levels=None):
         generated["model_id"] = model.id
         generated["owner_id"] = owner_id
+        generated["lod2_color"] = levels[2]["flat_material_color"]
+        generated["lod2_accent_color"] = levels[2]["flat_material_accent_color"]
         generated["lod3_color"] = levels[3]["flat_material_color"]
         generated["lod3_accent_color"] = levels[3]["flat_material_accent_color"]
         lod2_id = app.config["FILE_STORE"].put(
@@ -3199,6 +3211,8 @@ def test_owner_can_rebuild_single_model_lods(monkeypatch):
     assert generated == {
         "model_id": model.id,
         "owner_id": owner.id,
+        "lod2_color": [0x66 / 255, 0x33 / 255, 0, 1.0],
+        "lod2_accent_color": [0xd9 / 255, 0x6a / 255, 0x28 / 255, 1.0],
         "lod3_color": [0x66 / 255, 0x33 / 255, 0, 1.0],
         "lod3_accent_color": [0xd9 / 255, 0x6a / 255, 0x28 / 255, 1.0],
     }
