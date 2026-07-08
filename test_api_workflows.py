@@ -2972,6 +2972,7 @@ def test_game_optimization_job_generates_lods_for_one_model(monkeypatch):
     def fake_lod_optimizer(model, owner_id=None, levels=None):
         generated["lod_model_id"] = model.id
         generated["lod_owner_id"] = owner_id
+        generated["lod3_color"] = levels[3]["flat_material_color"]
         lod0_bytes = _minimal_glb({"asset": {"version": "2.0"}, "scene": 0})
         lod0_id = app.config["FILE_STORE"].put(
             lod0_bytes,
@@ -3034,9 +3035,13 @@ def test_game_optimization_job_generates_lods_for_one_model(monkeypatch):
     html = detail.get_data(as_text=True)
     assert "Create Game + LODs" in html
     assert "Rebuild LODs" in html
+    assert 'id="lod3-flat-color"' in html
     assert "Generate LODs" not in html
 
-    response = client.post(f"/api/model/{model.id}/optimize-game", json={})
+    response = client.post(
+        f"/api/model/{model.id}/optimize-game",
+        json={"lod3_flat_color": "#663300"},
+    )
     assert response.status_code == 202, response.get_json()
     body = response.get_json()
     assert body["success"] is True
@@ -3057,6 +3062,7 @@ def test_game_optimization_job_generates_lods_for_one_model(monkeypatch):
         "game_owner_id": owner.id,
         "lod_model_id": model.id,
         "lod_owner_id": owner.id,
+        "lod3_color": [0x66 / 255, 0x33 / 255, 0, 1.0],
         "impostor_model_id": model.id,
         "impostor_owner_id": owner.id,
         "job_id": job_id,
@@ -3070,9 +3076,10 @@ def test_owner_can_rebuild_single_model_lods(monkeypatch):
     client = app.test_client()
     generated = {}
 
-    def fake_lod_optimizer(model, owner_id=None):
+    def fake_lod_optimizer(model, owner_id=None, levels=None):
         generated["model_id"] = model.id
         generated["owner_id"] = owner_id
+        generated["lod3_color"] = levels[3]["flat_material_color"]
         lod2_id = app.config["FILE_STORE"].put(
             b"single rebuilt lod2",
             filename="single-lod-source-lod2.glb",
@@ -3113,14 +3120,21 @@ def test_owner_can_rebuild_single_model_lods(monkeypatch):
         ).save()
 
     client.post("/auth/login", data={"login_field": "single-lod-rebuild-owner", "password": "pw123456"})
-    response = client.post(f"/api/model/{model.id}/lod/rebuild", json={})
+    response = client.post(
+        f"/api/model/{model.id}/lod/rebuild",
+        json={"lod3_flat_color": "#663300"},
+    )
     assert response.status_code == 200, response.get_json()
     body = response.get_json()
     assert body["success"] is True
     assert body["defaults_version"] == api.LOD_OPTIMIZE_DEFAULTS_VERSION
     assert body["lod_variants"][0]["level"] == 2
     assert body["lod_variants"][0]["vertices"] == 3210
-    assert generated == {"model_id": model.id, "owner_id": owner.id}
+    assert generated == {
+        "model_id": model.id,
+        "owner_id": owner.id,
+        "lod3_color": [0x66 / 255, 0x33 / 255, 0, 1.0],
+    }
 
 
 def test_tellus_admin_upload_can_target_player_and_world_by_headers(monkeypatch):
@@ -3326,8 +3340,11 @@ def test_openapi_documents_workflow_and_bearer_auth():
     optimize_props = optimize_doc["requestBody"]["content"]["application/json"]["schema"]["properties"]
     assert optimize_props["preset"]["default"] == "balanced"
     assert optimize_props["simplify_ratio"]["default"] == 0.85
+    assert optimize_props["lod3_flat_color"]["default"] == "#4d6b33"
     lod_rebuild_doc = spec["paths"]["/model/{model_id}/lod/rebuild"]["post"]
     assert "LOD" in lod_rebuild_doc["summary"]
+    lod_rebuild_request = lod_rebuild_doc["requestBody"]["content"]["application/json"]["schema"]["properties"]
+    assert lod_rebuild_request["lod3_flat_color"]["default"] == "#4d6b33"
     lod_rebuild_props = lod_rebuild_doc["responses"]["200"]["content"]["application/json"]["schema"]["properties"]
     assert "defaults_version" in lod_rebuild_props
     assert "lod_variants" in lod_rebuild_props

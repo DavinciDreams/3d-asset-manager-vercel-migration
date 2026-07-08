@@ -139,8 +139,9 @@ def _flatten_lod_glb_materials(glb_bytes, *, color=None):
     return _rewrite_glb_json(glb_bytes, rewrite)
 
 
-def _lod_flat_material_color():
-    raw = (os.environ.get('LOD3_FLAT_COLOR') or os.environ.get('LOD_FLAT_COLOR') or '').strip()
+def _lod_flat_material_color(raw=None):
+    raw = (raw if raw is not None else (os.environ.get('LOD3_FLAT_COLOR') or os.environ.get('LOD_FLAT_COLOR') or ''))
+    raw = str(raw or '').strip()
     fallback = [0.30, 0.42, 0.20, 1.0]
     if not raw:
         return fallback
@@ -156,6 +157,15 @@ def _lod_flat_material_color():
     except Exception:
         pass
     return fallback
+
+
+def _lod_levels_with_flat_color(color=None):
+    levels = [dict(config) for config in LOD_OPTIMIZE_LEVELS]
+    flat_color = _lod_flat_material_color(color)
+    for config in levels:
+        if int(config.get('level') or -1) == 3 and config.get('flat_material'):
+            config['flat_material_color'] = flat_color
+    return levels
 
 
 def _force_meshopt_required_for_external_fallback(glb_bytes):
@@ -5739,7 +5749,11 @@ def _process_game_optimization_job(app, job_id):
             if not model:
                 raise FileNotFoundError('Model not found')
             result = _run_game_optimizer(model, job.owner_id or model.user_id, job.settings or {})
-            lod_result = _run_lod_optimizer(model, job.owner_id or model.user_id)
+            lod_result = _run_lod_optimizer(
+                model,
+                job.owner_id or model.user_id,
+                levels=_lod_levels_with_flat_color((job.settings or {}).get('lod3_flat_color')),
+            )
             result['lod_result'] = lod_result
             try:
                 result['impostor_result'] = _run_impostor_generator(model, job.owner_id or model.user_id)
@@ -5897,6 +5911,9 @@ def _normalize_game_optimization_settings(data):
         raise ValueError('compression_mode must be meshopt or fallback.')
     if data.get('name'):
         settings['name'] = str(data.get('name')).strip()
+    if data.get('lod3_flat_color') is not None:
+        settings['lod3_flat_color'] = data.get('lod3_flat_color')
+        settings['lod3_flat_material_color'] = _lod_flat_material_color(data.get('lod3_flat_color'))
     return settings
 
 
@@ -7315,8 +7332,13 @@ def rebuild_model_lods(model_id):
         if (model.file_format or '').lower() not in ('glb', 'gltf'):
             return jsonify({'error': 'LOD rebuild currently supports GLB/GLTF assets.'}), 400
 
+        data = _payload()
         owner_id = principal.id if principal else model.user_id
-        result = _run_lod_optimizer(model, owner_id)
+        result = _run_lod_optimizer(
+            model,
+            owner_id,
+            levels=_lod_levels_with_flat_color(data.get('lod3_flat_color')),
+        )
         lod_fields = _asset_lod_url_fields(model)
         return jsonify({
             'success': True,

@@ -1911,6 +1911,11 @@ def get_openapi_spec(base_url=''):
                                             'default': 'meshopt',
                                             'enum': ['meshopt', 'fallback'],
                                         },
+                                        'lod3_flat_color': {
+                                            'type': 'string',
+                                            'default': '#4d6b33',
+                                            'description': 'Hex or RGB/RGBA color for the tiny flat LOD3 proxy.',
+                                        },
                                         'name': {'type': 'string'},
                                     },
                                 }
@@ -1945,6 +1950,22 @@ def get_openapi_spec(base_url=''):
                         'running the full bulk backfill or regenerating the game-optimized variant.'
                     ),
                     'security': [{'sessionCookie': []}, {'bearerAuth': []}],
+                    'requestBody': {
+                        'content': {
+                            'application/json': {
+                                'schema': {
+                                    'type': 'object',
+                                    'properties': {
+                                        'lod3_flat_color': {
+                                            'type': 'string',
+                                            'default': '#4d6b33',
+                                            'description': 'Hex or RGB/RGBA color for the tiny flat LOD3 proxy.',
+                                        },
+                                    },
+                                }
+                            }
+                        }
+                    },
                     'responses': {
                         '200': {
                             'description': 'LOD variants rebuilt',
