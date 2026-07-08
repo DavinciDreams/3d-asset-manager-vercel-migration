@@ -694,6 +694,42 @@ class Model3D:
         for key in ["physics", "interaction", "spawn"]:
             if isinstance(metadata.get(key), dict):
                 normalized[key] = metadata[key]
+        lod_segments = metadata.get("lod_color_segments")
+        if isinstance(lod_segments, dict):
+            accent_samples = []
+            for sample in lod_segments.get("accent_samples") or []:
+                if not isinstance(sample, dict):
+                    continue
+                uv = sample.get("uv")
+                if not isinstance(uv, list) or len(uv) < 2:
+                    continue
+                try:
+                    cleaned = {
+                        "uv": [round(float(uv[0]), 6), round(float(uv[1]), 6)],
+                        "material_index": int(sample.get("material_index") or 0),
+                        "radius": round(max(0.005, min(0.25, float(sample.get("radius") or 0.045))), 6),
+                    }
+                except (TypeError, ValueError):
+                    continue
+                point = sample.get("point")
+                if isinstance(point, dict):
+                    try:
+                        cleaned["point"] = {
+                            "x": round(float(point.get("x")), 6),
+                            "y": round(float(point.get("y")), 6),
+                            "z": round(float(point.get("z")), 6),
+                        }
+                    except (TypeError, ValueError):
+                        pass
+                object_name = str(sample.get("object_name") or "").strip()
+                if object_name:
+                    cleaned["object_name"] = object_name[:120]
+                accent_samples.append(cleaned)
+            if accent_samples:
+                normalized["lod_color_segments"] = {
+                    "accent_samples": accent_samples[:24],
+                    "version": 1,
+                }
         upload = metadata.get("upload")
         if isinstance(upload, dict):
             allowed = {

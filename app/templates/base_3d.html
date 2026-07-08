@@ -676,6 +676,55 @@
                 animate();
                 window.addEventListener('resize', resize);
 
+                const pickRaycaster = new THREE.Raycaster();
+                const pickPointer = new THREE.Vector2();
+                const pickMarkers = [];
+
+                function pickSurfaceAt(clientX, clientY) {
+                    if (!model) return null;
+                    const rect = renderer.domElement.getBoundingClientRect();
+                    if (!rect.width || !rect.height) return null;
+                    pickPointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+                    pickPointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+                    pickRaycaster.setFromCamera(pickPointer, camera);
+                    const meshes = [];
+                    model.traverse((node) => {
+                        if (node.isMesh && node.visible && node.geometry) meshes.push(node);
+                    });
+                    const hit = pickRaycaster.intersectObjects(meshes, false)[0];
+                    if (!hit || !hit.uv) return null;
+                    return {
+                        point: { x: hit.point.x, y: hit.point.y, z: hit.point.z },
+                        uv: { x: hit.uv.x, y: hit.uv.y },
+                        materialIndex: hit.face ? (hit.face.materialIndex || 0) : 0,
+                        objectName: hit.object ? (hit.object.name || '') : '',
+                    };
+                }
+
+                function addPickMarker(point, color = '#ff4fd8') {
+                    const p = new THREE.Vector3(point.x, point.y, point.z);
+                    const modelSize = model
+                        ? new THREE.Box3().setFromObject(model).getSize(new THREE.Vector3()).length()
+                        : 1;
+                    const marker = new THREE.Mesh(
+                        new THREE.SphereGeometry(Math.max(0.006, modelSize * 0.012), 16, 12),
+                        new THREE.MeshBasicMaterial({ color, depthTest: false })
+                    );
+                    marker.position.copy(p);
+                    marker.renderOrder = 999;
+                    scene.add(marker);
+                    pickMarkers.push(marker);
+                    return marker;
+                }
+
+                function clearPickMarkers() {
+                    pickMarkers.splice(0).forEach((marker) => {
+                        scene.remove(marker);
+                        if (marker.geometry) marker.geometry.dispose();
+                        if (marker.material) marker.material.dispose();
+                    });
+                }
+
                 const api = {
                     reset() {
                         if (model) frameObject(camera, controls, model, container.clientWidth || width, container.clientHeight || height, options.framePadding);
@@ -2095,6 +2144,9 @@
                         };
                     })(),
                     canvas: renderer.domElement,
+                    pickSurfaceAt,
+                    addPickMarker,
+                    clearPickMarkers,
                     dispose() {
                         disposed = true;
                         if (animationId) cancelAnimationFrame(animationId);
@@ -2109,6 +2161,7 @@
                         if (api && api.eyes && api.eyes.active) api.eyes.remove();
                         if (api && api.mouth && api.mouth.active) api.mouth.remove();
                         if (api && api.autorig && api.autorig.active) api.autorig.exit();
+                        clearPickMarkers();
                         if (model) disposeObject(model);
                         scene.environment = null;
                         envTexture.dispose();

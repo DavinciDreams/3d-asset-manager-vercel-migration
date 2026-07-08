@@ -405,6 +405,21 @@
                         </button>
                     </div>
                 </div>
+                <div class="mt-3 flex flex-wrap items-center gap-2 rounded border border-teal-200 bg-white/70 p-3 text-sm">
+                    <button type="button" id="lod-segment-pick"
+                            class="rounded border border-pink-300 bg-pink-50 px-3 py-2 text-pink-800 hover:bg-pink-100">
+                        <i class="fas fa-crosshairs mr-1"></i>Pick fruit regions
+                    </button>
+                    <button type="button" id="lod-segment-clear"
+                            class="rounded border border-gray-300 bg-white px-3 py-2 text-gray-700 hover:bg-gray-50">
+                        <i class="fas fa-eraser mr-1"></i>Clear picks
+                    </button>
+                    <button type="button" id="lod-segment-save"
+                            class="rounded border border-teal-300 bg-teal-700 px-3 py-2 text-white hover:bg-teal-800">
+                        <i class="fas fa-save mr-1"></i>Save picks
+                    </button>
+                    <span id="lod-segment-status" class="text-gray-600"></span>
+                </div>
                 <p id="game-opt-status" class="mt-3 text-sm text-gray-600"></p>
             </div>
             {% endif %}
@@ -1093,6 +1108,7 @@ let HAS_THUMBNAIL = {{ (model.thumbnail_file_id is not none) | tojson }};
 let HAS_PREVIEW = {{ (model.preview_file_id is not none) | tojson }};
 // Can the current user manage this model? Used for owner/admin-only tools.
 const IS_OWNER = {{ can_manage_model | tojson }};
+let MODEL_RUNTIME_METADATA = {{ (model.runtime_metadata or {}) | tojson }};
 // Whether a baked fixed-eyes/mouth variant already exists. The Fix Eyes/Mouth
 // editors load THIS as their base (not the original) so prior fixes carry into
 // the next bake (e.g. add a mouth without losing previously-baked eyes+blink).
@@ -1820,6 +1836,146 @@ document.addEventListener('DOMContentLoaded', function() {
                 gameOptRun.classList.remove('opacity-70', 'cursor-not-allowed');
             }
         });
+
+        const lodSegmentPick = document.getElementById('lod-segment-pick');
+        const lodSegmentClear = document.getElementById('lod-segment-clear');
+        const lodSegmentSave = document.getElementById('lod-segment-save');
+        const lodSegmentStatus = document.getElementById('lod-segment-status');
+        const existingSegments = (MODEL_RUNTIME_METADATA && MODEL_RUNTIME_METADATA.lod_color_segments) || {};
+        let lodAccentSamples = Array.isArray(existingSegments.accent_samples)
+            ? existingSegments.accent_samples.slice(0, 24)
+            : [];
+        let lodSegmentPickActive = false;
+        let lodSegmentPickWired = false;
+
+        function segmentSourceVariant() {
+            return HAS_FIXED_VARIANT ? 'fixed_eyes' : 'original';
+        }
+
+        function segmentViewer() {
+            const c = document.getElementById('viewer-detail-{{ model.id }}');
+            return c && c.__threeViewer ? c.__threeViewer : null;
+        }
+
+        function setSegmentStatus(message, isError) {
+            if (!lodSegmentStatus) return;
+            lodSegmentStatus.textContent = message || '';
+            lodSegmentStatus.className = isError ? 'text-red-600' : 'text-gray-600';
+        }
+
+        function refreshSegmentStatus() {
+            setSegmentStatus(`${lodAccentSamples.length} accent pick${lodAccentSamples.length === 1 ? '' : 's'} saved for LOD2/3.`);
+        }
+
+        function drawSegmentMarkers() {
+            const v = segmentViewer();
+            if (!v || !v.clearPickMarkers || !v.addPickMarker) return;
+            v.clearPickMarkers();
+            lodAccentSamples.forEach((sample) => {
+                if (sample.point) v.addPickMarker(sample.point, '#ff4fd8');
+            });
+        }
+
+        function wireSegmentPicker() {
+            const v = segmentViewer();
+            if (!v || !v.canvas || lodSegmentPickWired) return Boolean(v);
+            lodSegmentPickWired = true;
+            v.canvas.addEventListener('pointerdown', (event) => {
+                if (!lodSegmentPickActive) return;
+                const current = segmentViewer();
+                if (!current || !current.pickSurfaceAt) return;
+                event.preventDefault();
+                event.stopPropagation();
+                const hit = current.pickSurfaceAt(event.clientX, event.clientY);
+                if (!hit || !hit.uv) {
+                    setSegmentStatus('No mesh surface under that click.', true);
+                    return;
+                }
+                const sample = {
+                    uv: [Number(hit.uv.x.toFixed(6)), Number(hit.uv.y.toFixed(6))],
+                    point: hit.point,
+                    material_index: hit.materialIndex || 0,
+                    object_name: hit.objectName || '',
+                    radius: 0.045,
+                };
+                lodAccentSamples.push(sample);
+                lodAccentSamples = lodAccentSamples.slice(-24);
+                if (current.addPickMarker) current.addPickMarker(hit.point, '#ff4fd8');
+                refreshSegmentStatus();
+            }, true);
+            drawSegmentMarkers();
+            return true;
+        }
+
+        function waitForSegmentViewer(attempt = 0) {
+            if (wireSegmentPicker()) {
+                lodSegmentPickActive = true;
+                if (lodSegmentPick) lodSegmentPick.classList.add('bg-pink-200');
+                setSegmentStatus('Click pods/flowers/accent regions in the viewer, then Save picks.');
+                return;
+            }
+            if (attempt > 60) {
+                setSegmentStatus('3D viewer is still loading. Try again in a moment.', true);
+                return;
+            }
+            setTimeout(() => waitForSegmentViewer(attempt + 1), 100);
+        }
+
+        if (lodSegmentPick) {
+            lodSegmentPick.addEventListener('click', () => {
+                const wantVariant = segmentSourceVariant();
+                if (!segmentViewer() || CURRENT_VARIANT !== wantVariant) {
+                    lodSegmentPickWired = false;
+                    loadDetailModel('{{ model.id }}', wantVariant, { allowFallback: false });
+                }
+                waitForSegmentViewer();
+            });
+            refreshSegmentStatus();
+        }
+
+        if (lodSegmentClear) {
+            lodSegmentClear.addEventListener('click', () => {
+                lodAccentSamples = [];
+                const v = segmentViewer();
+                if (v && v.clearPickMarkers) v.clearPickMarkers();
+                refreshSegmentStatus();
+            });
+        }
+
+        if (lodSegmentSave) {
+            lodSegmentSave.addEventListener('click', async () => {
+                lodSegmentSave.disabled = true;
+                lodSegmentSave.classList.add('opacity-70', 'cursor-not-allowed');
+                try {
+                    const nextMetadata = {
+                        ...(MODEL_RUNTIME_METADATA || {}),
+                        lod_color_segments: {
+                            ...((MODEL_RUNTIME_METADATA || {}).lod_color_segments || {}),
+                            accent_samples: lodAccentSamples,
+                            version: 1,
+                        },
+                    };
+                    const response = await fetch('/api/model/{{ model.id }}', {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                        body: JSON.stringify({ runtime_metadata: nextMetadata }),
+                    });
+                    const data = await parseGameOptimizeResponse(response);
+                    if (!response.ok || !data.success) {
+                        throw new Error(data.error || 'Could not save LOD region picks.');
+                    }
+                    MODEL_RUNTIME_METADATA = data.model && data.model.runtime_metadata
+                        ? data.model.runtime_metadata
+                        : nextMetadata;
+                    setSegmentStatus(`Saved ${lodAccentSamples.length} accent pick${lodAccentSamples.length === 1 ? '' : 's'}. Rebuild LODs to apply.`);
+                } catch (error) {
+                    setSegmentStatus(error.message, true);
+                } finally {
+                    lodSegmentSave.disabled = false;
+                    lodSegmentSave.classList.remove('opacity-70', 'cursor-not-allowed');
+                }
+            });
+        }
 
         const lodRebuildRun = document.getElementById('lod-rebuild-run');
         if (lodRebuildRun) {

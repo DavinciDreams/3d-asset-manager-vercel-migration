@@ -1157,6 +1157,60 @@ def test_color_bucket_flatten_splits_textured_triangles():
     assert "images" not in out_gltf
 
 
+def test_color_bucket_flatten_uses_saved_segment_samples():
+    import app.api as api
+    from PIL import Image
+
+    image = Image.new("RGBA", (2, 1), (45, 170, 45, 255))
+    image_io = io.BytesIO()
+    image.save(image_io, format="PNG")
+    image_bytes = image_io.getvalue()
+
+    positions = struct.pack(
+        "<18f",
+        0, 0, 0, 1, 0, 0, 0, 1, 0,
+        1, 0, 0, 2, 0, 0, 1, 1, 0,
+    )
+    uvs = struct.pack(
+        "<12f",
+        0.1, 0.5, 0.2, 0.5, 0.1, 0.5,
+        0.8, 0.5, 0.9, 0.5, 0.8, 0.5,
+    )
+    indices = struct.pack("<6H", 0, 1, 2, 3, 4, 5)
+    bin_chunk = positions + uvs + indices + image_bytes
+    image_offset = len(positions) + len(uvs) + len(indices)
+    gltf = {
+        "asset": {"version": "2.0"},
+        "buffers": [{"byteLength": len(bin_chunk)}],
+        "bufferViews": [
+            {"buffer": 0, "byteOffset": 0, "byteLength": len(positions), "target": 34962},
+            {"buffer": 0, "byteOffset": len(positions), "byteLength": len(uvs), "target": 34962},
+            {"buffer": 0, "byteOffset": len(positions) + len(uvs), "byteLength": len(indices), "target": 34963},
+            {"buffer": 0, "byteOffset": image_offset, "byteLength": len(image_bytes)},
+        ],
+        "accessors": [
+            {"bufferView": 0, "componentType": 5126, "count": 6, "type": "VEC3"},
+            {"bufferView": 1, "componentType": 5126, "count": 6, "type": "VEC2"},
+            {"bufferView": 2, "componentType": 5123, "count": 6, "type": "SCALAR"},
+        ],
+        "images": [{"bufferView": 3, "mimeType": "image/png"}],
+        "textures": [{"source": 0}],
+        "materials": [{"pbrMetallicRoughness": {"baseColorTexture": {"index": 0}}}],
+        "meshes": [{"primitives": [{"attributes": {"POSITION": 0, "TEXCOORD_0": 1}, "indices": 2, "material": 0}]}],
+    }
+
+    out = api._flatten_lod_glb_materials(
+        _minimal_glb(gltf, bin_chunk),
+        color=[0.2, 0.6, 0.2, 1],
+        accent_color=[0.9, 0.3, 0.1, 1],
+        color_buckets=True,
+        segment_samples=[{"uv": [0.85, 0.5], "material_index": 0, "radius": 0.08}],
+    )
+    out_gltf = api._gltf_json_from_bytes(out, "glb")
+    assert len(out_gltf["meshes"][0]["primitives"]) == 2
+    assert {primitive["material"] for primitive in out_gltf["meshes"][0]["primitives"]} == {0, 1}
+
+
 def test_lod_optimizer_decodes_draco_sources_before_gltfpack(monkeypatch, tmp_path):
     import app.api as api
     import shutil
@@ -3108,6 +3162,8 @@ def test_game_optimization_job_generates_lods_for_one_model(monkeypatch):
     assert "Rebuild LODs" in html
     assert 'id="lod3-flat-color"' in html
     assert 'id="lod3-flat-accent-color"' in html
+    assert 'id="lod-segment-pick"' in html
+    assert 'id="lod-segment-save"' in html
     assert "Generate LODs" not in html
 
     response = client.post(

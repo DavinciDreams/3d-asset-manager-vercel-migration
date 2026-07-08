@@ -277,13 +277,70 @@ def _color_bucket_accent_max_ratio():
         return 0.22
 
 
-def _color_bucket_flatten_lod_glb_materials(glb_bytes, *, foliage_color=None, accent_color=None):
+def _lod_color_segment_samples(model):
+    metadata = getattr(model, 'runtime_metadata', None)
+    if not isinstance(metadata, dict):
+        return []
+    segments = metadata.get('lod_color_segments')
+    if not isinstance(segments, dict):
+        return []
+    samples = segments.get('accent_samples')
+    if not isinstance(samples, list):
+        return []
+    clean = []
+    for sample in samples:
+        if not isinstance(sample, dict):
+            continue
+        uv = sample.get('uv')
+        if not isinstance(uv, (list, tuple)) or len(uv) < 2:
+            continue
+        try:
+            clean.append({
+                'uv': [float(uv[0]), float(uv[1])],
+                'material_index': int(sample.get('material_index') or 0),
+                'radius': max(0.005, min(0.25, float(sample.get('radius') or 0.045))),
+            })
+        except (TypeError, ValueError):
+            continue
+    return clean[:24]
+
+
+def _wrapped_uv_distance(a, b):
+    du = abs(float(a[0]) - float(b[0]))
+    dv = abs(float(a[1]) - float(b[1]))
+    du = min(du, 1.0 - du)
+    dv = min(dv, 1.0 - dv)
+    return math.sqrt(du * du + dv * dv)
+
+
+def _triangle_near_segment_sample(triangle_uvs, texture_transform, material_index, segment_samples):
+    if not segment_samples:
+        return False
+    transformed_triangle_uvs = [_apply_texture_transform(uv, texture_transform) for uv in triangle_uvs]
+    centroid = [
+        sum(uv[0] for uv in transformed_triangle_uvs) / 3.0,
+        sum(uv[1] for uv in transformed_triangle_uvs) / 3.0,
+    ]
+    for sample in segment_samples:
+        if int(sample.get('material_index') or 0) != int(material_index or 0):
+            continue
+        sample_uv = _apply_texture_transform(sample['uv'], texture_transform)
+        radius = float(sample.get('radius') or 0.045)
+        if _wrapped_uv_distance(centroid, sample_uv) <= radius:
+            return True
+        if any(_wrapped_uv_distance(uv, sample_uv) <= radius for uv in transformed_triangle_uvs):
+            return True
+    return False
+
+
+def _color_bucket_flatten_lod_glb_materials(glb_bytes, *, foliage_color=None, accent_color=None, segment_samples=None):
     gltf, bin_chunk = _glb_json_and_bin(glb_bytes)
     meshes = gltf.get('meshes') or []
     if not meshes:
         raise ValueError('No meshes for color bucketing.')
     foliage_color = foliage_color or [0.30, 0.42, 0.20, 1.0]
     accent_color = accent_color or [0.85, 0.28, 0.12, 1.0]
+    segment_samples = segment_samples or []
 
     new_bin = bytearray(bin_chunk)
     new_views = list(gltf.get('bufferViews') or [])
@@ -313,10 +370,16 @@ def _color_bucket_flatten_lod_glb_materials(glb_bytes, *, foliage_color=None, ac
                 tri = indices[tri_start:tri_start + 3]
                 triangle_uvs = [[float(uvs[index][0]), float(uvs[index][1])] for index in tri]
                 votes, accent_score = _texture_bucket_votes_for_triangle(image, width, height, triangle_uvs, texture_transform)
-                triangle_records.append((tri, votes, accent_score))
+                from_sample = _triangle_near_segment_sample(
+                    triangle_uvs,
+                    texture_transform,
+                    primitive.get('material') or 0,
+                    segment_samples,
+                )
+                triangle_records.append((tri, votes, accent_score, from_sample))
             accent_candidates = [
-                (tri, votes, accent_score)
-                for tri, votes, accent_score in triangle_records
+                (tri, votes, accent_score, from_sample)
+                for tri, votes, accent_score, from_sample in triangle_records
                 if votes['accent'] > votes['foliage']
             ]
             accent_candidates.sort(
@@ -330,7 +393,8 @@ def _color_bucket_flatten_lod_glb_materials(glb_bytes, *, foliage_color=None, ac
             if accent_candidates:
                 accent_limit = max(1, accent_limit)
             accent_ids = {id(record[0]) for record in accent_candidates[:accent_limit]}
-            for tri, _votes, _accent_score in triangle_records:
+            accent_ids.update(id(tri) for tri, _votes, _accent_score, from_sample in triangle_records if from_sample)
+            for tri, _votes, _accent_score, _from_sample in triangle_records:
                 bucket_name = 'accent' if id(tri) in accent_ids else 'foliage'
                 buckets[bucket_name].extend(tri)
             for bucket_name, bucket_indices in buckets.items():
@@ -420,12 +484,13 @@ def _minimal_glb_bytes(gltf, bin_chunk=None):
     return bytes(out)
 
 
-def _flatten_lod_glb_materials(glb_bytes, *, color=None, accent_color=None, color_buckets=False):
+def _flatten_lod_glb_materials(glb_bytes, *, color=None, accent_color=None, color_buckets=False, segment_samples=None):
     if color_buckets:
         return _color_bucket_flatten_lod_glb_materials(
             glb_bytes,
             foliage_color=color,
             accent_color=accent_color,
+            segment_samples=segment_samples,
         )
     flat_color = color or [0.30, 0.42, 0.20, 1.0]
 
@@ -5762,6 +5827,7 @@ def _run_lod_optimizer(model, owner_id=None, levels=None):
     source_runtime = _file_derived_metadata(src_bytes, src_fmt)[1]
     source_mesh_stats = source_runtime.get('mesh_stats')
     source_physical = source_runtime.get('physical')
+    segment_samples = _lod_color_segment_samples(model)
     fs = current_app.config['FILE_STORE']
     original_size = len(src_bytes)
     generated = []
@@ -5824,6 +5890,7 @@ def _run_lod_optimizer(model, owner_id=None, levels=None):
                             color=flat_material_color,
                             accent_color=flat_material_accent_color,
                             color_buckets=True,
+                            segment_samples=segment_samples,
                         ))
                     flat_material_stage = 'post_simplification_color_buckets'
                     flat_report_path = os.path.join(workdir, f'lod{level}-color-bucket-flat.json')
@@ -5909,6 +5976,7 @@ def _run_lod_optimizer(model, owner_id=None, levels=None):
                 'flat_material_color': flat_material_color if flat_material else None,
                 'flat_material_accent_color': flat_material_accent_color if flat_material else None,
                 'flat_material_stage': flat_material_stage if flat_material else None,
+                'flat_material_segment_sample_count': len(segment_samples) if flat_material else 0,
                 'target_vertices': config.get('target_vertices'),
                 'compression_mode': compression_mode,
                 'defaults_version': LOD_OPTIMIZE_DEFAULTS_VERSION,
@@ -5939,6 +6007,7 @@ def _run_lod_optimizer(model, owner_id=None, levels=None):
                 'flat_material_color': flat_material_color if flat_material else None,
                 'flat_material_accent_color': flat_material_accent_color if flat_material else None,
                 'flat_material_stage': flat_material_stage if flat_material else None,
+                'flat_material_segment_sample_count': len(segment_samples) if flat_material else 0,
                 'target_vertices': config.get('target_vertices'),
                 'compression_mode': compression_mode,
                 'original_size': original_size,
