@@ -139,6 +139,25 @@ def _flatten_lod_glb_materials(glb_bytes, *, color=None):
     return _rewrite_glb_json(glb_bytes, rewrite)
 
 
+def _lod_flat_material_color():
+    raw = (os.environ.get('LOD3_FLAT_COLOR') or os.environ.get('LOD_FLAT_COLOR') or '').strip()
+    fallback = [0.30, 0.42, 0.20, 1.0]
+    if not raw:
+        return fallback
+    try:
+        if raw.startswith('#') and len(raw) in {7, 9}:
+            channels = [int(raw[i:i + 2], 16) / 255 for i in range(1, len(raw), 2)]
+            return channels if len(channels) == 4 else [*channels, 1.0]
+        parts = [float(part.strip()) for part in raw.split(',') if part.strip()]
+        if len(parts) in {3, 4}:
+            if any(part > 1 for part in parts):
+                parts = [part / 255 for part in parts]
+            return parts if len(parts) == 4 else [*parts, 1.0]
+    except Exception:
+        pass
+    return fallback
+
+
 def _force_meshopt_required_for_external_fallback(glb_bytes):
     """Repair old gltfpack -cf GLBs that reference a missing *.fallback.bin.
 
@@ -5791,7 +5810,7 @@ GAME_OPTIMIZE_PRESETS = {
     },
 }
 
-LOD_OPTIMIZE_DEFAULTS_VERSION = '2026-07-07-lod2-tune-016'
+LOD_OPTIMIZE_DEFAULTS_VERSION = '2026-07-07-lod2-safe-lod3-flat-color'
 LOD_OPTIMIZE_LEVELS = [
     {
         'level': 0,
@@ -5813,27 +5832,30 @@ LOD_OPTIMIZE_LEVELS = [
     },
     {
         'level': 2,
-        # Tune down gently from LOD1's known-good textured profile. Keep the
-        # aggressive/permissive UV-friendly simplifier path and texture budget.
+        # LOD1's gltfpack profile is the known-good textured result for
+        # leaf-heavy generated meshes. Keep LOD2 visually safe; true far
+        # distance should use the impostor variant.
         'texture_limit': 512,
-        'simplify_ratio': 0.16,
+        'simplify_ratio': 0.18,
         'simplification_error': 0.03,
         'aggressive': True,
         'permissive': True,
-        'target_vertices': 16000,
+        'target_vertices': 20000,
         'compression_mode': 'meshopt',
         'role': 'far/large-fill',
     },
     {
         'level': 3,
-        'texture_limit': 512,
-        'simplify_ratio': 0.14,
-        'simplification_error': 0.015,
+        'texture_limit': 0,
+        'simplify_ratio': 0.015,
+        'simplification_error': 0.08,
         'aggressive': True,
         'permissive': True,
-        'target_vertices': 5000,
+        'flat_material': True,
+        'flat_material_color': _lod_flat_material_color(),
+        'target_vertices': 500,
         'compression_mode': 'meshopt',
-        'role': 'ultra-far/textured-proxy',
+        'role': 'ultra-far/flat-proxy',
     },
 ]
 

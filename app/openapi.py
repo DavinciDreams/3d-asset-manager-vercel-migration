@@ -358,7 +358,7 @@ def get_openapi_spec(base_url=''):
                         'status': {'type': 'string', 'example': 'ready'},
                         'settings': {
                             'type': 'object',
-                            'description': 'LOD generation settings and runtime cost metadata. LOD1 targets mid/fill use with target_vertices=20000; LOD2 gently tunes down from the known-good textured simplification profile for visible world placement; LOD3 is the small deformed textured proxy. The impostor variant remains the preferred true far-distance representation.',
+                            'description': 'LOD generation settings and runtime cost metadata. LOD1 targets mid/fill use with target_vertices=20000; LOD2 uses the known-good textured simplification profile for visible world placement; LOD3 is a tiny flat-color proxy with color controlled by LOD3_FLAT_COLOR / LOD_FLAT_COLOR. The impostor variant remains the preferred true far-distance representation.',
                         },
                         'mesh_stats': {'$ref': '#/components/schemas/MeshStats'},
                         'physical': {'type': 'object', 'nullable': True},
