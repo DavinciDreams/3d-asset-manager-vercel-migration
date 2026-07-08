@@ -1098,6 +1098,26 @@ let GAME_VARIANT_IS_DEFAULT = {{ game_variant_current | tojson }};
 let GAME_VARIANT_USES_FIXED = {{ game_variant_uses_fixed | tojson }};
 let GAME_VARIANT_USES_RIGGED = {{ game_variant_uses_rigged | tojson }};
 let DETAIL_LOAD_TOKEN = 0;
+const VARIANT_CACHE_KEYS = {
+    {% if game_variant %}
+    game: {{ ((game_variant.updated_at.isoformat() if game_variant.updated_at else game_variant.file_id) | tojson) }},
+    {% endif %}
+    {% if fixed_eyes_variant %}
+    fixed_eyes: {{ ((fixed_eyes_variant.updated_at.isoformat() if fixed_eyes_variant.updated_at else fixed_eyes_variant.file_id) | tojson) }},
+    {% endif %}
+    {% if rigged_variant %}
+    rigged: {{ ((rigged_variant.updated_at.isoformat() if rigged_variant.updated_at else rigged_variant.file_id) | tojson) }},
+    {% endif %}
+    {% for lod_variant in lod_variants %}
+    lod{{ lod_variant.level }}: {{ ((lod_variant.updated_at.isoformat() if lod_variant.updated_at else lod_variant.file_id) | tojson) }},
+    {% endfor %}
+};
+
+function variantUrlWithCacheKey(url, variant) {
+    const key = VARIANT_CACHE_KEYS[variant];
+    if (!url || !key) return url;
+    return `${url}${url.includes('?') ? '&' : '?'}v=${encodeURIComponent(key)}`;
+}
 
 // The best variant to show in the main preview: game-optimized when it includes
 // the newest baked/animated source -> animated source -> fixed-eyes -> existing
@@ -1137,6 +1157,7 @@ function loadDetailModel(modelId, variant, opts = {}) {
     } else if (variant === 'rigged') {
         srcUrl = `/api/model/${modelId}/rigged`;
     }
+    srcUrl = variantUrlWithCacheKey(srcUrl, variant);
 
     try {
         const handleDetailLoad = () => {

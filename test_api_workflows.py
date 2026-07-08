@@ -2811,6 +2811,13 @@ def test_tellus_asset_lod_routes_serve_variants_under_original_asset_id():
     assert detail_model["impostor"]["role"] == "far/octahedral"
     assert detail_model["impostor"]["url"].endswith(f"/api/assets/model/{model.id}/impostor")
 
+    page = client.get(f"/model/{model.id}")
+    assert page.status_code == 200
+    page_html = page.get_data(as_text=True)
+    assert "VARIANT_CACHE_KEYS" in page_html
+    assert "variantUrlWithCacheKey" in page_html
+    assert "lod1:" in page_html
+
     game = client.get(f"/api/assets/model/{model.id}/game-optimized")
     assert game.status_code == 200
     assert game.headers["Content-Type"] == "model/gltf-binary"
@@ -2824,6 +2831,7 @@ def test_tellus_asset_lod_routes_serve_variants_under_original_asset_id():
     lod1 = client.get(f"/api/assets/model/{model.id}/lod/1")
     assert lod1.status_code == 200
     assert lod1.headers["ETag"].startswith('"lod-1-')
+    assert lod1.headers["Cache-Control"] == "public, max-age=0, must-revalidate"
     assert lod1.data == lod1_bytes
 
     lod2 = client.get(f"/api/assets/model/{model.id}/lod/2")

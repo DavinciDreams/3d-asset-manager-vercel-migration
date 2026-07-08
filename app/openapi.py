@@ -1371,7 +1371,7 @@ def get_openapi_spec(base_url=''):
                         'Returns the game-optimized GLB attached to the model '
                         '(created via /model/{id}/optimize-game). Inline by '
                         'default; pass `download=1` for an attachment. Supports '
-                        'HTTP Range + ETag + immutable cache. 404 if the model has '
+                        'HTTP Range + ETag revalidation. 404 if the model has '
                         'no game-optimized variant yet.'
                     ),
                     'parameters': [
@@ -1406,7 +1406,7 @@ def get_openapi_spec(base_url=''):
                     'description': (
                         'Stable Tellus/game backend URL for the near runtime GLB. '
                         'Serves the explicit game variant when present; otherwise falls back to '
-                        'ModelVariant(kind=lod, level=0). Supports HTTP Range + ETag + immutable cache.'
+                        'ModelVariant(kind=lod, level=0). Supports HTTP Range + ETag revalidation.'
                     ),
                     'parameters': [
                         {'name': 'model_id', 'in': 'path', 'required': True, 'schema': {'type': 'string'}},

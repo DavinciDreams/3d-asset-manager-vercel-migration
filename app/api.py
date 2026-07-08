@@ -1243,7 +1243,10 @@ def _serve_variant_file(model, variant, *, etag_prefix, filename_suffix):
     file_id = variant.file_id
     fmt = (variant.file_format or 'glb').lower()
     etag = f'"{etag_prefix}-{file_id}"'
-    cache_control = 'public, max-age=31536000, immutable'
+    # Variant routes are stable URLs whose backing file_id can change after a
+    # rebuild. Keep ETag support, but force revalidation so viewers do not keep
+    # rendering stale LOD/game variants after metadata has updated.
+    cache_control = 'public, max-age=0, must-revalidate'
     as_download = request.args.get('download') in ('1', 'true', 'yes')
     content_type = _mime_for(fmt)
     download_name = f'{_safe_stem(model)}-{filename_suffix}.{fmt}'
