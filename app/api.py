@@ -6108,7 +6108,7 @@ def _octahedral_impostor_source_bytes(model, *, atlas_size=2048, grid_size=31):
 
 def _run_impostor_generator(model, owner_id=None, *, size=512):
     """Generate a far-field impostor texture under ModelVariant(kind=impostor)."""
-    if os.environ.get('AUTO_IMPOSTOR_GENERATE', '1').lower() in {'0', 'false', 'no', 'off'}:
+    if os.environ.get('AUTO_IMPOSTOR_GENERATE', '0').lower() in {'0', 'false', 'no', 'off'}:
         return {
             'success': False,
             'skipped': True,
@@ -7023,7 +7023,7 @@ def _lod_variants_complete(model):
 
 
 def _optimize_missing_lod_variants(limit=2, *, force=False):
-    if os.environ.get('AUTO_LOD_OPTIMIZE', '1').lower() in {'0', 'false', 'no', 'off'}:
+    if os.environ.get('AUTO_LOD_OPTIMIZE', '0').lower() in {'0', 'false', 'no', 'off'}:
         return {'optimized': 0, 'failed': 0, 'skipped': 0}
     import shutil
     if not shutil.which('gltfpack'):
@@ -7062,7 +7062,7 @@ def _impostor_variant_complete(model):
 
 
 def _generate_missing_impostor_variants(limit=5):
-    if os.environ.get('AUTO_IMPOSTOR_GENERATE', '1').lower() in {'0', 'false', 'no', 'off'}:
+    if os.environ.get('AUTO_IMPOSTOR_GENERATE', '0').lower() in {'0', 'false', 'no', 'off'}:
         return {'generated': 0, 'failed': 0, 'skipped': 0, 'disabled': True}
     limit = max(1, min(int(limit or 5), 50))
     result = {'generated': 0, 'failed': 0, 'skipped': 0, 'remaining': 0}
@@ -7238,10 +7238,10 @@ def _reconcile_asset_pipeline_once(app, *, optimize_limit=None, lod_limit=None, 
                 optimize_limit or int(os.environ.get('PIPELINE_OPTIMIZE_LIMIT', '3'))
             )
             lod = _optimize_missing_lod_variants(
-                lod_limit if lod_limit is not None else int(os.environ.get('PIPELINE_LOD_LIMIT', '2'))
+                lod_limit if lod_limit is not None else int(os.environ.get('PIPELINE_LOD_LIMIT', '1'))
             )
             impostors = _generate_missing_impostor_variants(
-                impostor_limit if impostor_limit is not None else int(os.environ.get('PIPELINE_IMPOSTOR_LIMIT', '5'))
+                impostor_limit if impostor_limit is not None else int(os.environ.get('PIPELINE_IMPOSTOR_LIMIT', '1'))
             )
             conversions = _requeue_missing_conversions(
                 conversion_limit or int(os.environ.get('PIPELINE_CONVERSION_LIMIT', '20'))

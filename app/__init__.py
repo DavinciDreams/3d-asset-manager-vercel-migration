@@ -77,9 +77,10 @@ def create_app():
         except Exception as e:
             print(f"AI enrichment worker failed to start: {e}")
 
-    pipeline_reconciler_enabled = os.environ.get("PIPELINE_RECONCILER_WORKER")
-    if pipeline_reconciler_enabled is None:
-        pipeline_reconciler_enabled = "1" if has_configured_database else "0"
+    # Heavy catalog-wide repair jobs must be explicitly enabled in production.
+    # A defaults-version bump can make every asset look stale at once, so the
+    # reconciler should not start merely because a database is configured.
+    pipeline_reconciler_enabled = os.environ.get("PIPELINE_RECONCILER_WORKER", "0")
     if pipeline_reconciler_enabled.lower() not in {"0", "false", "no", "off"}:
         try:
             start_pipeline_reconciler_worker(app)
