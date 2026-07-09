@@ -65,6 +65,27 @@ def _load_scene(glb_bytes, file_type):
     return scene
 
 
+def _iter_transformed_meshes(scene_tm):
+    """Yield meshes with scene graph transforms applied.
+
+    gltfpack/meshopt assets often store quantized integer geometry under a node
+    transform. scene.bounds includes that transform, but scene.geometry.values()
+    does not. Rendering raw geometry would frame the transformed unit-scale
+    bounds while drawing huge 0..16383 meshes, producing empty/cropped captures.
+    """
+    import trimesh
+
+    if isinstance(scene_tm, trimesh.Scene):
+        dumped = scene_tm.dump()
+        if not isinstance(dumped, list):
+            dumped = [dumped]
+        for geom in dumped:
+            if isinstance(geom, trimesh.Trimesh) and len(geom.faces):
+                yield geom
+    else:
+        yield scene_tm
+
+
 def render_glb_to_png(glb_bytes, file_type='glb', size=1024, *, decompress=None):
     """Render GLB/GLTF bytes to PNG bytes (RGB on white).
 
@@ -100,7 +121,7 @@ def render_glb_to_png(glb_bytes, file_type='glb', size=1024, *, decompress=None)
 
     scene = pyrender.Scene(bg_color=[1.0, 1.0, 1.0, 1.0], ambient_light=[0.35, 0.35, 0.35])
 
-    for geom in scene_tm.geometry.values():
+    for geom in _iter_transformed_meshes(scene_tm):
         try:
             mesh = pyrender.Mesh.from_trimesh(geom, smooth=False)
             scene.add(mesh)
@@ -200,7 +221,7 @@ def render_glb_to_octahedral_atlas(
     transform[:3, :3] *= scale
     transform[:3, 3] = -center * scale
 
-    for geom in scene_tm.geometry.values():
+    for geom in _iter_transformed_meshes(scene_tm):
         try:
             mesh = pyrender.Mesh.from_trimesh(geom, smooth=False)
             scene.add(mesh, pose=transform, parent_node=root)
@@ -231,7 +252,10 @@ def render_glb_to_octahedral_atlas(
                 scene.set_pose(cam_node, pose=pose)
                 scene.set_pose(light_node, pose=pose)
                 color, _ = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
-                cell = Image.fromarray(color, mode='RGBA')
+                if color.shape[-1] == 3:
+                    alpha = np.full(color.shape[:2] + (1,), 255, dtype=color.dtype)
+                    color = np.concatenate([color, alpha], axis=2)
+                cell = Image.fromarray(color[:, :, :4], mode='RGBA')
                 atlas.alpha_composite(cell, (col * cell_size, row * cell_size))
     except Exception as e:
         raise RenderError(f'Octahedral impostor bake failed: {e}')
