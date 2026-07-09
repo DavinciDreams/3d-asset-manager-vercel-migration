@@ -59,6 +59,10 @@ RUN cd /app/tools && npm install --omit=dev
 # Install Python dependencies first (better layer caching)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+# pyrender declares PyOpenGL==3.1.0, but that build lacks
+# OSMesaCreateContextAttribs on current slim Linux images. Force the newer
+# PyOpenGL after dependency resolution so OSMesa offscreen rendering works.
+RUN pip install --no-cache-dir --upgrade --no-deps PyOpenGL==3.1.7
 
 # Copy application code
 COPY . .

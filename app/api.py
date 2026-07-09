@@ -10,6 +10,7 @@ from app.permissions import asset_admin_configured, can_manage_model, is_asset_a
 from pathlib import Path
 from werkzeug.datastructures import FileStorage
 import base64
+import colorsys
 import hashlib
 import hmac
 import io
@@ -473,6 +474,218 @@ def _color_bucket_flatten_lod_glb_materials(glb_bytes, *, foliage_color=None, ac
     else:
         gltf.pop('extensionsRequired', None)
     return _minimal_glb_bytes(gltf, bytes(new_bin))
+
+
+def _trimesh_scene_meshes(obj):
+    import trimesh
+
+    if isinstance(obj, trimesh.Scene):
+        dumped = obj.dump()
+        if not isinstance(dumped, list):
+            dumped = [dumped]
+        return [mesh.copy() for mesh in dumped if isinstance(mesh, trimesh.Trimesh) and len(mesh.faces)]
+    return [obj.copy()] if isinstance(obj, trimesh.Trimesh) and len(obj.faces) else []
+
+
+def _trimesh_image_array(image):
+    if image is None:
+        return None
+    from PIL import Image
+    import numpy as np
+
+    if isinstance(image, Image.Image):
+        arr = np.asarray(image.convert('RGB'))
+    else:
+        arr = np.asarray(image)
+        if arr.ndim == 3 and arr.shape[-1] >= 3:
+            arr = arr[..., :3]
+        else:
+            return None
+    return np.asarray(arr, dtype=np.uint8)
+
+
+def _trimesh_sample_texture(mesh):
+    import numpy as np
+
+    visual = getattr(mesh, 'visual', None)
+    uv = getattr(visual, 'uv', None)
+    material = getattr(visual, 'material', None)
+    image = _trimesh_image_array(getattr(material, 'image', None))
+    if image is None:
+        image = _trimesh_image_array(getattr(material, 'baseColorTexture', None))
+    if uv is None or image is None or len(uv) == 0:
+        return None
+
+    face_uv = uv[mesh.faces].mean(axis=1)
+    h, w = image.shape[:2]
+    u = np.clip(face_uv[:, 0], 0.0, 1.0)
+    v = np.clip(face_uv[:, 1], 0.0, 1.0)
+    x = np.rint(u * (w - 1)).astype(np.int64)
+    y = np.rint((1.0 - v) * (h - 1)).astype(np.int64)
+    return image[y, x, :3]
+
+
+def _trimesh_face_colors(mesh):
+    import numpy as np
+
+    sampled = _trimesh_sample_texture(mesh)
+    if sampled is not None:
+        return sampled
+
+    colors = getattr(mesh.visual, 'face_colors', None)
+    if colors is not None and len(colors) == len(mesh.faces):
+        return np.asarray(colors[:, :3], dtype=np.uint8)
+
+    vcolors = getattr(mesh.visual, 'vertex_colors', None)
+    if vcolors is not None and len(vcolors) == len(mesh.vertices):
+        return np.asarray(vcolors[mesh.faces, :3].mean(axis=1), dtype=np.uint8)
+
+    return np.full((len(mesh.faces), 3), 128, dtype=np.uint8)
+
+
+def _palette_cluster_features(rgb):
+    import numpy as np
+
+    values = rgb.astype(np.float32) / 255.0
+    hsv = np.array([colorsys.rgb_to_hsv(*px) for px in values], dtype=np.float32)
+    hue = hsv[:, 0] * math.tau
+    sat = hsv[:, 1]
+    val = hsv[:, 2]
+    return np.column_stack([
+        np.cos(hue) * sat,
+        np.sin(hue) * sat,
+        sat,
+        val,
+        values[:, 0] * 0.45,
+        values[:, 1] * 0.45,
+        values[:, 2] * 0.45,
+    ]).astype(np.float32)
+
+
+def _source_auto_palette_lod_glb(source_bytes, target_bytes, *, min_cluster_ratio=0.10, palette_clusters=8, seed=42):
+    """Recolor a simplified LOD by clustering the original source texture.
+
+    The source mesh keeps the high-quality color signal. The target mesh keeps
+    the simplified shape. Labels are transferred by nearest transformed face
+    center, then exported as textureless vertex-color GLB.
+    """
+    import numpy as np
+    import trimesh
+    from scipy.cluster.vq import kmeans2
+    from scipy.spatial import cKDTree
+
+    source_obj = trimesh.load(io.BytesIO(source_bytes), file_type='glb', force='scene', process=False)
+    target_obj = trimesh.load(io.BytesIO(target_bytes), file_type='glb', force='scene', process=False)
+
+    source_centers = []
+    source_rgb = []
+    source_areas = []
+    for mesh in _trimesh_scene_meshes(source_obj):
+        source_centers.append(np.asarray(mesh.triangles_center, dtype=np.float32))
+        source_rgb.append(_trimesh_face_colors(mesh))
+        source_areas.append(np.asarray(mesh.area_faces, dtype=np.float64))
+    if not source_centers:
+        raise ValueError('No source faces available for auto-palette LOD recolor.')
+
+    centers = np.concatenate(source_centers, axis=0)
+    rgb = np.concatenate(source_rgb, axis=0)
+    areas = np.concatenate(source_areas, axis=0)
+    features = _palette_cluster_features(rgb)
+    cluster_count = max(2, min(int(palette_clusters or 8), len(features)))
+    np.random.seed(int(seed or 42))
+    centroids, raw_labels = kmeans2(features, cluster_count, iter=40, minit='points', missing='warn')
+
+    total_area = float(areas.sum())
+    raw_stats = []
+    for raw_index in range(cluster_count):
+        mask = raw_labels == raw_index
+        area = float(areas[mask].sum())
+        color = np.median(rgb[mask], axis=0).astype(np.uint8) if mask.any() else np.array([128, 128, 128], dtype=np.uint8)
+        raw_stats.append({
+            'raw_cluster': int(raw_index),
+            'faces': int(mask.sum()),
+            'area': area,
+            'area_ratio': (area / total_area) if total_area else 0.0,
+            'rgb': color.tolist(),
+        })
+
+    kept = [s['raw_cluster'] for s in raw_stats if s['area_ratio'] >= float(min_cluster_ratio or 0.10)]
+    if not kept:
+        kept = [max(raw_stats, key=lambda s: s['area_ratio'])['raw_cluster']]
+    kept = sorted(kept, key=lambda idx: raw_stats[idx]['area_ratio'], reverse=True)
+    kept_centroids = centroids[kept]
+    palette = np.array([raw_stats[idx]['rgb'] for idx in kept], dtype=np.uint8)
+    raw_to_kept = {}
+    for raw_index in range(cluster_count):
+        distances = np.linalg.norm(kept_centroids - centroids[raw_index], axis=1)
+        raw_to_kept[raw_index] = int(np.argmin(distances))
+    source_labels = np.array([raw_to_kept[int(raw)] for raw in raw_labels], dtype=np.int32)
+    source_tree = cKDTree(centers)
+
+    scene = trimesh.Scene()
+    total_faces = 0
+    transfer_distances = []
+    target_label_counts = [0 for _ in palette]
+    for index, mesh in enumerate(_trimesh_scene_meshes(target_obj)):
+        distances, source_indices = source_tree.query(
+            np.asarray(mesh.triangles_center, dtype=np.float32),
+            k=1,
+            workers=-1,
+        )
+        labels = source_labels[source_indices]
+        for label in labels:
+            target_label_counts[int(label)] += 1
+        transfer_distances.append(np.asarray(distances, dtype=np.float32))
+        face_colors = palette[np.clip(labels, 0, len(palette) - 1)]
+        rgba = np.concatenate(
+            [face_colors.astype(np.uint8), np.full((len(face_colors), 1), 255, dtype=np.uint8)],
+            axis=1,
+        )
+        out = trimesh.Trimesh(
+            vertices=np.asarray(mesh.vertices),
+            faces=np.asarray(mesh.faces),
+            process=False,
+        )
+        out.visual = trimesh.visual.ColorVisuals(mesh=out, face_colors=rgba)
+        scene.add_geometry(out, node_name=f'auto_palette_part_{index}')
+        total_faces += len(mesh.faces)
+
+    if total_faces <= 0:
+        raise ValueError('No target faces available for auto-palette LOD recolor.')
+
+    final_stats = []
+    for final_index, raw_index in enumerate(kept):
+        mask = source_labels == final_index
+        area = float(areas[mask].sum())
+        final_stats.append({
+            'index': int(final_index),
+            'primary_raw_cluster': int(raw_index),
+            'source_faces': int(mask.sum()),
+            'target_faces': int(target_label_counts[final_index]),
+            'source_area': area,
+            'source_area_ratio': (area / total_area) if total_area else 0.0,
+            'target_face_ratio': (target_label_counts[final_index] / total_faces) if total_faces else 0.0,
+            'rgb': palette[final_index].tolist(),
+            'merged_raw_clusters': [int(idx) for idx, mapped in raw_to_kept.items() if mapped == final_index],
+        })
+
+    out_io = io.BytesIO()
+    scene.export(out_io, file_type='glb')
+    distances = np.concatenate(transfer_distances) if transfer_distances else np.array([], dtype=np.float32)
+    return out_io.getvalue(), {
+        'mode': 'source_auto_palette',
+        'source_faces': int(len(source_labels)),
+        'target_faces': int(total_faces),
+        'palette': palette.tolist(),
+        'palette_stats': final_stats,
+        'min_cluster_ratio': float(min_cluster_ratio or 0.10),
+        'palette_clusters': int(palette_clusters or 8),
+        'transfer_distance': {
+            'mean': float(distances.mean()) if len(distances) else None,
+            'p95': float(np.percentile(distances, 95)) if len(distances) else None,
+            'max': float(distances.max()) if len(distances) else None,
+        },
+    }
 
 
 def _minimal_glb_bytes(gltf, bin_chunk=None):
@@ -5851,11 +6064,15 @@ def _run_lod_optimizer(model, owner_id=None, levels=None):
             flat_material_mode = str(config.get('flat_material_mode') or '').strip().lower()
             flat_material_color = config.get('flat_material_color') or [0.30, 0.42, 0.20, 1.0]
             flat_material_accent_color = config.get('flat_material_accent_color') or [0.85, 0.28, 0.12, 1.0]
+            palette_min_cluster_ratio = float(config.get('palette_min_cluster_ratio') or 0.10)
+            palette_clusters = int(config.get('palette_clusters') or 8)
             out_path = os.path.join(workdir, f'lod{level}.glb')
             report_path = os.path.join(workdir, f'lod{level}.json')
             command_input_path = in_path
             flat_material_stage = None
             needs_color_bucket_repack = flat_material and flat_material_mode == 'texture_color_buckets'
+            needs_source_palette_repack = flat_material and flat_material_mode == 'source_auto_palette'
+            source_palette_metadata = None
             cmd = [
                 gltfpack_bin,
                 '-i', command_input_path,
@@ -5869,7 +6086,7 @@ def _run_lod_optimizer(model, owner_id=None, levels=None):
                 cmd.append('-sp')
             if config.get('aggressive'):
                 cmd.append('-sa')
-            if compression_mode == 'meshopt' and not needs_color_bucket_repack:
+            if compression_mode == 'meshopt' and not (needs_color_bucket_repack or needs_source_palette_repack):
                 cmd.append('-cc')
             if texture_limit:
                 cmd.extend(['-tc', '-tl', str(texture_limit)])
@@ -5921,6 +6138,45 @@ def _run_lod_optimizer(model, owner_id=None, levels=None):
                     report_path = flat_report_path
                 except Exception as e:
                     print(f"LOD {level} color bucket flatten fell back to single flat material: {e}", flush=True)
+
+            if needs_source_palette_repack:
+                try:
+                    with open(in_path, 'rb') as f:
+                        prepared_source_bytes = f.read()
+                    with open(out_path, 'rb') as f:
+                        simplified_bytes = f.read()
+                    palette_bytes, source_palette_metadata = _source_auto_palette_lod_glb(
+                        prepared_source_bytes,
+                        simplified_bytes,
+                        min_cluster_ratio=palette_min_cluster_ratio,
+                        palette_clusters=palette_clusters,
+                    )
+                    palette_flat_input_path = os.path.join(workdir, f'lod{level}-source-palette-input.glb')
+                    with open(palette_flat_input_path, 'wb') as f:
+                        f.write(palette_bytes)
+                    flat_material_stage = 'post_simplification_source_auto_palette'
+                    flat_report_path = os.path.join(workdir, f'lod{level}-source-palette.json')
+                    flat_cmd = [
+                        gltfpack_bin,
+                        '-i', palette_flat_input_path,
+                        '-o', out_path,
+                        '-r', flat_report_path,
+                    ]
+                    if compression_mode == 'meshopt':
+                        flat_cmd.append('-cc')
+                    flat_result = subprocess.run(
+                        flat_cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=300,
+                        check=False,
+                    )
+                    if flat_result.returncode != 0:
+                        msg = (flat_result.stderr or flat_result.stdout or 'gltfpack failed.').strip()
+                        raise RuntimeError(f'LOD {level} source palette repack: {msg[-1000:] or "gltfpack failed."}')
+                    report_path = flat_report_path
+                except Exception as e:
+                    print(f"LOD {level} source palette recolor fell back to single flat material: {e}", flush=True)
 
             if flat_material and flat_material_stage is None:
                 with open(out_path, 'rb') as f:
@@ -5983,6 +6239,7 @@ def _run_lod_optimizer(model, owner_id=None, levels=None):
                 'flat_material_accent_color': flat_material_accent_color if flat_material else None,
                 'flat_material_stage': flat_material_stage if flat_material else None,
                 'flat_material_segment_sample_count': len(segment_samples) if flat_material else 0,
+                'source_palette': source_palette_metadata if flat_material else None,
                 'target_vertices': config.get('target_vertices'),
                 'compression_mode': compression_mode,
                 'defaults_version': LOD_OPTIMIZE_DEFAULTS_VERSION,
@@ -6014,6 +6271,7 @@ def _run_lod_optimizer(model, owner_id=None, levels=None):
                 'flat_material_accent_color': flat_material_accent_color if flat_material else None,
                 'flat_material_stage': flat_material_stage if flat_material else None,
                 'flat_material_segment_sample_count': len(segment_samples) if flat_material else 0,
+                'source_palette': source_palette_metadata if flat_material else None,
                 'target_vertices': config.get('target_vertices'),
                 'compression_mode': compression_mode,
                 'original_size': original_size,
@@ -6071,7 +6329,7 @@ def _impostor_source_image_bytes(model, *, render_size=512):
     if not render_mod.render_available():
         raise RuntimeError('Server render stack unavailable and no thumbnail exists.')
     try:
-        data, view_fmt = model.get_viewable_data()
+        data, view_fmt, _source_variant_kind = _impostor_mesh_source_bytes(model)
     except Exception as e:
         raise RuntimeError('No viewable mesh available for impostor generation.') from e
     if not data or data[:4] != b'glTF':
@@ -6085,12 +6343,28 @@ def _impostor_source_image_bytes(model, *, render_size=512):
     return png, 'server_render'
 
 
+def _impostor_mesh_source_bytes(model):
+    fs = current_app.config['FILE_STORE']
+    for level in (2, 1, 0, 3):
+        variant = ModelVariant.get(model.id, 'lod', level=level)
+        if not variant or not variant.file_id:
+            continue
+        try:
+            data = fs.get(variant.file_id).read()
+            if data and data[:4] == b'glTF':
+                return data, 'glb', f'lod{level}'
+        except Exception as e:
+            print(f"Impostor: could not read LOD{level} for {model.id}: {e}")
+    data, view_fmt = model.get_viewable_data()
+    return data, view_fmt, 'viewable'
+
+
 def _octahedral_impostor_source_bytes(model, *, atlas_size=2048, grid_size=31):
     from app import render as render_mod
     if not render_mod.render_available():
         raise RuntimeError('Server render stack unavailable.')
     try:
-        data, view_fmt = model.get_viewable_data()
+        data, view_fmt, source_variant_kind = _impostor_mesh_source_bytes(model)
     except Exception as e:
         raise RuntimeError('No viewable mesh available for octahedral impostor generation.') from e
     if not data or data[:4] != b'glTF':
@@ -6103,6 +6377,7 @@ def _octahedral_impostor_source_bytes(model, *, atlas_size=2048, grid_size=31):
         oct_type='hemi',
         decompress=lambda b: _decompress_meshopt_glb_bytes(b),
     )
+    bake_metadata['source_variant_kind'] = source_variant_kind
     return png, 'octahedral_server_render', bake_metadata
 
 
@@ -6276,7 +6551,7 @@ GAME_OPTIMIZE_PRESETS = {
     },
 }
 
-LOD_OPTIMIZE_DEFAULTS_VERSION = '2026-07-08-lod2-lod3-color-buckets'
+LOD_OPTIMIZE_DEFAULTS_VERSION = '2026-07-08-source-auto-palette-impostor'
 LOD_OPTIMIZE_LEVELS = [
     {
         'level': 0,
@@ -6298,20 +6573,22 @@ LOD_OPTIMIZE_LEVELS = [
     },
     {
         'level': 2,
-        # Keep the LOD1 geometry profile, but flatten by sampled texture color
-        # after simplification so broken tiny textures do not show in-world.
+        # Keep the LOD1 geometry profile, but assign a tiny semantic palette
+        # from the original source so broken tiny textures/UVs do not show.
         'texture_limit': 0,
         'simplify_ratio': 0.18,
         'simplification_error': 0.03,
         'aggressive': True,
         'permissive': True,
         'flat_material': True,
-        'flat_material_mode': 'texture_color_buckets',
+        'flat_material_mode': 'source_auto_palette',
+        'palette_min_cluster_ratio': 0.10,
+        'palette_clusters': 8,
         'flat_material_color': _lod_flat_material_color(),
         'flat_material_accent_color': _lod_flat_material_color(os.environ.get('LOD3_FLAT_ACCENT_COLOR') or '#d96a28'),
         'target_vertices': 20000,
         'compression_mode': 'meshopt',
-        'role': 'far/two-color-flat-fill',
+        'role': 'far/source-palette-flat-fill',
     },
     {
         'level': 3,
@@ -6321,12 +6598,14 @@ LOD_OPTIMIZE_LEVELS = [
         'aggressive': True,
         'permissive': True,
         'flat_material': True,
-        'flat_material_mode': 'texture_color_buckets',
+        'flat_material_mode': 'source_auto_palette',
+        'palette_min_cluster_ratio': 0.10,
+        'palette_clusters': 8,
         'flat_material_color': _lod_flat_material_color(),
         'flat_material_accent_color': _lod_flat_material_color(os.environ.get('LOD3_FLAT_ACCENT_COLOR') or '#d96a28'),
         'target_vertices': 500,
         'compression_mode': 'meshopt',
-        'role': 'ultra-far/two-color-flat-proxy',
+        'role': 'ultra-far/source-palette-flat-proxy',
     },
 ]
 
