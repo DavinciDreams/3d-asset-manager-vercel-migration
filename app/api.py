@@ -475,6 +475,313 @@ def _color_bucket_flatten_lod_glb_materials(glb_bytes, *, foliage_color=None, ac
     return _minimal_glb_bytes(gltf, bytes(new_bin))
 
 
+def _source_palette_env_int(name, default, minimum=1, maximum=None):
+    try:
+        value = int(os.environ.get(name) or default)
+    except (TypeError, ValueError):
+        value = int(default)
+    value = max(int(minimum), value)
+    if maximum is not None:
+        value = min(int(maximum), value)
+    return value
+
+
+def _request_truthy(value):
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _trimesh_scene_meshes_with_transform(obj):
+    import numpy as np
+    import trimesh
+
+    if isinstance(obj, trimesh.Scene):
+        for node_name in obj.graph.nodes_geometry:
+            try:
+                transform, geometry_name = obj.graph[node_name]
+                mesh = obj.geometry.get(geometry_name)
+                if not isinstance(mesh, trimesh.Trimesh) or not len(mesh.faces):
+                    continue
+                copied = mesh.copy()
+                copied.apply_transform(np.asarray(transform, dtype=np.float64))
+                yield copied
+            except Exception as e:
+                print(f"Source palette mesh transform skipped: {e}", flush=True)
+    elif isinstance(obj, trimesh.Trimesh) and len(obj.faces):
+        yield obj.copy()
+
+
+def _trimesh_image_array(image):
+    import numpy as np
+    from PIL import Image
+
+    if image is None:
+        return None
+    if isinstance(image, np.ndarray):
+        arr = image
+    elif isinstance(image, Image.Image):
+        arr = np.asarray(image.convert('RGBA'))
+    else:
+        try:
+            arr = np.asarray(image)
+        except Exception:
+            return None
+    if arr.ndim == 2:
+        arr = np.stack([arr, arr, arr], axis=-1)
+    if arr.ndim != 3 or arr.shape[2] < 3:
+        return None
+    return arr[:, :, :3].astype(np.uint8, copy=False)
+
+
+def _trimesh_face_colors(mesh):
+    import numpy as np
+
+    visual = getattr(mesh, 'visual', None)
+    uv = getattr(visual, 'uv', None)
+    material = getattr(visual, 'material', None)
+    image = _trimesh_image_array(getattr(material, 'image', None))
+    if uv is not None and image is not None and len(uv):
+        try:
+            face_uv = np.asarray(uv, dtype=np.float32)[np.asarray(mesh.faces, dtype=np.int64)].mean(axis=1)
+            h, w = image.shape[:2]
+            u = np.clip(face_uv[:, 0], 0.0, 1.0)
+            v = np.clip(face_uv[:, 1], 0.0, 1.0)
+            x = np.minimum(w - 1, np.maximum(0, (u * (w - 1)).astype(np.int32)))
+            y = np.minimum(h - 1, np.maximum(0, ((1.0 - v) * (h - 1)).astype(np.int32)))
+            return image[y, x, :3]
+        except Exception as e:
+            print(f"Source palette texture sampling skipped: {e}", flush=True)
+
+    colors = getattr(visual, 'face_colors', None)
+    if colors is not None and len(colors) == len(mesh.faces):
+        return np.asarray(colors[:, :3], dtype=np.uint8)
+
+    vcolors = getattr(visual, 'vertex_colors', None)
+    if vcolors is not None and len(vcolors) == len(mesh.vertices):
+        return np.asarray(vcolors[np.asarray(mesh.faces), :3].mean(axis=1), dtype=np.uint8)
+
+    return np.full((len(mesh.faces), 3), 128, dtype=np.uint8)
+
+
+def _source_palette_features(rgb):
+    import numpy as np
+
+    values = rgb.astype(np.float32) / 255.0
+    cmax = values.max(axis=1, keepdims=True)
+    cmin = values.min(axis=1, keepdims=True)
+    saturation = cmax - cmin
+    brightness = cmax
+    # RGB carries color identity; saturation/brightness helps split flowers,
+    # stems, and soil when hues are close after texture bake.
+    return np.concatenate([values, saturation, brightness], axis=1).astype(np.float32)
+
+
+def _source_palette_kmeans(features, cluster_count, *, seed=42, iterations=18):
+    import numpy as np
+
+    if len(features) == 0:
+        raise ValueError('No source palette features.')
+    cluster_count = max(1, min(int(cluster_count or 8), len(features)))
+    rng = np.random.default_rng(int(seed or 42))
+    initial = rng.choice(len(features), size=cluster_count, replace=False)
+    centers = features[initial].copy()
+    labels = np.zeros((len(features),), dtype=np.int32)
+    for _ in range(max(1, int(iterations or 18))):
+        distances = ((features[:, None, :] - centers[None, :, :]) ** 2).sum(axis=2)
+        new_labels = distances.argmin(axis=1).astype(np.int32)
+        if np.array_equal(labels, new_labels):
+            break
+        labels = new_labels
+        for index in range(cluster_count):
+            mask = labels == index
+            if mask.any():
+                centers[index] = features[mask].mean(axis=0)
+    return centers, labels
+
+
+def _source_palette_nearest_labels(target_centers, source_centers, source_labels, *, chunk_size=256):
+    import numpy as np
+
+    if len(source_centers) == 0:
+        raise ValueError('No sampled source centers for palette transfer.')
+    chunk_size = max(16, int(chunk_size or 256))
+    labels = []
+    for start in range(0, len(target_centers), chunk_size):
+        chunk = np.asarray(target_centers[start:start + chunk_size], dtype=np.float32)
+        distances = ((chunk[:, None, :] - source_centers[None, :, :]) ** 2).sum(axis=2)
+        labels.append(source_labels[distances.argmin(axis=1)])
+    return np.concatenate(labels).astype(np.int32) if labels else np.zeros((0,), dtype=np.int32)
+
+
+def _source_auto_palette_lod_glb(source_bytes, target_bytes, *, min_cluster_ratio=0.10, palette_clusters=8, seed=42):
+    """Recolor a simplified LOD using a bounded palette sampled from source.
+
+    This intentionally avoids SciPy/KD-tree all-face processing. Source faces
+    are sampled, k-means runs on that bounded sample, and nearest transfer is
+    chunked. If an asset is too large or unsupported, callers should fall back
+    to the older texture bucket/single-color path for that one model.
+    """
+    import numpy as np
+    import trimesh
+
+    max_source_bytes = _source_palette_env_int('SOURCE_PALETTE_MAX_SOURCE_MB', 96, 1, 512) * 1024 * 1024
+    max_source_samples = _source_palette_env_int('SOURCE_PALETTE_SOURCE_SAMPLES', 12000, 512, 100000)
+    max_cluster_samples = _source_palette_env_int('SOURCE_PALETTE_CLUSTER_SAMPLES', 50000, 512, 200000)
+    max_target_faces = _source_palette_env_int('SOURCE_PALETTE_MAX_TARGET_FACES', 60000, 1000, 250000)
+    chunk_size = _source_palette_env_int('SOURCE_PALETTE_TRANSFER_CHUNK', 256, 16, 2048)
+
+    if len(source_bytes or b'') > max_source_bytes:
+        raise ValueError(f'Source asset is larger than SOURCE_PALETTE_MAX_SOURCE_MB ({max_source_bytes // 1024 // 1024} MB).')
+
+    source_obj = trimesh.load(io.BytesIO(source_bytes), file_type='glb', force='scene', process=False)
+    target_obj = trimesh.load(io.BytesIO(target_bytes), file_type='glb', force='scene', process=False)
+
+    rng = np.random.default_rng(int(seed or 42))
+    sampled_centers = []
+    sampled_rgb = []
+    sampled_areas = []
+    total_source_faces = 0
+
+    source_meshes = list(_trimesh_scene_meshes_with_transform(source_obj))
+    if not source_meshes:
+        raise ValueError('No source faces available for auto-palette LOD recolor.')
+    per_mesh_budget = max(1, int(math.ceil(max_cluster_samples / max(1, len(source_meshes)))))
+    for mesh in source_meshes:
+        face_count = int(len(mesh.faces))
+        total_source_faces += face_count
+        if face_count <= 0:
+            continue
+        centers = np.asarray(mesh.triangles_center, dtype=np.float32)
+        rgb = _trimesh_face_colors(mesh)
+        areas = np.asarray(mesh.area_faces, dtype=np.float64)
+        count = min(face_count, per_mesh_budget)
+        if face_count > count:
+            weights = areas / areas.sum() if float(areas.sum()) > 0 else None
+            indices = rng.choice(face_count, size=count, replace=False, p=weights)
+            centers = centers[indices]
+            rgb = rgb[indices]
+            areas = areas[indices]
+        sampled_centers.append(centers)
+        sampled_rgb.append(rgb)
+        sampled_areas.append(areas)
+
+    centers = np.concatenate(sampled_centers, axis=0)
+    rgb = np.concatenate(sampled_rgb, axis=0)
+    areas = np.concatenate(sampled_areas, axis=0)
+    if len(centers) > max_cluster_samples:
+        weights = areas / areas.sum() if float(areas.sum()) > 0 else None
+        indices = rng.choice(len(centers), size=max_cluster_samples, replace=False, p=weights)
+        centers = centers[indices]
+        rgb = rgb[indices]
+        areas = areas[indices]
+
+    features = _source_palette_features(rgb)
+    cluster_count = max(2, min(int(palette_clusters or 8), len(features)))
+    centroids, raw_labels = _source_palette_kmeans(features, cluster_count, seed=seed)
+
+    total_area = float(areas.sum())
+    raw_stats = []
+    for raw_index in range(cluster_count):
+        mask = raw_labels == raw_index
+        area = float(areas[mask].sum())
+        color = np.median(rgb[mask], axis=0).astype(np.uint8) if mask.any() else np.array([128, 128, 128], dtype=np.uint8)
+        raw_stats.append({
+            'raw_cluster': int(raw_index),
+            'faces': int(mask.sum()),
+            'area': area,
+            'area_ratio': (area / total_area) if total_area else 0.0,
+            'rgb': color.tolist(),
+        })
+
+    kept = [s['raw_cluster'] for s in raw_stats if s['area_ratio'] >= float(min_cluster_ratio or 0.10)]
+    if not kept:
+        kept = [max(raw_stats, key=lambda s: s['area_ratio'])['raw_cluster']]
+    kept = sorted(kept, key=lambda idx: raw_stats[idx]['area_ratio'], reverse=True)
+    kept_centroids = centroids[kept]
+    palette = np.array([raw_stats[idx]['rgb'] for idx in kept], dtype=np.uint8)
+    raw_to_kept = {}
+    for raw_index in range(cluster_count):
+        distances = np.linalg.norm(kept_centroids - centroids[raw_index], axis=1)
+        raw_to_kept[raw_index] = int(np.argmin(distances))
+    source_labels = np.array([raw_to_kept[int(raw)] for raw in raw_labels], dtype=np.int32)
+
+    if len(centers) > max_source_samples:
+        indices = rng.choice(len(centers), size=max_source_samples, replace=False)
+        transfer_centers = centers[indices]
+        transfer_labels = source_labels[indices]
+    else:
+        transfer_centers = centers
+        transfer_labels = source_labels
+
+    scene = trimesh.Scene()
+    total_faces = 0
+    target_label_counts = [0 for _ in palette]
+    for index, mesh in enumerate(_trimesh_scene_meshes_with_transform(target_obj)):
+        face_count = int(len(mesh.faces))
+        if face_count <= 0:
+            continue
+        total_faces += face_count
+        if total_faces > max_target_faces:
+            raise ValueError(f'Target LOD has more than SOURCE_PALETTE_MAX_TARGET_FACES ({max_target_faces}) faces.')
+        labels = _source_palette_nearest_labels(
+            np.asarray(mesh.triangles_center, dtype=np.float32),
+            np.asarray(transfer_centers, dtype=np.float32),
+            np.asarray(transfer_labels, dtype=np.int32),
+            chunk_size=chunk_size,
+        )
+        for label in labels:
+            target_label_counts[int(label)] += 1
+        face_colors = palette[np.clip(labels, 0, len(palette) - 1)]
+        rgba = np.concatenate(
+            [face_colors.astype(np.uint8), np.full((len(face_colors), 1), 255, dtype=np.uint8)],
+            axis=1,
+        )
+        out = trimesh.Trimesh(
+            vertices=np.asarray(mesh.vertices),
+            faces=np.asarray(mesh.faces),
+            process=False,
+        )
+        out.visual = trimesh.visual.ColorVisuals(mesh=out, face_colors=rgba)
+        scene.add_geometry(out, node_name=f'source_palette_part_{index}')
+
+    if total_faces <= 0:
+        raise ValueError('No target faces available for auto-palette LOD recolor.')
+
+    out_io = io.BytesIO()
+    scene.export(out_io, file_type='glb')
+    return out_io.getvalue(), {
+        'mode': 'source_auto_palette',
+        'source_faces_total': int(total_source_faces),
+        'source_faces_sampled': int(len(centers)),
+        'source_faces_transfer_sampled': int(len(transfer_centers)),
+        'target_faces': int(total_faces),
+        'palette': palette.tolist(),
+        'palette_stats': [
+            {
+                'index': int(final_index),
+                'source_area_ratio': raw_stats[raw_index]['area_ratio'],
+                'target_faces': int(target_label_counts[final_index]),
+                'target_face_ratio': (target_label_counts[final_index] / total_faces) if total_faces else 0.0,
+                'rgb': palette[final_index].tolist(),
+                'merged_raw_clusters': [int(idx) for idx, mapped in raw_to_kept.items() if mapped == final_index],
+            }
+            for final_index, raw_index in enumerate(kept)
+        ],
+        'min_cluster_ratio': float(min_cluster_ratio or 0.10),
+        'palette_clusters': int(palette_clusters or 8),
+        'limits': {
+            'max_source_mb': int(max_source_bytes // 1024 // 1024),
+            'max_source_samples': int(max_source_samples),
+            'max_cluster_samples': int(max_cluster_samples),
+            'max_target_faces': int(max_target_faces),
+            'transfer_chunk': int(chunk_size),
+        },
+    }
+
+
 def _minimal_glb_bytes(gltf, bin_chunk=None):
     raw = json.dumps(gltf, separators=(',', ':')).encode('utf-8')
     json_chunk = raw + (b' ' * ((4 - len(raw) % 4) % 4))
@@ -556,14 +863,21 @@ def _lod_flat_material_color(raw=None):
     return fallback
 
 
-def _lod_levels_with_flat_color(color=None, accent_color=None):
+def _lod_levels_with_flat_color(color=None, accent_color=None, flat_material_mode=None, source_palette=False):
     levels = [dict(config) for config in LOD_OPTIMIZE_LEVELS]
     flat_color = _lod_flat_material_color(color)
     flat_accent_color = _lod_flat_material_color(accent_color or os.environ.get('LOD3_FLAT_ACCENT_COLOR') or '#d96a28')
+    requested_mode = str(flat_material_mode or '').strip().lower()
+    use_source_palette = _request_truthy(source_palette) or requested_mode in {'source_auto_palette', 'source-palette', 'palette'}
     for config in levels:
         if int(config.get('level') or -1) in {2, 3} and config.get('flat_material'):
             config['flat_material_color'] = flat_color
             config['flat_material_accent_color'] = flat_accent_color
+            if use_source_palette:
+                config['flat_material_mode'] = 'source_auto_palette'
+                config['palette_min_cluster_ratio'] = 0.10
+                config['palette_clusters'] = 8
+                config['role'] = str(config.get('role') or '').replace('two-color', 'source-palette') or 'far/source-palette-flat-fill'
     return levels
 
 
@@ -5851,11 +6165,15 @@ def _run_lod_optimizer(model, owner_id=None, levels=None):
             flat_material_mode = str(config.get('flat_material_mode') or '').strip().lower()
             flat_material_color = config.get('flat_material_color') or [0.30, 0.42, 0.20, 1.0]
             flat_material_accent_color = config.get('flat_material_accent_color') or [0.85, 0.28, 0.12, 1.0]
+            palette_min_cluster_ratio = float(config.get('palette_min_cluster_ratio') or 0.10)
+            palette_clusters = int(config.get('palette_clusters') or 8)
             out_path = os.path.join(workdir, f'lod{level}.glb')
             report_path = os.path.join(workdir, f'lod{level}.json')
             command_input_path = in_path
             flat_material_stage = None
+            source_palette_metadata = None
             needs_color_bucket_repack = flat_material and flat_material_mode == 'texture_color_buckets'
+            needs_source_palette_repack = flat_material and flat_material_mode == 'source_auto_palette'
             cmd = [
                 gltfpack_bin,
                 '-i', command_input_path,
@@ -5869,7 +6187,7 @@ def _run_lod_optimizer(model, owner_id=None, levels=None):
                 cmd.append('-sp')
             if config.get('aggressive'):
                 cmd.append('-sa')
-            if compression_mode == 'meshopt' and not needs_color_bucket_repack:
+            if compression_mode == 'meshopt' and not (needs_color_bucket_repack or needs_source_palette_repack):
                 cmd.append('-cc')
             if texture_limit:
                 cmd.extend(['-tc', '-tl', str(texture_limit)])
@@ -5921,6 +6239,50 @@ def _run_lod_optimizer(model, owner_id=None, levels=None):
                     report_path = flat_report_path
                 except Exception as e:
                     print(f"LOD {level} color bucket flatten fell back to single flat material: {e}", flush=True)
+
+            if needs_source_palette_repack:
+                try:
+                    with open(in_path, 'rb') as f:
+                        prepared_source_bytes = f.read()
+                    with open(out_path, 'rb') as f:
+                        simplified_bytes = f.read()
+                    palette_bytes, source_palette_metadata = _source_auto_palette_lod_glb(
+                        prepared_source_bytes,
+                        simplified_bytes,
+                        min_cluster_ratio=palette_min_cluster_ratio,
+                        palette_clusters=palette_clusters,
+                    )
+                    palette_flat_input_path = os.path.join(workdir, f'lod{level}-source-palette-input.glb')
+                    with open(palette_flat_input_path, 'wb') as f:
+                        f.write(palette_bytes)
+                    flat_material_stage = 'post_simplification_source_auto_palette'
+                    flat_report_path = os.path.join(workdir, f'lod{level}-source-palette.json')
+                    flat_cmd = [
+                        gltfpack_bin,
+                        '-i', palette_flat_input_path,
+                        '-o', out_path,
+                        '-r', flat_report_path,
+                    ]
+                    if compression_mode == 'meshopt':
+                        flat_cmd.append('-cc')
+                    flat_result = subprocess.run(
+                        flat_cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=300,
+                        check=False,
+                    )
+                    if flat_result.returncode != 0:
+                        msg = (flat_result.stderr or flat_result.stdout or 'gltfpack failed.').strip()
+                        raise RuntimeError(f'LOD {level} source palette repack: {msg[-1000:] or "gltfpack failed."}')
+                    report_path = flat_report_path
+                except Exception as e:
+                    source_palette_metadata = {
+                        'mode': 'source_auto_palette',
+                        'failed': True,
+                        'error': str(e)[:500],
+                    }
+                    print(f"LOD {level} source palette recolor fell back to single flat material: {e}", flush=True)
 
             if flat_material and flat_material_stage is None:
                 with open(out_path, 'rb') as f:
@@ -5983,6 +6345,7 @@ def _run_lod_optimizer(model, owner_id=None, levels=None):
                 'flat_material_accent_color': flat_material_accent_color if flat_material else None,
                 'flat_material_stage': flat_material_stage if flat_material else None,
                 'flat_material_segment_sample_count': len(segment_samples) if flat_material else 0,
+                'source_palette': source_palette_metadata if flat_material else None,
                 'target_vertices': config.get('target_vertices'),
                 'compression_mode': compression_mode,
                 'defaults_version': LOD_OPTIMIZE_DEFAULTS_VERSION,
@@ -6014,6 +6377,7 @@ def _run_lod_optimizer(model, owner_id=None, levels=None):
                 'flat_material_accent_color': flat_material_accent_color if flat_material else None,
                 'flat_material_stage': flat_material_stage if flat_material else None,
                 'flat_material_segment_sample_count': len(segment_samples) if flat_material else 0,
+                'source_palette': source_palette_metadata if flat_material else None,
                 'target_vertices': config.get('target_vertices'),
                 'compression_mode': compression_mode,
                 'original_size': original_size,
@@ -6085,12 +6449,28 @@ def _impostor_source_image_bytes(model, *, render_size=512):
     return png, 'server_render'
 
 
+def _impostor_mesh_source_bytes(model):
+    fs = current_app.config['FILE_STORE']
+    for level in (2, 1, 0, 3):
+        variant = ModelVariant.get(model.id, 'lod', level=level)
+        if not variant or not variant.file_id:
+            continue
+        try:
+            data = fs.get(variant.file_id).read()
+            if data and data[:4] == b'glTF':
+                return data, 'glb', f'lod{level}'
+        except Exception as e:
+            print(f"Impostor: could not read LOD{level} for {model.id}: {e}", flush=True)
+    data, view_fmt = model.get_viewable_data()
+    return data, view_fmt, 'viewable'
+
+
 def _octahedral_impostor_source_bytes(model, *, atlas_size=2048, grid_size=31):
     from app import render as render_mod
     if not render_mod.render_available():
         raise RuntimeError('Server render stack unavailable.')
     try:
-        data, view_fmt = model.get_viewable_data()
+        data, view_fmt, source_variant_kind = _impostor_mesh_source_bytes(model)
     except Exception as e:
         raise RuntimeError('No viewable mesh available for octahedral impostor generation.') from e
     if not data or data[:4] != b'glTF':
@@ -6103,12 +6483,13 @@ def _octahedral_impostor_source_bytes(model, *, atlas_size=2048, grid_size=31):
         oct_type='hemi',
         decompress=lambda b: _decompress_meshopt_glb_bytes(b),
     )
+    bake_metadata['source_variant_kind'] = source_variant_kind
     return png, 'octahedral_server_render', bake_metadata
 
 
-def _run_impostor_generator(model, owner_id=None, *, size=512):
+def _run_impostor_generator(model, owner_id=None, *, size=512, force=False):
     """Generate a far-field impostor texture under ModelVariant(kind=impostor)."""
-    if os.environ.get('AUTO_IMPOSTOR_GENERATE', '0').lower() in {'0', 'false', 'no', 'off'}:
+    if not force and os.environ.get('AUTO_IMPOSTOR_GENERATE', '0').lower() in {'0', 'false', 'no', 'off'}:
         return {
             'success': False,
             'skipped': True,
@@ -7800,6 +8181,8 @@ def rebuild_model_lods(model_id):
             levels=_lod_levels_with_flat_color(
                 data.get('lod3_flat_color'),
                 data.get('lod3_flat_accent_color'),
+                data.get('flat_material_mode'),
+                data.get('source_palette') or data.get('use_source_palette'),
             ),
         )
         lod_fields = _asset_lod_url_fields(model)
@@ -7817,6 +8200,41 @@ def rebuild_model_lods(model_id):
         import traceback
         traceback.print_exc()
         return jsonify({'error': str(e)[:500] or 'LOD rebuild failed'}), 500
+
+
+@api_bp.route('/model/<model_id>/impostor/rebuild', methods=['POST'])
+def rebuild_model_impostor(model_id):
+    """Rebuild only this model's impostor. Background generation remains off."""
+    try:
+        model = Model3D.get_by_id(model_id)
+        if not model:
+            return jsonify({'error': 'Model not found'}), 404
+
+        principal, service = _api_principal()
+        if not (principal or service):
+            return jsonify({'error': 'Authentication required'}), 401
+        if not (service or can_manage_model(principal, model)):
+            return jsonify({'error': 'Access denied'}), 403
+
+        data = _payload()
+        try:
+            size = max(128, min(2048, int(data.get('size') or 512)))
+        except (TypeError, ValueError):
+            size = 512
+        owner_id = principal.id if principal else model.user_id
+        result = _run_impostor_generator(model, owner_id, size=size, force=True)
+        lod_fields = _asset_lod_url_fields(model)
+        return jsonify({
+            'success': bool(result.get('success')),
+            'impostor_result': result,
+            'has_impostor': lod_fields.get('has_impostor'),
+            'impostor': lod_fields.get('impostor'),
+        })
+    except Exception as e:
+        print(f"API impostor rebuild error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)[:500] or 'Impostor rebuild failed'}), 500
 
 
 @api_bp.route('/model/<model_id>/optimize-game/<job_id>', methods=['GET'])

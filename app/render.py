@@ -47,7 +47,6 @@ def render_available():
 
 
 def _load_scene(glb_bytes, file_type):
-    import numpy as np
     import trimesh
 
     loaded = trimesh.load(
@@ -63,6 +62,26 @@ def _load_scene(glb_bytes, file_type):
     if all(getattr(g, 'is_empty', False) for g in scene.geometry.values()):
         raise RenderError('Asset geometry is empty.')
     return scene
+
+
+def _iter_scene_meshes(scene_tm):
+    import numpy as np
+    import trimesh
+
+    for node_name in scene_tm.graph.nodes_geometry:
+        try:
+            transform, geometry_name = scene_tm.graph[node_name]
+            geom = scene_tm.geometry.get(geometry_name)
+            if geom is None:
+                continue
+            if isinstance(geom, trimesh.Trimesh):
+                copied = geom.copy()
+                copied.apply_transform(np.asarray(transform, dtype=np.float64))
+                yield copied
+            else:
+                yield geom
+        except Exception as e:
+            print(f"Skipping transformed mesh during render: {e}")
 
 
 def render_glb_to_png(glb_bytes, file_type='glb', size=1024, *, decompress=None):
@@ -100,7 +119,7 @@ def render_glb_to_png(glb_bytes, file_type='glb', size=1024, *, decompress=None)
 
     scene = pyrender.Scene(bg_color=[1.0, 1.0, 1.0, 1.0], ambient_light=[0.35, 0.35, 0.35])
 
-    for geom in scene_tm.geometry.values():
+    for geom in _iter_scene_meshes(scene_tm):
         try:
             mesh = pyrender.Mesh.from_trimesh(geom, smooth=False)
             scene.add(mesh)
@@ -200,7 +219,7 @@ def render_glb_to_octahedral_atlas(
     transform[:3, :3] *= scale
     transform[:3, 3] = -center * scale
 
-    for geom in scene_tm.geometry.values():
+    for geom in _iter_scene_meshes(scene_tm):
         try:
             mesh = pyrender.Mesh.from_trimesh(geom, smooth=False)
             scene.add(mesh, pose=transform, parent_node=root)
