@@ -566,6 +566,111 @@ def _trimesh_face_colors(mesh):
     return np.full((len(mesh.faces), 3), 128, dtype=np.uint8)
 
 
+def _material_base_color_factor(gltf, material_index):
+    try:
+        material = (gltf.get('materials') or [])[int(material_index or 0)]
+        factor = ((material.get('pbrMetallicRoughness') or {}).get('baseColorFactor') or [1.0, 1.0, 1.0, 1.0])
+        return [max(0.0, min(1.0, float(factor[i] if i < len(factor) else 1.0))) for i in range(4)]
+    except Exception:
+        return [1.0, 1.0, 1.0, 1.0]
+
+
+def _source_palette_glb_face_color_batches(glb_bytes):
+    """Return per-primitive face colors from embedded GLB textures/materials.
+
+    Trimesh does not consistently expose GLB baseColorTexture images after
+    loading, especially once files have been produced by mixed optimization
+    pipelines. The LOD palette transfer needs the real source colors, so this
+    samples the GLB texture accessors directly and leaves geometry loading to
+    trimesh.
+    """
+    import numpy as np
+
+    try:
+        gltf, bin_chunk = _glb_json_and_bin(glb_bytes)
+    except Exception as e:
+        print(f"Source palette GLB color parse skipped: {e}", flush=True)
+        return []
+
+    batches = []
+    for mesh in gltf.get('meshes') or []:
+        for primitive in mesh.get('primitives') or []:
+            attributes = primitive.get('attributes') or {}
+            try:
+                positions, _position_component_type = _accessor_values(gltf, bin_chunk, attributes['POSITION'])
+                if primitive.get('indices') is not None:
+                    indices, _index_component_type = _accessor_values(gltf, bin_chunk, primitive.get('indices'))
+                    indices = [int(index) for index in indices]
+                else:
+                    indices = list(range(len(positions)))
+                face_count = max(0, len(indices) // 3)
+                if face_count <= 0:
+                    continue
+
+                material_index = primitive.get('material') or 0
+                factor = _material_base_color_factor(gltf, material_index)
+                texture = None
+                texture_transform = None
+                if 'TEXCOORD_0' in attributes:
+                    try:
+                        texture, texture_transform = _image_from_gltf_texture(gltf, bin_chunk, material_index)
+                    except Exception:
+                        texture = None
+                if texture is not None:
+                    width, height = texture.size
+                    uvs, _uv_component_type = _accessor_values(gltf, bin_chunk, attributes['TEXCOORD_0'])
+                    colors = []
+                    for tri_start in range(0, len(indices) - 2, 3):
+                        tri = indices[tri_start:tri_start + 3]
+                        triangle_uvs = [[float(uvs[index][0]), float(uvs[index][1])] for index in tri]
+                        uv = _apply_texture_transform([
+                            sum(point[0] for point in triangle_uvs) / 3.0,
+                            sum(point[1] for point in triangle_uvs) / 3.0,
+                        ], texture_transform)
+                        pixel = texture.getpixel((
+                            min(width - 1, max(0, int(uv[0] * width))),
+                            min(height - 1, max(0, int((1.0 - uv[1]) * height))),
+                        ))
+                        colors.append([
+                            int(max(0, min(255, round(pixel[0] * factor[0])))),
+                            int(max(0, min(255, round(pixel[1] * factor[1])))),
+                            int(max(0, min(255, round(pixel[2] * factor[2])))),
+                        ])
+                    batches.append(np.asarray(colors, dtype=np.uint8))
+                else:
+                    color = np.asarray([
+                        int(round(factor[0] * 255)),
+                        int(round(factor[1] * 255)),
+                        int(round(factor[2] * 255)),
+                    ], dtype=np.uint8)
+                    batches.append(np.tile(color, (face_count, 1)))
+            except Exception as e:
+                print(f"Source palette primitive color parse skipped: {e}", flush=True)
+                continue
+    return batches
+
+
+def _source_palette_pop_color_batch(color_batches, cursor, face_count):
+    import numpy as np
+
+    if cursor >= len(color_batches):
+        return None, cursor
+    current = color_batches[cursor]
+    if len(current) == face_count:
+        return current, cursor + 1
+    collected = []
+    total = 0
+    next_cursor = cursor
+    while next_cursor < len(color_batches) and total < face_count:
+        batch = color_batches[next_cursor]
+        collected.append(batch)
+        total += len(batch)
+        next_cursor += 1
+    if total == face_count and collected:
+        return np.concatenate(collected, axis=0), next_cursor
+    return None, cursor
+
+
 def _source_palette_features(rgb):
     import numpy as np
 
@@ -646,6 +751,8 @@ def _source_auto_palette_lod_glb(source_bytes, target_bytes, *, min_cluster_rati
     total_source_faces = 0
 
     source_meshes = list(_trimesh_scene_meshes_with_transform(source_obj))
+    source_color_batches = _source_palette_glb_face_color_batches(source_bytes)
+    source_color_cursor = 0
     if not source_meshes:
         raise ValueError('No source faces available for auto-palette LOD recolor.')
     per_mesh_budget = max(1, int(math.ceil(max_cluster_samples / max(1, len(source_meshes)))))
@@ -655,7 +762,9 @@ def _source_auto_palette_lod_glb(source_bytes, target_bytes, *, min_cluster_rati
         if face_count <= 0:
             continue
         centers = np.asarray(mesh.triangles_center, dtype=np.float32)
-        rgb = _trimesh_face_colors(mesh)
+        rgb, source_color_cursor = _source_palette_pop_color_batch(source_color_batches, source_color_cursor, face_count)
+        if rgb is None:
+            rgb = _trimesh_face_colors(mesh)
         areas = np.asarray(mesh.area_faces, dtype=np.float64)
         count = min(face_count, per_mesh_budget)
         if face_count > count:
@@ -8215,14 +8324,20 @@ def rebuild_model_lods(model_id):
                 source_palette,
             ),
         )
+        impostor_result = None
+        if _request_truthy(data.get('generate_impostor', True)):
+            impostor_result = _run_impostor_generator(model, owner_id, force=True)
         lod_fields = _asset_lod_url_fields(model)
         return jsonify({
             'success': True,
             'lod_result': result,
+            'impostor_result': impostor_result,
             'lod_variants': lod_fields.get('lod_variants') or [],
             'lod_summary': lod_fields.get('lod_summary'),
             'lod_ready': lod_fields.get('lod_ready'),
             'lod_status': lod_fields.get('lod_status'),
+            'has_impostor': lod_fields.get('has_impostor'),
+            'impostor': lod_fields.get('impostor'),
             'defaults_version': LOD_OPTIMIZE_DEFAULTS_VERSION,
         })
     except Exception as e:
