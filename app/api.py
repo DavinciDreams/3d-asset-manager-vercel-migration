@@ -8151,7 +8151,15 @@ def optimize_model_for_game(model_id):
         if not _can_access_model_as(model, principal, service):
             return jsonify({'error': 'Access denied'}), 403
 
-        data = _payload()
+        data = dict(_payload() or {})
+        if (
+            data.get('source_palette') is None
+            and data.get('use_source_palette') is None
+            and data.get('flat_material_mode') is None
+        ):
+            data['source_palette'] = True
+        if data.get('generate_impostor') is None:
+            data['generate_impostor'] = True
         try:
             settings = _normalize_game_optimization_settings(data)
         except ValueError as e:
@@ -8191,6 +8199,11 @@ def rebuild_model_lods(model_id):
             return jsonify({'error': 'LOD rebuild currently supports GLB/GLTF assets.'}), 400
 
         data = _payload()
+        source_palette = data.get('source_palette')
+        if source_palette is None:
+            source_palette = data.get('use_source_palette')
+        if source_palette is None and data.get('flat_material_mode') is None:
+            source_palette = True
         owner_id = principal.id if principal else model.user_id
         result = _run_lod_optimizer(
             model,
@@ -8199,7 +8212,7 @@ def rebuild_model_lods(model_id):
                 data.get('lod3_flat_color'),
                 data.get('lod3_flat_accent_color'),
                 data.get('flat_material_mode'),
-                data.get('source_palette') or data.get('use_source_palette'),
+                source_palette,
             ),
         )
         lod_fields = _asset_lod_url_fields(model)
