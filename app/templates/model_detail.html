@@ -1758,6 +1758,10 @@ document.addEventListener('DOMContentLoaded', function() {
                     return bits.join(' ');
                 }).join(', ') + '.'
                 : '';
+            const impostor = data.impostor_result || {};
+            const impostorText = impostor.success
+                ? ` Impostor: ${impostor.type || 'ready'}.`
+                : '';
             // Note when the optimize sourced the fixed-eyes version (variant
             // settings carry the flag; the job result may carry it too).
             const usedFixed = (data.source_is_fixed_eyes
@@ -1769,7 +1773,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 : (usedFixed ? ' (includes your fixed eyes &amp; blink)' : '');
             gameOptStatus.innerHTML =
                 `Game-optimized version ready: ${mb(optimizedSize)} MB from ${mb(data.original_size)} MB ` +
-                `(${savings.toFixed(1)}% smaller)${sourceNote}.${lodText} Reloading...`;
+                `(${savings.toFixed(1)}% smaller)${sourceNote}.${lodText}${impostorText} Reloading...`;
             // Attached to this model -- reveal the toggle + download entry in place.
             revealGameOptimized(optimizedSize, usedFixed, usedRigged);
             setTimeout(() => window.location.reload(), 900);
@@ -1816,7 +1820,9 @@ document.addEventListener('DOMContentLoaded', function() {
                         simplify_ratio: simplifyRatio,
                         compression_mode: compressionMode,
                         lod3_flat_color: lod3FlatColor,
-                        lod3_flat_accent_color: lod3FlatAccentColor
+                        lod3_flat_accent_color: lod3FlatAccentColor,
+                        source_palette: true,
+                        generate_impostor: true
                     })
                 });
                 const data = await parseGameOptimizeResponse(response);

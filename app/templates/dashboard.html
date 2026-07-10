@@ -659,7 +659,9 @@ async function optimizeModel(modelId, btn) {
             body: JSON.stringify({
                 texture_limit: 1024,
                 simplify_ratio: 0.85,
-                compression_mode: 'meshopt'
+                compression_mode: 'meshopt',
+                source_palette: true,
+                generate_impostor: true
             })
         });
         const data = await response.json().catch(() => ({}));

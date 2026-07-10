@@ -6585,11 +6585,17 @@ def _process_game_optimization_job(app, job_id):
                 levels=_lod_levels_with_flat_color(
                     (job.settings or {}).get('lod3_flat_color'),
                     (job.settings or {}).get('lod3_flat_accent_color'),
+                    (job.settings or {}).get('flat_material_mode'),
+                    (job.settings or {}).get('source_palette'),
                 ),
             )
             result['lod_result'] = lod_result
             try:
-                result['impostor_result'] = _run_impostor_generator(model, job.owner_id or model.user_id)
+                result['impostor_result'] = _run_impostor_generator(
+                    model,
+                    job.owner_id or model.user_id,
+                    force=_request_truthy((job.settings or {}).get('generate_impostor')),
+                )
             except Exception as e:
                 result['impostor_result'] = {
                     'success': False,
@@ -6755,6 +6761,17 @@ def _normalize_game_optimization_settings(data):
     if data.get('lod3_flat_accent_color') is not None:
         settings['lod3_flat_accent_color'] = data.get('lod3_flat_accent_color')
         settings['lod3_flat_material_accent_color'] = _lod_flat_material_color(data.get('lod3_flat_accent_color'))
+    if data.get('flat_material_mode') is not None:
+        mode = str(data.get('flat_material_mode') or '').strip().lower()
+        if mode not in {'', 'texture_color_buckets', 'source_auto_palette', 'source-palette', 'palette'}:
+            raise ValueError('flat_material_mode must be texture_color_buckets or source_auto_palette.')
+        settings['flat_material_mode'] = 'source_auto_palette' if mode in {'source-palette', 'palette'} else mode
+    if data.get('source_palette') is not None or data.get('use_source_palette') is not None:
+        settings['source_palette'] = _request_truthy(data.get('source_palette') if data.get('source_palette') is not None else data.get('use_source_palette'))
+        if settings['source_palette']:
+            settings['flat_material_mode'] = 'source_auto_palette'
+    if data.get('generate_impostor') is not None:
+        settings['generate_impostor'] = _request_truthy(data.get('generate_impostor'))
     return settings
 
 
