@@ -358,7 +358,7 @@ def get_openapi_spec(base_url=''):
                         'status': {'type': 'string', 'example': 'ready'},
                         'settings': {
                             'type': 'object',
-                            'description': 'LOD generation settings and runtime cost metadata. LOD1 targets mid/fill use with target_vertices=20000; LOD2 is a two-color flat fill for visible world placement when tiny textures break down; LOD3 is a tiny two-color flat proxy. Flat foliage color is controlled by LOD3_FLAT_COLOR / LOD_FLAT_COLOR. The impostor variant remains the preferred true far-distance representation.',
+                            'description': 'LOD generation settings and runtime cost metadata. LOD1 is a texture-preserving intermediate feature mesh using the validated simplify_ratio=0.30 and simplification_error=0.03 profile, targeting roughly 40000 vertices; LOD2 is an aggressive two-color flat fill targeting roughly 20000 vertices for visible world placement when tiny textures break down; LOD3 is a tiny two-color flat proxy. Targets are descriptive budgets while simplify_ratio controls gltfpack. Flat foliage color is controlled by LOD3_FLAT_COLOR / LOD_FLAT_COLOR. The impostor variant remains the preferred true far-distance representation.',
                         },
                         'mesh_stats': {'$ref': '#/components/schemas/MeshStats'},
                         'physical': {'type': 'object', 'nullable': True},

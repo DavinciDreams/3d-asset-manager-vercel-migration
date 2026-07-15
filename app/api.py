@@ -6772,7 +6772,7 @@ GAME_OPTIMIZE_PRESETS = {
     },
 }
 
-LOD_OPTIMIZE_DEFAULTS_VERSION = '2026-07-08-lod2-lod3-color-buckets'
+LOD_OPTIMIZE_DEFAULTS_VERSION = '2026-07-14-progressive-geometry-lods'
 LOD_OPTIMIZE_LEVELS = [
     {
         'level': 0,
@@ -6784,13 +6784,17 @@ LOD_OPTIMIZE_LEVELS = [
     {
         'level': 1,
         'texture_limit': 512,
-        'simplify_ratio': 0.18,
+        # This is the visible transition from the near mesh, so retain material
+        # boundaries while targeting a useful intermediate geometry tier. LOD1 previously
+        # shared LOD2's aggressive 0.18/-sa/-sp profile, which made both levels
+        # collapse to the same broken-looking mesh on detailed assets. The
+        # 0.30/0.03 profile was visually validated on the Clydesdale trial at
+        # 48,499 vertices versus the broken 5,304-vertex legacy LOD1.
+        'simplify_ratio': 0.3,
         'simplification_error': 0.03,
-        'aggressive': True,
-        'permissive': True,
-        'target_vertices': 20000,
+        'target_vertices': 40000,
         'compression_mode': 'meshopt',
-        'role': 'mid/fill',
+        'role': 'mid/feature',
     },
     {
         'level': 2,
