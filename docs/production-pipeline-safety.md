@@ -2,28 +2,29 @@
 
 The background asset reconciler can perform catalog-wide work: game optimization,
 LOD generation, impostor generation, media repair, conversion requeueing, and AI
-enrichment. Keep heavyweight jobs opt-in in production.
+enrichment. LOD generation is safe to leave enabled with a one-asset pass limit:
+all Gunicorn processes share one PostgreSQL advisory claim, so only one asset can
+generate LODs at a time.
 
 Recommended safe defaults:
 
 ```env
-PIPELINE_RECONCILER_WORKER=0
-AUTO_LOD_OPTIMIZE=0
+PIPELINE_RECONCILER_WORKER=1
+AUTO_LOD_OPTIMIZE=1
 AUTO_IMPOSTOR_GENERATE=0
 PIPELINE_LOD_LIMIT=1
 PIPELINE_IMPOSTOR_LIMIT=1
 ```
 
-Only enable `PIPELINE_RECONCILER_WORKER=1` when intentionally running background
-maintenance. If enabling LOD or impostor work, set container memory limits in the
-deployment platform first and start with single-job limits.
+Keep impostor generation opt-in and retain the deployment platform's container
+memory limit. `PIPELINE_LOD_LIMIT=1` controls how many stale candidates a pass
+selects; the database claim is the cross-process concurrency authority.
 
-Avoid bumping `LOD_OPTIMIZE_DEFAULTS_VERSION` in the same deploy that changes a
-heavy LOD implementation. A version bump makes existing variants stale and can
-cause the reconciler to rebuild many assets. Roll out new LOD modes behind an
-explicit flag or manual rebuild endpoint, test one asset, then widen.
+LOD staleness is versioned per level. Changing the LOD1 profile queues only LOD1;
+changing the far palette profiles queues only LOD2/LOD3. Do not remove the
+per-level `profile_version` values from `LOD_OPTIMIZE_LEVELS`.
 
-Manual single-asset palette and impostor rebuilds are the safe path:
+Manual single-asset palette and impostor rebuilds remain useful for inspection:
 
 ```bash
 curl -X POST "$BASE_URL/api/model/$MODEL_ID/lod/rebuild" \
@@ -48,3 +49,7 @@ SOURCE_PALETTE_TRANSFER_CHUNK=256
 ```
 
 Raise these only after watching memory for a representative asset.
+
+The dashboard's **Backfill stale LODs** action is stale-only. `force=true` remains
+available to API administrators for deliberate full regeneration, but the
+dashboard does not use it.
