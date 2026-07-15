@@ -2,7 +2,7 @@ from datetime import datetime, timedelta
 from flask import Blueprint, jsonify, request, current_app, make_response, url_for
 from flask_login import current_user, login_required
 from werkzeug.exceptions import HTTPException
-from sqlalchemy import cast, func, or_, select, String, true, update
+from sqlalchemy import cast, func, or_, select, String, text, true, update
 from app.db import asset_files, model_variants, models as model_rows, optimization_jobs
 from app.models import ApiKey, AssetBundle, Model3D, ModelVariant, User, WorldState
 from app.openapi import get_openapi_spec
@@ -21,6 +21,7 @@ import struct
 import threading
 import uuid
 import zipfile
+from contextlib import contextmanager
 
 api_bp = Blueprint('api', __name__)
 AI_ENRICHMENT_WORKER = None
@@ -28,6 +29,7 @@ AI_ENRICHMENT_KICK_THREAD = None
 AI_ENRICHMENT_KICK_LOCK = threading.Lock()
 PIPELINE_RECONCILER_WORKER = None
 PIPELINE_RECONCILER_LOCK = threading.Lock()
+_LOD_GENERATION_LOCAL_LOCK = threading.Lock()
 
 MIME_TYPES = {
     'glb': 'model/gltf-binary',
@@ -536,6 +538,22 @@ def _trimesh_image_array(image):
     return arr[:, :, :3].astype(np.uint8, copy=False)
 
 
+def _wrapped_triangle_uv_centroid(triangle_uvs):
+    """Average a triangle's UVs locally across repeat seams."""
+    anchor = triangle_uvs[0]
+    return [
+        (
+            sum(
+                float(anchor[axis])
+                + ((float(point[axis]) - float(anchor[axis]) + 0.5) % 1.0)
+                - 0.5
+                for point in triangle_uvs
+            ) / len(triangle_uvs)
+        ) % 1.0
+        for axis in (0, 1)
+    ]
+
+
 def _trimesh_face_colors(mesh):
     import numpy as np
 
@@ -545,7 +563,14 @@ def _trimesh_face_colors(mesh):
     image = _trimesh_image_array(getattr(material, 'image', None))
     if uv is not None and image is not None and len(uv):
         try:
-            face_uv = np.asarray(uv, dtype=np.float32)[np.asarray(mesh.faces, dtype=np.int64)].mean(axis=1)
+            triangle_uv = np.asarray(uv, dtype=np.float32)[np.asarray(mesh.faces, dtype=np.int64)]
+            # UV islands commonly cross the 0/1 repeat seam. A plain arithmetic
+            # mean turns e.g. (0.99, 0.01, 0.02) into 0.34 and samples an
+            # unrelated part of the texture. Unwrap around the first vertex,
+            # average locally, then wrap the centroid back into the texture.
+            anchor = triangle_uv[:, :1, :]
+            triangle_uv = anchor + ((triangle_uv - anchor + 0.5) % 1.0) - 0.5
+            face_uv = triangle_uv.mean(axis=1) % 1.0
             h, w = image.shape[:2]
             u = np.clip(face_uv[:, 0], 0.0, 1.0)
             v = np.clip(face_uv[:, 1], 0.0, 1.0)
@@ -623,10 +648,10 @@ def _source_palette_glb_face_color_batches(glb_bytes):
                     for tri_start in range(0, len(indices) - 2, 3):
                         tri = indices[tri_start:tri_start + 3]
                         triangle_uvs = [[float(uvs[index][0]), float(uvs[index][1])] for index in tri]
-                        uv = _apply_texture_transform([
-                            sum(point[0] for point in triangle_uvs) / 3.0,
-                            sum(point[1] for point in triangle_uvs) / 3.0,
-                        ], texture_transform)
+                        uv = _apply_texture_transform(
+                            _wrapped_triangle_uv_centroid(triangle_uvs),
+                            texture_transform,
+                        )
                         pixel = texture.getpixel((
                             min(width - 1, max(0, int(uv[0] * width))),
                             min(height - 1, max(0, int((1.0 - uv[1]) * height))),
@@ -6229,7 +6254,7 @@ def _prepare_lod_input_path(src_bytes, src_fmt, workdir):
     return out_path, source_prepare
 
 
-def _run_lod_optimizer(model, owner_id=None, levels=None):
+def _run_lod_optimizer_unclaimed(model, owner_id=None, levels=None):
     """Generate Tellus-facing LOD GLBs under the original asset id.
 
     Borrowed design choice from Hyperscape's LOD package: each level is
@@ -6452,12 +6477,15 @@ def _run_lod_optimizer(model, owner_id=None, levels=None):
                 'flat_material_mode': flat_material_mode or None,
                 'flat_material_color': flat_material_color if flat_material else None,
                 'flat_material_accent_color': flat_material_accent_color if flat_material else None,
+                'palette_min_cluster_ratio': palette_min_cluster_ratio if needs_source_palette_repack else None,
+                'palette_clusters': palette_clusters if needs_source_palette_repack else None,
                 'flat_material_stage': flat_material_stage if flat_material else None,
                 'flat_material_segment_sample_count': len(segment_samples) if flat_material else 0,
                 'source_palette': source_palette_metadata if flat_material else None,
                 'target_vertices': config.get('target_vertices'),
                 'compression_mode': compression_mode,
                 'defaults_version': LOD_OPTIMIZE_DEFAULTS_VERSION,
+                'profile_version': config.get('profile_version'),
                 'role': config.get('role'),
                 'gltfpack': {
                     'mode': compression_mode,
@@ -6473,6 +6501,7 @@ def _run_lod_optimizer(model, owner_id=None, levels=None):
             )
             variant_settings = {
                 'defaults_version': LOD_OPTIMIZE_DEFAULTS_VERSION,
+                'profile_version': config.get('profile_version'),
                 'level': level,
                 'role': config.get('role'),
                 'texture_limit': texture_limit,
@@ -6484,6 +6513,8 @@ def _run_lod_optimizer(model, owner_id=None, levels=None):
                 'flat_material_mode': flat_material_mode or None,
                 'flat_material_color': flat_material_color if flat_material else None,
                 'flat_material_accent_color': flat_material_accent_color if flat_material else None,
+                'palette_min_cluster_ratio': palette_min_cluster_ratio if needs_source_palette_repack else None,
+                'palette_clusters': palette_clusters if needs_source_palette_repack else None,
                 'flat_material_stage': flat_material_stage if flat_material else None,
                 'flat_material_segment_sample_count': len(segment_samples) if flat_material else 0,
                 'source_palette': source_palette_metadata if flat_material else None,
@@ -6530,6 +6561,53 @@ def _run_lod_optimizer(model, owner_id=None, levels=None):
         }
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
+
+
+class LODGenerationBusy(RuntimeError):
+    pass
+
+
+@contextmanager
+def _lod_generation_claim():
+    """Hold the one global LOD generator slot.
+
+    Gunicorn starts the reconciler in more than one process, so a threading
+    lock alone does not protect production. PostgreSQL advisory locks are tied
+    to the checked-out connection and are released automatically if a worker
+    dies. SQLite tests and single-process development use the local lock.
+    """
+    engine = current_app.config['DB_ENGINE']
+    if engine.dialect.name != 'postgresql':
+        acquired = _LOD_GENERATION_LOCAL_LOCK.acquire(blocking=False)
+        try:
+            yield acquired
+        finally:
+            if acquired:
+                _LOD_GENERATION_LOCAL_LOCK.release()
+        return
+
+    connection = engine.connect()
+    acquired = False
+    try:
+        acquired = bool(connection.execute(
+            text('SELECT pg_try_advisory_lock(:namespace, :slot)'),
+            {'namespace': 1279544644, 'slot': 1},
+        ).scalar())
+        yield acquired
+    finally:
+        if acquired:
+            connection.execute(
+                text('SELECT pg_advisory_unlock(:namespace, :slot)'),
+                {'namespace': 1279544644, 'slot': 1},
+            )
+        connection.close()
+
+
+def _run_lod_optimizer(model, owner_id=None, levels=None):
+    with _lod_generation_claim() as acquired:
+        if not acquired:
+            raise LODGenerationBusy('Another LOD asset is already being generated.')
+        return _run_lod_optimizer_unclaimed(model, owner_id, levels=levels)
 
 
 def _impostor_source_image_bytes(model, *, render_size=512):
@@ -6776,6 +6854,7 @@ LOD_OPTIMIZE_DEFAULTS_VERSION = '2026-07-14-progressive-geometry-lods'
 LOD_OPTIMIZE_LEVELS = [
     {
         'level': 0,
+        'profile_version': 'lod0-near-v1',
         'texture_limit': 1024,
         'simplify_ratio': 0.85,
         'compression_mode': 'meshopt',
@@ -6783,6 +6862,7 @@ LOD_OPTIMIZE_LEVELS = [
     },
     {
         'level': 1,
+        'profile_version': 'lod1-progressive-v2',
         'texture_limit': 512,
         # This is the visible transition from the near mesh, so retain material
         # boundaries while targeting a useful intermediate geometry tier. LOD1 previously
@@ -6806,27 +6886,33 @@ LOD_OPTIMIZE_LEVELS = [
         'aggressive': True,
         'permissive': True,
         'flat_material': True,
-        'flat_material_mode': 'texture_color_buckets',
+        'profile_version': 'lod2-source-palette-v2',
+        'flat_material_mode': 'source_auto_palette',
         'flat_material_color': _lod_flat_material_color(),
         'flat_material_accent_color': _lod_flat_material_color(os.environ.get('LOD3_FLAT_ACCENT_COLOR') or '#d96a28'),
         'target_vertices': 20000,
         'compression_mode': 'meshopt',
-        'role': 'far/two-color-flat-fill',
+        'palette_min_cluster_ratio': 0.04,
+        'palette_clusters': 8,
+        'role': 'far/source-palette-flat-fill',
     },
     {
         'level': 3,
+        'profile_version': 'lod3-source-palette-v2',
         'texture_limit': 0,
         'simplify_ratio': 0.015,
         'simplification_error': 0.08,
         'aggressive': True,
         'permissive': True,
         'flat_material': True,
-        'flat_material_mode': 'texture_color_buckets',
+        'flat_material_mode': 'source_auto_palette',
         'flat_material_color': _lod_flat_material_color(),
         'flat_material_accent_color': _lod_flat_material_color(os.environ.get('LOD3_FLAT_ACCENT_COLOR') or '#d96a28'),
         'target_vertices': 500,
         'compression_mode': 'meshopt',
-        'role': 'ultra-far/two-color-flat-proxy',
+        'palette_min_cluster_ratio': 0.06,
+        'palette_clusters': 6,
+        'role': 'ultra-far/source-palette-flat-proxy',
     },
 ]
 
@@ -7526,7 +7612,35 @@ def _lod_variant_current(model, config):
     if not variant or not variant.file_id:
         return False
     settings = variant.settings or {}
-    return settings.get('defaults_version') == LOD_OPTIMIZE_DEFAULTS_VERSION
+    profile_version = config.get('profile_version')
+    if settings.get('profile_version'):
+        return settings.get('profile_version') == profile_version
+
+    # Compatibility for variants created before per-level versioning. Compare
+    # the actual generation profile so changing LOD1 does not invalidate LOD0,
+    # and changing the far-palette path does not blindly rebuild every level.
+    comparable = (
+        'texture_limit', 'simplify_ratio', 'simplification_error',
+        'aggressive', 'permissive', 'flat_material', 'flat_material_mode',
+        'palette_min_cluster_ratio', 'palette_clusters', 'compression_mode',
+    )
+    for key in comparable:
+        expected = config.get(key)
+        actual = settings.get(key)
+        if key in {'aggressive', 'permissive', 'flat_material'}:
+            expected, actual = bool(expected), bool(actual)
+        elif expected is None and actual in (None, ''):
+            continue
+        if actual != expected:
+            return False
+    return True
+
+
+def _lod_stale_levels(model, *, force=False):
+    return [
+        config for config in LOD_OPTIMIZE_LEVELS
+        if force or not _lod_variant_current(model, config)
+    ]
 
 
 def _lod_variants_complete(model):
@@ -7551,15 +7665,19 @@ def _optimize_missing_lod_variants(limit=2, *, force=False):
         if _is_rigged_or_avatar(model):
             result['skipped'] += 1
             continue
-        if not force and _lod_variants_complete(model):
+        levels = _lod_stale_levels(model, force=force)
+        if not levels:
             result['skipped'] += 1
             continue
-        todo.append(model)
+        todo.append((model, levels))
     result['remaining'] = max(0, len(todo) - limit)
-    for model in todo[:limit]:
+    for model, levels in todo[:limit]:
         try:
-            _run_lod_optimizer(model, model.user_id)
+            _run_lod_optimizer(model, model.user_id, levels=levels)
             result['optimized'] += 1
+        except LODGenerationBusy:
+            result['busy'] = result.get('busy', 0) + 1
+            result['remaining'] += 1
         except Exception as e:
             print(f"Pipeline LOD optimize failed for {model.id}: {str(e)[:200]}", flush=True)
             result['failed'] += 1
@@ -8081,22 +8199,27 @@ def _run_lod_backfill(app, *, limit=None, force=False):
                 if _is_rigged_or_avatar(model):
                     skipped += 1
                     continue
-                if not force and _lod_variants_complete(model):
+                levels = _lod_stale_levels(model, force=force)
+                if not levels:
                     skipped += 1
                     continue
-                todo.append(model)
+                todo.append((model, levels))
             if limit:
                 todo = todo[:max(1, int(limit))]
             with _LOD_BACKFILL_LOCK:
                 _lod_backfill_state['total'] = len(todo)
                 _lod_backfill_state['skipped'] = skipped
-            for model in todo:
+            for model, levels in todo:
                 with _LOD_BACKFILL_LOCK:
                     _lod_backfill_state['current'] = model.name or model.id
                 try:
-                    _run_lod_optimizer(model, model.user_id)
+                    _run_lod_optimizer(model, model.user_id, levels=levels)
                     with _LOD_BACKFILL_LOCK:
                         _lod_backfill_state['done'] += 1
+                except LODGenerationBusy:
+                    with _LOD_BACKFILL_LOCK:
+                        _lod_backfill_state['skipped'] += 1
+                        _lod_backfill_state['last_error'] = 'LOD generator is busy; the next reconciler pass will retry this asset.'
                 except Exception as e:
                     print(f"LOD backfill failed for {model.id}: {e}", flush=True)
                     with _LOD_BACKFILL_LOCK:
@@ -8330,7 +8453,16 @@ def rebuild_model_lods(model_id):
         )
         impostor_result = None
         if _request_truthy(data.get('generate_impostor', True)):
-            impostor_result = _run_impostor_generator(model, owner_id, force=True)
+            try:
+                impostor_result = _run_impostor_generator(model, owner_id, force=True)
+            except Exception as e:
+                # LODs are already valid at this point. An unavailable renderer
+                # must not turn a successful geometry rebuild into HTTP 500.
+                impostor_result = {
+                    'success': False,
+                    'source_model_id': model.id,
+                    'error': str(e)[:1000],
+                }
         lod_fields = _asset_lod_url_fields(model)
         return jsonify({
             'success': True,

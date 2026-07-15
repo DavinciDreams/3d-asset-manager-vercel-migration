@@ -149,7 +149,7 @@
                 </button>
                 <button type="button" id="lod-backfill-btn"
                         class="bg-indigo-600 text-white px-4 py-2 rounded-lg font-semibold hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed">
-                    <i class="fas fa-layer-group mr-2"></i>Run LOD backfill
+                    <i class="fas fa-layer-group mr-2"></i>Backfill stale LODs
                 </button>
                 <button type="button" id="pipeline-reconcile-btn"
                         class="bg-slate-900 text-white px-4 py-2 rounded-lg font-semibold hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed">
@@ -784,8 +784,8 @@ async function pollOptimizeJob(statusUrl, modelId) {
     document.addEventListener('DOMContentLoaded', () => fetchStatus().catch(() => {}));
 })();
 
-// Admin LOD backfill. Generates Tellus-facing LOD0/1/2/3 variants under each
-// original model id, so Tellus can use its stable asset LOD URLs.
+// Admin LOD backfill. Generates only stale Tellus-facing levels under each
+// original model id; the server serializes heavy generation across workers.
 (function () {
     const runBtn = document.getElementById('lod-backfill-btn');
     const wrap = document.getElementById('lod-backfill-status');
@@ -841,7 +841,7 @@ async function pollOptimizeJob(statusUrl, modelId) {
         error.textContent = '';
         wrap.classList.remove('hidden');
         try {
-            const response = await fetch('/api/admin/lod-backfill?force=true', {
+            const response = await fetch('/api/admin/lod-backfill', {
                 method: 'POST',
                 headers: { 'Accept': 'application/json' },
             });

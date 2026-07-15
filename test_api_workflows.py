@@ -146,12 +146,12 @@ def test_asset_admin_dashboard_can_start_conversion_backfill(monkeypatch):
     assert login.status_code == 200
     html = login.get_data(as_text=True)
     assert "Run conversion backfill" in html
-    assert "Run LOD backfill" in html
+    assert "Backfill stale LODs" in html
     assert "Repair pipeline" in html
     assert "Import FBX avatars" in html
     assert "Check media queue" in html
     assert "/api/admin/conversion-backfill?force=true" in html
-    assert "/api/admin/lod-backfill?force=true" in html
+    assert "fetch('/api/admin/lod-backfill'" in html
     assert "/api/admin/lod-backfill/status" in html
     assert "/api/admin/fbx-avatar-import?tag=robot" in html
     assert "/api/admin/pipeline/status" in html
@@ -173,7 +173,7 @@ def test_asset_admin_dashboard_can_start_conversion_backfill(monkeypatch):
     import shutil
 
     monkeypatch.setattr(shutil, "which", lambda name: "gltfpack" if name == "gltfpack" else None)
-    monkeypatch.setattr(api, "_run_lod_optimizer", lambda model, owner_id=None: {"success": True})
+    monkeypatch.setattr(api, "_run_lod_optimizer", lambda model, owner_id=None, levels=None: {"success": True})
     lod_start = client.post("/api/admin/lod-backfill?sync=true&force=true&limit=1")
     assert lod_start.status_code == 200, lod_start.get_json()
     lod_status = lod_start.get_json()
@@ -192,8 +192,9 @@ def test_lod_backfill_refreshes_stale_defaults_version(monkeypatch):
 
     app = create_app()
     calls = []
+    monkeypatch.setenv("AUTO_LOD_OPTIMIZE", "1")
     monkeypatch.setattr(shutil, "which", lambda name: "gltfpack" if name == "gltfpack" else None)
-    monkeypatch.setattr(api, "_run_lod_optimizer", lambda model, owner_id=None: calls.append(model.id) or {"success": True})
+    monkeypatch.setattr(api, "_run_lod_optimizer", lambda model, owner_id=None, levels=None: calls.append((model.id, [item['level'] for item in levels])) or {"success": True})
 
     with app.app_context():
         owner = _ensure_user("stale-lod-owner")
@@ -232,7 +233,63 @@ def test_lod_backfill_refreshes_stale_defaults_version(monkeypatch):
         result = api._optimize_missing_lod_variants(limit=5)
 
     assert result["optimized"] == 1
-    assert calls == [model.id]
+    assert calls == [(model.id, [0, 1, 2, 3])]
+
+
+def test_lod_staleness_is_versioned_per_level():
+    import app.api as api
+
+    app = create_app()
+    with app.app_context():
+        owner = _ensure_user("per-level-lod-owner")
+        source = _minimal_glb({"asset": {"version": "2.0"}, "scene": 0})
+        model = Model3D(
+            name="Per-level LOD Target", file_format="glb", file_size=len(source),
+            user_id=owner.id, is_public=True,
+            gridfs_file_id=app.config["FILE_STORE"].put(
+                source, filename="per-level.glb", content_type="model/gltf-binary", metadata={}
+            ),
+            asset_types=[],
+        ).save()
+        for config in api.LOD_OPTIMIZE_LEVELS:
+            level = config["level"]
+            ModelVariant.upsert(
+                model.id, "lod",
+                str(app.config["FILE_STORE"].put(
+                    source, filename=f"per-level-lod{level}.glb",
+                    content_type="model/gltf-binary", metadata={},
+                )),
+                level=level, file_format="glb", size=len(source),
+                settings={"profile_version": config["profile_version"]},
+            )
+        lod1 = ModelVariant.get(model.id, "lod", level=1)
+        ModelVariant.upsert(
+            model.id, "lod", lod1.file_id, level=1, file_format="glb",
+            size=lod1.size, settings={"profile_version": "lod1-old-profile"},
+        )
+
+        assert [item["level"] for item in api._lod_stale_levels(model)] == [1]
+
+
+def test_wrapped_uv_centroid_stays_on_repeat_seam():
+    import app.api as api
+
+    centroid = api._wrapped_triangle_uv_centroid([
+        [0.99, 0.25], [0.01, 0.25], [0.02, 0.25],
+    ])
+    assert centroid[0] < 0.02 or centroid[0] > 0.98
+    assert centroid[1] == pytest.approx(0.25)
+
+
+def test_lod_generation_claim_allows_only_one_local_worker():
+    import app.api as api
+
+    app = create_app()
+    with app.app_context():
+        with api._lod_generation_claim() as first:
+            with api._lod_generation_claim() as second:
+                assert first is True
+                assert second is False
 
 
 def test_pipeline_reconciler_reports_impostor_generation(monkeypatch):
@@ -1003,6 +1060,14 @@ def test_lod_optimizer_generates_levels_from_original_asset(monkeypatch):
         return Result()
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        api,
+        "_source_auto_palette_lod_glb",
+        lambda source_bytes, target_bytes, **kwargs: (
+            target_bytes,
+            {"mode": "source_auto_palette", "palette": [[64, 48, 32]]},
+        ),
+    )
 
     with app.app_context():
         owner = _ensure_user("lod-opt-owner")
@@ -1048,8 +1113,8 @@ def test_lod_optimizer_generates_levels_from_original_asset(monkeypatch):
     assert "-tl" not in simplify_calls[3]
     assert all(cmd[cmd.index("-i") + 1].endswith("input.glb") for cmd in simplify_calls)
     assert len(repack_calls) == 2
-    assert repack_calls[0][repack_calls[0].index("-i") + 1].endswith("lod2-flat-input.glb")
-    assert repack_calls[1][repack_calls[1].index("-i") + 1].endswith("lod3-flat-input.glb")
+    assert repack_calls[0][repack_calls[0].index("-i") + 1].endswith("lod2-source-palette-input.glb")
+    assert repack_calls[1][repack_calls[1].index("-i") + 1].endswith("lod3-source-palette-input.glb")
     assert lod0.settings["role"] == "near/game"
     assert lod1.settings["texture_limit"] == 512
     assert lod1.settings["simplify_ratio"] == 0.3
@@ -1063,22 +1128,23 @@ def test_lod_optimizer_generates_levels_from_original_asset(monkeypatch):
     assert lod2.settings["aggressive"] is True
     assert lod2.settings["permissive"] is True
     assert lod2.settings["flat_material"] is True
-    assert lod2.settings["flat_material_mode"] == "texture_color_buckets"
+    assert lod2.settings["flat_material_mode"] == "source_auto_palette"
     assert lod2.settings["flat_material_color"] == [0.30, 0.42, 0.20, 1.0]
     assert lod2.settings["flat_material_accent_color"] == [0xd9 / 255, 0x6a / 255, 0x28 / 255, 1.0]
-    assert lod2.settings["flat_material_stage"] == "post_simplification"
-    assert lod2.settings["role"] == "far/two-color-flat-fill"
+    assert lod2.settings["flat_material_stage"] == "post_simplification_source_auto_palette"
+    assert lod2.settings["source_palette"]["palette"] == [[64, 48, 32]]
+    assert lod2.settings["role"] == "far/source-palette-flat-fill"
     assert lod3.settings["texture_limit"] == 0
     assert lod3.settings["simplify_ratio"] == 0.015
     assert lod3.settings["target_vertices"] == 500
     assert lod3.settings["aggressive"] is True
     assert lod3.settings["permissive"] is True
     assert lod3.settings["flat_material"] is True
-    assert lod3.settings["flat_material_mode"] == "texture_color_buckets"
+    assert lod3.settings["flat_material_mode"] == "source_auto_palette"
     assert lod3.settings["flat_material_color"] == [0.30, 0.42, 0.20, 1.0]
     assert lod3.settings["flat_material_accent_color"] == [0xd9 / 255, 0x6a / 255, 0x28 / 255, 1.0]
-    assert lod3.settings["flat_material_stage"] == "post_simplification"
-    assert lod3.settings["role"] == "ultra-far/two-color-flat-proxy"
+    assert lod3.settings["flat_material_stage"] == "post_simplification_source_auto_palette"
+    assert lod3.settings["role"] == "ultra-far/source-palette-flat-proxy"
     assert stored_lod2.filename.endswith("-lod2.glb")
 
 
@@ -1416,6 +1482,7 @@ def test_impostor_generator_prefers_octahedral_atlas(monkeypatch):
     from app import render as render_mod
 
     app = create_app()
+    monkeypatch.setenv("AUTO_IMPOSTOR_GENERATE", "1")
     monkeypatch.setattr(render_mod, "render_available", lambda: True)
     monkeypatch.setattr(
         render_mod,
@@ -1479,6 +1546,7 @@ def test_impostor_generator_falls_back_to_thumbnail_billboard(monkeypatch):
     import app.api as api
 
     app = create_app()
+    monkeypatch.setenv("AUTO_IMPOSTOR_GENERATE", "1")
     monkeypatch.setattr(api, "_octahedral_impostor_source_bytes", lambda model: (_ for _ in ()).throw(RuntimeError("no renderer")))
     monkeypatch.setattr(
         api,
@@ -3116,7 +3184,7 @@ def test_game_optimization_job_generates_lods_for_one_model(monkeypatch):
         )
         return {"success": True, "source_model_id": model.id}
 
-    def fake_impostor_generator(model, owner_id=None):
+    def fake_impostor_generator(model, owner_id=None, *, force=False):
         generated["impostor_model_id"] = model.id
         generated["impostor_owner_id"] = owner_id
         return {
